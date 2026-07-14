@@ -42,6 +42,9 @@ Browser/
 chromedriver.exe
 ngrok.exe
 
+# Test helpers
+test_update/
+
 # Secrets
 service_account.json
 

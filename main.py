@@ -60,6 +60,7 @@ from updater import GitHubReleaseUpdater, get_current_version
 from updater_config import load_updater_config, save_updater_config
 import logging
 import sys
+import zipfile
 import time
 import threading
 from selenium.common.exceptions import (
@@ -3021,10 +3022,10 @@ def _first_run_download_check():
     """Kiểm tra và tải tài nguyên thiếu (Browser, ngrok.exe, service_account.json)."""
     from version import RESOURCE_ASSETS
     missing = {}
-    for local_name, asset_key in RESOURCE_ASSETS.items():
+    for local_name, info in RESOURCE_ASSETS.items():
         path = app_base_dir() / local_name
         if not path.exists():
-            missing[local_name] = asset_key
+            missing[local_name] = info
 
     if not missing:
         return
@@ -3037,12 +3038,12 @@ def _first_run_download_check():
 
     dlg = ctk.CTkToplevel(root)
     dlg.title("Đang tải tài nguyên lần đầu...")
-    dlg.geometry("420x130")
+    dlg.geometry("480x140")
     dlg.grab_set()
     dlg.resizable(False, False)
     label = ctk.CTkLabel(dlg, text="Đang tải...", font=("", 13))
     label.pack(pady=(16, 8))
-    progress = ctk.CTkProgressBar(dlg, width=340)
+    progress = ctk.CTkProgressBar(dlg, width=380)
     progress.pack(pady=8)
     progress.set(0)
 
@@ -3064,20 +3065,51 @@ def _first_run_download_check():
 
     def _run():
         try:
-            updater = GitHubReleaseUpdater(
-                app_base_dir(), GITHUB_REPO_OWNER, GITHUB_REPO_NAME,
-                log_func=lambda m: _update_status(m, 0.1),
-            )
-            for i, (local_name, asset_key) in enumerate(missing.items()):
-                _update_status(f"Đang tải {local_name}...", (i + 0.5) / len(missing))
-                url = f"https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/latest/download/{local_name}"
-                if asset_key:
-                    url = f"https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/latest/download/{asset_key}.zip"
-                dest = app_base_dir() / local_name
-                updater.download_asset(url, dest)
-                _update_status(f"Đã tải {local_name}.", (i + 1) / len(missing))
+            tag = f"v{__version__}"
+            base_url = f"https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/download/{tag}"
+            total = len(missing)
+            for i, (local_name, info) in enumerate(missing.items()):
+                _update_status(f"Đang tải {local_name}...", (i + 0.1) / total)
+                asset_name = info["asset"].format(version=__version__)
+                url = f"{base_url}/{asset_name}"
+
+                if info["type"] == "zip_dir":
+                    temp_dir = app_base_dir() / "temp_dl" / "resources"
+                    temp_dir.mkdir(parents=True, exist_ok=True)
+                    zip_path = temp_dir / asset_name
+                    requests.get(url, stream=True, timeout=30).raise_for_status()
+                    updater = GitHubReleaseUpdater(app_base_dir(), GITHUB_REPO_OWNER, GITHUB_REPO_NAME)
+                    updater.download_asset(url, zip_path)
+                    _update_status(f"Đang giải nén {local_name}...", (i + 0.6) / total)
+                    extract_temp = temp_dir / f"extract_{local_name}"
+                    shutil.rmtree(extract_temp, ignore_errors=True)
+                    extract_temp.mkdir(parents=True, exist_ok=True)
+                    with zipfile.ZipFile(zip_path, "r") as zf:
+                        zf.extractall(extract_temp)
+                    dest = app_base_dir() / local_name
+                    shutil.rmtree(dest, ignore_errors=True)
+                    items = list(extract_temp.iterdir())
+                    if len(items) == 1 and items[0].is_dir():
+                        shutil.copytree(items[0], dest)
+                    else:
+                        shutil.copytree(extract_temp, dest)
+                    shutil.rmtree(extract_temp, ignore_errors=True)
+                    zip_path.unlink(missing_ok=True)
+                    for validate_path in info.get("validate", []):
+                        if not (app_base_dir() / validate_path).exists():
+                            raise RuntimeError(f"Thiếu file bắt buộc: {validate_path}")
+                else:
+                    updater = GitHubReleaseUpdater(app_base_dir(), GITHUB_REPO_OWNER, GITHUB_REPO_NAME)
+                    dest = app_base_dir() / local_name
+                    updater.download_asset(url, dest)
+                    if not dest.exists() or dest.stat().st_size == 0:
+                        raise RuntimeError(f"Tải {local_name} thất bại: file rỗng hoặc không tồn tại.")
+
+                _update_status(f"Đã tải {local_name}.", (i + 1) / total)
             _update_status("Hoàn tất.", 1.0)
             root.after(500, lambda: _done(True, ""))
+        except requests.RequestException as e:
+            root.after(0, lambda: _done(False, f"Lỗi mạng: {e}"))
         except Exception as e:
             root.after(0, lambda: _done(False, str(e)))
 
