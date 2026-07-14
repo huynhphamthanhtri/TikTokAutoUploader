@@ -192,16 +192,7 @@ def _background_check_callback(result, on_update, on_error, on_current):
 
 
 def run_background_check(repo_owner, repo_name, token, app_root, on_update, on_error, on_current, schedule=None):
-    cfg = load_updater_config()
-    now_epoch = int(time.time())
-    last_check = int(cfg.get("last_check_epoch", 0))
-    skip = str(cfg.get("skip_version", "")).strip()
-    if not is_configured(cfg):
-        return
-    if now_epoch - last_check < 21600:
-        return
-    cfg["last_check_epoch"] = now_epoch
-    save_updater_config(cfg)
+    skip = str(load_updater_config().get("skip_version", "")).strip()
 
     def _run():
         try:

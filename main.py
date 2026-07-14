@@ -55,9 +55,9 @@ from config_store import (
 )
 import youtube_monitor
 from youtube_monitor.activity import append_activity, clear_activity_log, get_activity_logs, get_activity_mtime, get_activity_stats, lookup_download
-from version import __version__ as CURRENT_VERSION, APP_NAME
+from version import __version__ as CURRENT_VERSION, APP_NAME, GITHUB_REPO_OWNER, GITHUB_REPO_NAME
 from updater import GitHubReleaseUpdater, get_current_version
-from updater_config import load_updater_config, save_updater_config, is_configured, mask_token
+from updater_config import load_updater_config, save_updater_config
 import logging
 import sys
 import time
@@ -1465,6 +1465,7 @@ def require_license_then_boot():
         update_status("License OK. Hệ thống sẵn sàng.")
         _start_youtube_monitor_safe()
         threading.Thread(target=_license_watchdog, daemon=True).start()
+        root.after(500, _first_run_download_check)
         root.after(5000, _run_background_update_check)
 
     root.after(100, lambda: _license_dialog(on_success=_after_ok))
@@ -3016,28 +3017,94 @@ def _refresh_status_bar():
     except Exception:
         pass
 
-def _run_background_update_check():
-    cfg = load_updater_config()
-    if not is_configured(cfg):
+def _first_run_download_check():
+    """Kiểm tra và tải tài nguyên thiếu (Browser, ngrok.exe, service_account.json)."""
+    from version import RESOURCE_ASSETS
+    missing = {}
+    for local_name, asset_key in RESOURCE_ASSETS.items():
+        path = app_base_dir() / local_name
+        if not path.exists():
+            missing[local_name] = asset_key
+
+    if not missing:
         return
-    owner = cfg.get("repo_owner", "").strip()
-    name = cfg.get("repo_name", "").strip()
-    token = cfg.get("github_token", "").strip()
+
+    if not messagebox.askyesno(
+        "Tải tài nguyên",
+        "Cần tải tài nguyên lần đầu (Browser, ngrok, service_account). Tiếp tục?",
+    ):
+        return
+
+    dlg = ctk.CTkToplevel(root)
+    dlg.title("Đang tải tài nguyên lần đầu...")
+    dlg.geometry("420x130")
+    dlg.grab_set()
+    dlg.resizable(False, False)
+    label = ctk.CTkLabel(dlg, text="Đang tải...", font=("", 13))
+    label.pack(pady=(16, 8))
+    progress = ctk.CTkProgressBar(dlg, width=340)
+    progress.pack(pady=8)
+    progress.set(0)
+
+    def _update_status(text, pct):
+        try:
+            label.configure(text=text)
+            progress.set(pct)
+            dlg.update_idletasks()
+        except Exception:
+            pass
+
+    def _done(success, msg):
+        try:
+            dlg.destroy()
+        except Exception:
+            pass
+        if not success:
+            messagebox.showerror("Lỗi", f"Tải tài nguyên thất bại:\n{msg}")
+
+    def _run():
+        try:
+            updater = GitHubReleaseUpdater(
+                app_base_dir(), GITHUB_REPO_OWNER, GITHUB_REPO_NAME,
+                log_func=lambda m: _update_status(m, 0.1),
+            )
+            for i, (local_name, asset_key) in enumerate(missing.items()):
+                _update_status(f"Đang tải {local_name}...", (i + 0.5) / len(missing))
+                url = f"https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/latest/download/{local_name}"
+                if asset_key:
+                    url = f"https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/latest/download/{asset_key}.zip"
+                dest = app_base_dir() / local_name
+                updater.download_asset(url, dest)
+                _update_status(f"Đã tải {local_name}.", (i + 1) / len(missing))
+            _update_status("Hoàn tất.", 1.0)
+            root.after(500, lambda: _done(True, ""))
+        except Exception as e:
+            root.after(0, lambda: _done(False, str(e)))
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _stop_all_profiles():
+    for name in list(running_profiles):
+        if profiles.get(name, {}).get("running"):
+            stop_profile(name)
+    return len(running_profiles) == 0
+
+
+def _run_background_update_check():
+    from updater import run_background_check as _bg_check
 
     def _on_update(result):
         latest = result.get("latest_version", "?")
         current = result.get("current_version", "?")
-        skip = str(cfg.get("skip_version", "")).strip()
-        if skip == latest:
-            return
         if messagebox.askyesno(
             "Cập nhật",
             f"Phiên bản mới v{latest} (hiện tại v{current}).\nTải và cập nhật ngay?",
         ):
             _do_download_update(result)
 
-    from updater import run_background_check as _bg_check
-    _bg_check(owner, name, token, app_base_dir(),
+    _bg_check(GITHUB_REPO_OWNER, GITHUB_REPO_NAME, "",
+              app_base_dir(),
               on_update=_on_update,
               on_error=lambda err: None,
               on_current=lambda ver: None,
@@ -3047,65 +3114,10 @@ def _run_background_update_check():
 def check_update_clicked():
     if not _license_guard():
         return
-    cfg = load_updater_config()
-    if not is_configured(cfg):
-        _show_update_config_dialog()
-        return
-    _do_check_update(cfg)
+    _do_check_update()
 
 
-def _show_update_config_dialog():
-    dlg = ctk.CTkToplevel(root)
-    dlg.title("Cấu hình cập nhật")
-    dlg.geometry("520x260")
-    dlg.grab_set()
-    dlg.focus_force()
-    dlg.resizable(False, False)
-
-    cfg = load_updater_config()
-    owner_var = ctk.StringVar(value=cfg.get("repo_owner", ""))
-    name_var = ctk.StringVar(value=cfg.get("repo_name", ""))
-    token_var = ctk.StringVar(value=cfg.get("github_token", ""))
-
-    ctk.CTkLabel(dlg, text="Cấu hình GitHub Repository", font=("", 14, "bold")).pack(pady=(14, 6))
-    f1 = ctk.CTkFrame(dlg, fg_color="transparent")
-    f1.pack(fill="x", padx=20, pady=4)
-    ctk.CTkLabel(f1, text="Owner:").pack(side="left")
-    ctk.CTkEntry(f1, textvariable=owner_var, width=200).pack(side="right")
-    f2 = ctk.CTkFrame(dlg, fg_color="transparent")
-    f2.pack(fill="x", padx=20, pady=4)
-    ctk.CTkLabel(f2, text="Repo:").pack(side="left")
-    ctk.CTkEntry(f2, textvariable=name_var, width=200).pack(side="right")
-    f3 = ctk.CTkFrame(dlg, fg_color="transparent")
-    f3.pack(fill="x", padx=20, pady=4)
-    ctk.CTkLabel(f3, text="GitHub Token:").pack(side="left")
-    ctk.CTkEntry(f3, textvariable=token_var, width=200, show="*").pack(side="right")
-    ctk.CTkLabel(dlg, text="Token cần quyền read: contents, metadata", font=("", 10), text_color="#64748b").pack()
-
-    def _save():
-        save_updater_config({
-            "repo_owner": owner_var.get().strip(),
-            "repo_name": name_var.get().strip(),
-            "github_token": token_var.get().strip(),
-        })
-        dlg.destroy()
-        cfg2 = load_updater_config()
-        if is_configured(cfg2):
-            _do_check_update(cfg2)
-        else:
-            update_status("[Update] Vui lòng nhập đầy đủ Owner và Repo.")
-
-    ctk.CTkButton(dlg, text="Lưu và kiểm tra", command=_save, width=120).pack(pady=12)
-
-
-def _do_check_update(cfg):
-    owner = cfg.get("repo_owner", "").strip()
-    name = cfg.get("repo_name", "").strip()
-    token = cfg.get("github_token", "").strip()
-    if not owner or not name:
-        update_status("[Update] Thiếu thông tin repository.")
-        return
-
+def _do_check_update():
     def _on_result(result):
         if result.get("error"):
             update_status(f"[Update] Lỗi: {result['error']}")
@@ -3116,20 +3128,18 @@ def _do_check_update(cfg):
             messagebox.showinfo("Cập nhật", f"Đang dùng phiên bản mới nhất ({result['current_version']}).")
             return
         if result.get("has_update"):
-            _show_update_available_dialog(result, cfg)
+            _show_update_available_dialog(result)
 
     def _on_error(err):
         update_status(f"[Update] Lỗi: {err}")
         messagebox.showerror("Cập nhật", err)
 
-    def _on_current(ver):
-        update_status(f"[Update] Đã cập nhật ({ver}).")
-
     update_status("[Update] Đang kiểm tra phiên bản mới...")
 
     def _run():
         try:
-            updater = GitHubReleaseUpdater(app_base_dir(), owner, name, token=token, log_func=lambda m: update_status(f"[Update] {m}"))
+            updater = GitHubReleaseUpdater(app_base_dir(), GITHUB_REPO_OWNER, GITHUB_REPO_NAME,
+                                           log_func=lambda m: update_status(f"[Update] {m}"))
             result = updater.check_update()
             root.after(0, lambda: _on_result(result))
         except Exception as e:
@@ -3138,49 +3148,26 @@ def _do_check_update(cfg):
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _show_update_available_dialog(result, cfg):
+def _show_update_available_dialog(result):
     latest = result.get("latest_version", "?")
     current = result.get("current_version", "?")
-    asset_url = result.get("asset_url", "")
-    asset_name = result.get("asset_name", "")
-    asset_size = result.get("asset_size", 0)
-    size_mb = asset_size / 1024 / 1024 if asset_size else 0
 
-    dlg = ctk.CTkToplevel(root)
-    dlg.title("Có phiên bản mới")
-    dlg.geometry("460x300")
-    dlg.grab_set()
-    dlg.focus_force()
-    dlg.resizable(False, False)
+    running_count = sum(1 for n in running_profiles if profiles.get(n, {}).get("running"))
+    msg = f"Phiên bản mới: v{latest} (hiện tại: v{current})."
+    if running_count > 0:
+        msg += f"\nSẽ dừng {running_count} profile trước khi cập nhật."
 
-    ctk.CTkLabel(dlg, text=f"Phiên bản mới: v{latest}", font=("", 16, "bold"), text_color="#16a34a").pack(pady=(16, 4))
-    ctk.CTkLabel(dlg, text=f"Hiện tại: v{current}", text_color="#64748b").pack()
-    ctk.CTkLabel(dlg, text=f"File: {asset_name} ({size_mb:.1f} MB)", text_color="#64748b").pack(pady=4)
+    if not messagebox.askyesno("Có bản cập nhật", msg + "\n\nCập nhật ngay?"):
+        return
 
-    skip_var = ctk.BooleanVar(value=False)
-    ctk.CTkCheckBox(dlg, text="Bỏ qua phiên bản này", variable=skip_var).pack(pady=6)
+    if running_count > 0:
+        update_status("[Update] Đang dừng profiles...")
+        _stop_all_profiles()
 
-    btn_frame = ctk.CTkFrame(dlg, fg_color="transparent")
-    btn_frame.pack(fill="x", padx=20, pady=10)
-    ctk.CTkButton(btn_frame, text="Để sau", width=100, command=dlg.destroy, fg_color="#64748b").pack(side="left", padx=5)
-    ctk.CTkButton(btn_frame, text="Cập nhật ngay", width=120, command=lambda: [_save_skip(skip_var, latest, cfg), dlg.destroy(), _do_download_update(result)], fg_color="#16a34a").pack(side="right", padx=5)
-
-
-def _save_skip(skip_var, version, cfg):
-    if skip_var.get():
-        cfg["skip_version"] = version
-        save_updater_config(cfg)
-        update_status(f"[Update] Đã bỏ qua phiên bản v{version}.")
+    _do_download_update(result)
 
 
 def _do_download_update(result):
-    for name in list(running_profiles):
-        if profiles.get(name, {}).get("running"):
-            msg = "Vui lòng dừng tất cả profile trước khi cập nhật."
-            messagebox.showwarning("Cập nhật", msg)
-            update_status(f"[Update] {msg}")
-            return
-
     asset_url = result.get("asset_url")
     if not asset_url:
         messagebox.showerror("Cập nhật", "Không có URL tải về.")
@@ -3217,12 +3204,8 @@ def _do_download_update(result):
 
     def _run():
         try:
-            cfg = load_updater_config()
-            owner = cfg.get("repo_owner", "").strip()
-            name = cfg.get("repo_name", "").strip()
-            token = cfg.get("github_token", "").strip()
             app_root = app_base_dir()
-            updater = GitHubReleaseUpdater(app_root, owner, name, token=token)
+            updater = GitHubReleaseUpdater(app_root, GITHUB_REPO_OWNER, GITHUB_REPO_NAME)
 
             temp_dir = app_root / "temp_dl" / "update"
             temp_dir.mkdir(parents=True, exist_ok=True)
