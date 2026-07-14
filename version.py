@@ -1,4 +1,4 @@
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 APP_NAME = "TikTokAutoUploader"
 RELEASE_ASSET_PREFIX = "TikTokAutoUploader-v"
 
