@@ -1,4 +1,5 @@
 import os
+import sys
 import queue
 import json
 import shutil
@@ -59,7 +60,6 @@ from version import __version__ as CURRENT_VERSION, APP_NAME, GITHUB_REPO_OWNER,
 from updater import GitHubReleaseUpdater, get_current_version
 from updater_config import load_updater_config, save_updater_config
 import logging
-import sys
 import zipfile
 import time
 import threading
@@ -3065,19 +3065,18 @@ def _first_run_download_check():
 
     def _run():
         try:
-            tag = f"v{__version__}"
+            tag = f"v{CURRENT_VERSION}"
             base_url = f"https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/download/{tag}"
             total = len(missing)
             for i, (local_name, info) in enumerate(missing.items()):
                 _update_status(f"Đang tải {local_name}...", (i + 0.1) / total)
-                asset_name = info["asset"].format(version=__version__)
+                asset_name = info["asset"].format(version=CURRENT_VERSION)
                 url = f"{base_url}/{asset_name}"
 
                 if info["type"] == "zip_dir":
                     temp_dir = app_base_dir() / "temp_dl" / "resources"
                     temp_dir.mkdir(parents=True, exist_ok=True)
                     zip_path = temp_dir / asset_name
-                    requests.get(url, stream=True, timeout=30).raise_for_status()
                     updater = GitHubReleaseUpdater(app_base_dir(), GITHUB_REPO_OWNER, GITHUB_REPO_NAME)
                     updater.download_asset(url, zip_path)
                     _update_status(f"Đang giải nén {local_name}...", (i + 0.6) / total)
