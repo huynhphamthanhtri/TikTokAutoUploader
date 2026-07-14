@@ -3699,6 +3699,10 @@ def add_profile():
     e_cookie = ctk.CTkEntry(scroll_frame, width=400)
     e_cookie.pack()
     
+    ctk.CTkLabel(scroll_frame, text="ID TikTok:").pack(pady=2)
+    e_tiktok_id = ctk.CTkEntry(scroll_frame, width=400)
+    e_tiktok_id.pack()
+    
     # --- PROXY UI ---
     v_use_proxy = ctk.BooleanVar(scroll_frame, value=False)
     ctk.CTkCheckBox(scroll_frame, text="Sử dụng Proxy", variable=v_use_proxy).pack(pady=(10, 2))
@@ -3744,6 +3748,7 @@ def add_profile():
                 "folder_path": fd, 
                 "chrome_profile": cp, 
                 "cookie_str": e_cookie.get(),
+                "tiktok_id": _normalize_tiktok_id(e_tiktok_id.get()),
                 "proxy_string": e_proxy.get().strip(),
                 "use_proxy": v_use_proxy.get(),
                 "headless": v_head.get(), 
@@ -3774,7 +3779,7 @@ def batch_add_profiles():
     dlg.geometry("600x500")
     dlg.grab_set() 
     
-    ctk.CTkLabel(dlg, text="Nhập dữ liệu: Tên|Cookie|Proxy (Mỗi dòng 1 profile)", font=("", 13, "bold")).pack(pady=5)
+    ctk.CTkLabel(dlg, text="Nhập dữ liệu: Tên|Cookie|Proxy|ID TikTok (Mỗi dòng 1 profile)", font=("", 13, "bold")).pack(pady=5)
     
     txt_input = ctk.CTkTextbox(dlg, width=550, height=350)
     txt_input.pack(pady=5)
@@ -3798,12 +3803,12 @@ def batch_add_profiles():
             line = line.strip()
             if not line: continue
             
-            parts = line.split('|')
+            parts = line.split('|', 3)
             p_name = parts[0].strip()
-            if not p_name: 
+            if not p_name:
                 skipped_count += 1
                 continue
-                
+
             if p_name in profiles:
                 update_status(f"[Batch] Bỏ qua {p_name} (Đã tồn tại).")
                 skipped_count += 1
@@ -3811,6 +3816,7 @@ def batch_add_profiles():
 
             p_cookie = parts[1].strip() if len(parts) > 1 else ""
             p_proxy = parts[2].strip() if len(parts) > 2 else ""
+            p_tiktok_id = _normalize_tiktok_id(parts[3]) if len(parts) > 3 else ""
             
             safe_foldername = "".join([c for c in p_name if c.isalnum() or c in (' ', '-', '_')]).strip()
             if not safe_foldername: safe_foldername = f"Profile_{uuid.uuid4().hex[:8]}"
@@ -3835,8 +3841,9 @@ def batch_add_profiles():
                 "cookie_str": p_cookie,
                 "proxy_string": p_proxy,
                 "use_proxy": True if p_proxy else False,
-                "headless": True,        
+                "headless": True,
                 "open_only_when_video": False,
+                "tiktok_id": p_tiktok_id,
                 "max_uploads_per_day": 3,
                 "fingerprint": fingerprint,
                 "stats_today": 0,
@@ -3896,6 +3903,11 @@ def edit_profile():
     e_cookie.insert(0, cfg.get("cookie_str", ""))
     e_cookie.pack()
     
+    ctk.CTkLabel(scroll_frame, text="ID TikTok:").pack(pady=2)
+    e_tiktok_id = ctk.CTkEntry(scroll_frame, width=400)
+    e_tiktok_id.insert(0, cfg.get("tiktok_id", ""))
+    e_tiktok_id.pack()
+    
     # --- PROXY UI ---
     v_use_proxy = ctk.BooleanVar(scroll_frame, value=cfg.get("use_proxy", False))
     ctk.CTkCheckBox(scroll_frame, text="Sử dụng Proxy", variable=v_use_proxy).pack(pady=(10, 2))
@@ -3923,6 +3935,7 @@ def edit_profile():
             "folder_path": e_folder.get().strip(),
             "chrome_profile": e_chrome.get().strip(),
             "cookie_str": e_cookie.get(),
+            "tiktok_id": _normalize_tiktok_id(e_tiktok_id.get()),
             "proxy_string": e_proxy.get().strip(),
             "use_proxy": v_use_proxy.get(),
             "headless": v_head.get(),
@@ -4102,6 +4115,40 @@ def open_browser():
 
 def _wait_and_close_driver(driver, name):
     pass 
+
+# --- TIkTok ID HELPER ---
+def _normalize_tiktok_id(value):
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    value = value.rstrip("/")
+    lowered = value.lower()
+    marker = "tiktok.com/@"
+    if marker in lowered:
+        idx = lowered.find(marker)
+        value = value[idx + len(marker):]
+    value = value.strip().strip("/")
+    if value.startswith("@"):
+        value = value[1:]
+    value = value.split("?", 1)[0].split("#", 1)[0]
+    return value.strip().strip("/")
+
+def copy_channel_link():
+    sel = tree.selection()
+    if not sel:
+        return
+    name = tree.item(sel[0])['values'][0]
+    if name not in profiles:
+        return
+    tiktok_id = _normalize_tiktok_id(profiles[name]['config'].get('tiktok_id', ''))
+    if not tiktok_id:
+        messagebox.showwarning("Warning", "Profile này chưa có ID TikTok.")
+        return
+    link = f"https://www.tiktok.com/@{tiktok_id}"
+    root.clipboard_clear()
+    root.clipboard_append(link)
+    root.update()
+    update_status(f"[{name}] Đã copy link kênh: {link}")
 
 # --- HÀM COPY PATH ---
 def copy_folder_path():
@@ -4323,6 +4370,7 @@ ui_handlers = {
     'start_all_in_project': start_all_in_project,
     'stop_all_in_project': stop_all_in_project,
     'copy_folder_path': copy_folder_path,
+    'copy_channel_link': copy_channel_link,
     'sort_tree': _treeview_sort_column,
     'youtube_monitor': youtube_monitor_handlers,
     'activity': activity_handlers,

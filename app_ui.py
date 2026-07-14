@@ -303,6 +303,7 @@ def build_dashboard(root, state, handlers):
     ctx_menu.add_command(label="Dừng (Đã chọn)", command=handlers['stop_selected_batch'])
     ctx_menu.add_separator()
     ctx_menu.add_command(label="Copy Folder Video", command=handlers['copy_folder_path'])
+    ctx_menu.add_command(label="Copy Link Kênh", command=handlers['copy_channel_link'])
     ctx_menu.add_command(label="Mở trình duyệt", command=handlers['open_browser'])
     ctx_menu.add_command(label="Sửa", command=handlers['edit_profile'])
     ctx_menu.add_command(label="Xoá", command=handlers['delete_profile'])
