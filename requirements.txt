@@ -1,0 +1,15 @@
+customtkinter
+selenium
+selenium-wire
+watchdog
+psutil
+webdriver-manager
+requests
+gspread
+google-auth
+Flask
+google-api-python-client
+google-auth-httplib2
+pyngrok
+yt-dlp
+packaging

@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Build output
+build/
+dist/
+*.spec
+
+# Runtime data
+configs.json
+youtube_config.json
+channels.json
+channel_cache.json
+license_cache.json
+activity_log.csv
+download_index.json
+downloads_log.csv
+failed_uploads.log
+upload.log
+log_backup.txt
+updater_config.json
+upload_benchmarks.jsonl
+
+# User data
+Auto_Data/
+CookiesDir/
+downloads/
+temp_dl/
+request_traces/
+
+# Logs
+*.log
+*.csv
+
+# Large binaries
+Browser/
+chromedriver.exe
+ngrok.exe
+
+# Secrets
+service_account.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+.DS_Store
