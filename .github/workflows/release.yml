@@ -26,6 +26,41 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Validate version and Vietnamese release notes
+        shell: pwsh
+        run: |
+          $tagVersion = "${{ github.ref_name }}" -replace '^v', ''
+          if ($tagVersion -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
+            throw "Tag không đúng định dạng phiên bản: $tagVersion"
+          }
+          $versionText = Get-Content -Raw -Encoding utf8 "version.py"
+          $match = [regex]::Match($versionText, '__version__\s*=\s*"([^"]+)"')
+          if (-not $match.Success) {
+            throw "Không đọc được __version__ trong version.py"
+          }
+          $appVersion = $match.Groups[1].Value
+          if ($appVersion -ne $tagVersion) {
+            throw "Tag v$tagVersion không khớp version.py ($appVersion)"
+          }
+          if (-not (Test-Path "RELEASE_NOTES_VI.md")) {
+            throw "Thiếu RELEASE_NOTES_VI.md"
+          }
+          $notes = Get-Content -Raw -Encoding utf8 "RELEASE_NOTES_VI.md"
+          $escapedVersion = [regex]::Escape($tagVersion)
+          if (-not [regex]::IsMatch($notes, "(?m)^# Phiên bản $escapedVersion\s*$")) {
+            throw "RELEASE_NOTES_VI.md không dành cho phiên bản $tagVersion"
+          }
+          foreach ($heading in @('## Điểm mới', '## Cải thiện', '## Sửa lỗi')) {
+            if (-not [regex]::IsMatch($notes, "(?m)^$([regex]::Escape($heading))\s*$")) {
+              throw "Thiếu mục bắt buộc: $heading"
+            }
+          }
+
+      - name: Run tests
+        run: |
+          python -m unittest discover -p "test*.py"
+          python -m py_compile main.py updater.py updater_config.py browser_environment.py config_store.py core_helpers.py
+
       - name: Build with PyInstaller
         run: |
           python -m PyInstaller TikTokAutoUploader.spec
@@ -41,4 +76,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: "dist/${{ env.ZIP_NAME }}"
-          generate_release_notes: true
+          body_path: "RELEASE_NOTES_VI.md"
+          generate_release_notes: false

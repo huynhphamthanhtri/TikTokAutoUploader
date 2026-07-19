@@ -1,6 +1,8 @@
 import json
 from datetime import datetime
 
+from browser_environment import ensure_fingerprint_defaults
+
 
 def build_configs_payload(profiles, projects):
     export_profiles = {}
@@ -39,6 +41,11 @@ def build_runtime_profiles(loaded_profiles):
     current_date_str = current_date_obj.strftime('%Y-%m-%d')
 
     for name, prof_config in loaded_profiles.items():
+        prof_config = dict(prof_config)
+        prof_config['fingerprint'] = ensure_fingerprint_defaults(
+            prof_config.get('fingerprint', {}),
+            seed=name + str(prof_config.get('cookie_str', '')),
+        )
         project = prof_config.pop('project', 'Mặc định')
         headless = prof_config.pop('headless', True)
         max_uploads = prof_config.pop('max_uploads_per_day', 0)

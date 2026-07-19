@@ -1,10 +1,12 @@
 import json
 import os
 import re
+import shutil
 import time
 
 from datetime import datetime, timezone
-from selenium.common.exceptions import InvalidSessionIdException
+from pathlib import Path
+from selenium.common.exceptions import InvalidSessionIdException, TimeoutException
 
 
 def parse_cookie(cookie_str):
@@ -95,6 +97,65 @@ def is_driver_valid(driver):
         return False
 
 
+def normalize_profile_path(path):
+    try:
+        return os.path.normcase(os.path.abspath(os.path.normpath(str(path or "").strip().strip('"'))))
+    except Exception:
+        return str(path or "").strip().lower()
+
+
+def process_uses_profile(cmdline, profile_path):
+    target = normalize_profile_path(profile_path)
+    if not target:
+        return False
+    for arg in cmdline or []:
+        text = str(arg or "").strip().strip('"')
+        if "user-data-dir=" not in text.lower():
+            continue
+        value = text.split("=", 1)[1].strip().strip('"')
+        if normalize_profile_path(value) == target:
+            return True
+    return False
+
+
+def classify_webdriver_error(error):
+    text = str(error or '').lower()
+    if isinstance(error, InvalidSessionIdException) or 'invalid session id' in text:
+        return 'invalid_session'
+    if 'no such window' in text or 'target window already closed' in text:
+        return 'window_closed'
+    if 'tab crashed' in text or ('renderer' in text and 'crash' in text):
+        return 'renderer_crash'
+    if any(token in text for token in ('disconnected', 'not connected to devtools', 'chrome not reachable')):
+        return 'browser_disconnected'
+    if isinstance(error, TimeoutException):
+        return 'timeout'
+    return 'webdriver_error'
+
+
+def profile_driver_path(chrome_profile, configured_path=''):
+    expected = Path(chrome_profile).parent / 'Driver' / 'chromedriver.exe'
+    configured = str(configured_path or '').strip()
+    if configured and normalize_profile_path(configured) == normalize_profile_path(expected):
+        return Path(configured)
+    return expected
+
+
+def clear_profile_directory(directory):
+    path = Path(directory).resolve()
+    if path.name.lower() != 'profile' or path.parent == path:
+        raise ValueError(f'Đường dẫn User Data không an toàn để làm sạch: {path}')
+    path.mkdir(parents=True, exist_ok=True)
+    for child in path.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            try:
+                child.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def is_file_stable(path, checks, interval):
     try:
         prev = -1
@@ -110,6 +171,30 @@ def is_file_stable(path, checks, interval):
         return cur > 0 and cur == prev
     except Exception:
         return False
+
+
+def copy_video_atomically(source, destination):
+    """Copy fully to a non-video staging path before exposing the final file."""
+    src = Path(source)
+    dst = Path(destination)
+    if not src.is_file():
+        raise FileNotFoundError(f"Không tìm thấy video nguồn: {src}")
+    if src.resolve() == dst.resolve():
+        raise ValueError("Video nguồn và đích không được trùng nhau")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    staging = dst.with_name(f".{dst.name}.part")
+    if staging.exists():
+        staging.unlink()
+    try:
+        shutil.copyfile(src, staging)
+        os.utime(staging, None)
+        os.replace(staging, dst)
+    finally:
+        try:
+            staging.unlink(missing_ok=True)
+        except Exception:
+            pass
+    return dst
 
 
 def clean_chrome_lock_files(profile_path):

@@ -305,6 +305,9 @@ def build_dashboard(root, state, handlers):
     ctx_menu.add_command(label="Copy Folder Video", command=handlers['copy_folder_path'])
     ctx_menu.add_command(label="Copy Link Kênh", command=handlers['copy_channel_link'])
     ctx_menu.add_command(label="Mở trình duyệt", command=handlers['open_browser'])
+    ctx_menu.add_command(label="Lấy Cookie TikTok", command=handlers['get_tiktok_cookies'])
+    ctx_menu.add_command(label="Reset Fingerprint", command=handlers['reset_fingerprint'])
+    ctx_menu.add_command(label="Làm sạch Browser", command=handlers['clean_browser'])
     ctx_menu.add_command(label="Sửa", command=handlers['edit_profile'])
     ctx_menu.add_command(label="Xoá", command=handlers['delete_profile'])
     widgets['ctx_menu'] = ctx_menu
