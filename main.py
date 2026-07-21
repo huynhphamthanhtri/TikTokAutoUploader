@@ -396,10 +396,6 @@ class TikTokLoginRequiredError(Exception):
     """Raised when TikTok explicitly redirects the browser to its login page."""
 
 
-class ResourceUnavailableError(Exception):
-    """Raised when the machine should not start another upload yet."""
-
-
 class PostRejectedError(Exception):
     """Raised when TikTok explicitly rejects a publish request."""
 # -------------------------------------------------------
@@ -3265,8 +3261,6 @@ def upload_video(profile_name, video_path):
         for attempt in range(1, max_attempts + 1):
             post_clicked = False
             try:
-                if not check_system_resources(profile_name):
-                    raise ResourceUnavailableError("Tài nguyên hệ thống vẫn quá cao trước khi upload")
                 update_status(f"[{profile_name}] Đang đăng: {short_name}")
                 _set_profile_ui(profile_name, upload='Đang tải video', last_error='')
                 if not _ensure_upload_container_ready(driver, quick_only=True):

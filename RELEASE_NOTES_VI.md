@@ -1,3 +1,8 @@
+# Phiên bản 1.0.6
+
+## Sửa lỗi
+- Loại bỏ kiểm tra tài nguyên hệ thống (RAM/CPU) trước khi đăng video để tránh chặn upload khi máy tạm thời cao tải. Upload vẫn có cơ chế retry và phục hồi nếu xảy ra lỗi runtime.
+
 # Phiên bản 1.0.5
 
 ## Điểm mới
