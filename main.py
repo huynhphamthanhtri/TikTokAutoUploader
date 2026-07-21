@@ -2204,31 +2204,41 @@ def check_system_resources(profile_name):
 
 def kill_stale_chrome_processes(profile_name):
     target_dir = profiles[profile_name]['config']['chrome_profile']
+    expected_driver = str(profile_driver_path(target_dir))
     killed_count = 0
-    
-    try:
-        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-            try:
-                if not proc.is_running(): continue
-                name = proc.info['name'].lower()
-                cmdline = proc.info['cmdline']
 
-                if name in ('chrome.exe', 'chromedriver.exe', 'chrome', 'chromedriver'):
-                    if cmdline:
-                        if process_uses_profile(cmdline, target_dir):
-                            try:
-                                proc.terminate() 
-                                proc.wait(timeout=3)
-                            except psutil.TimeoutExpired:
-                                proc.kill() 
-                            except Exception:
-                                pass
-                            killed_count += 1
+    def _force_kill(proc):
+        nonlocal killed_count
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except psutil.TimeoutExpired:
+            proc.kill()
+        except Exception:
+            pass
+        killed_count += 1
+
+    try:
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'exe']):
+            try:
+                if not proc.is_running():
+                    continue
+                name = proc.info['name'].lower()
+                cmdline = proc.info['cmdline'] or []
+                if name not in ('chrome.exe', 'chromedriver.exe', 'chrome', 'chromedriver'):
+                    continue
+                if process_uses_profile(cmdline, target_dir):
+                    _force_kill(proc)
+                    continue
+                if name in ('chromedriver.exe', 'chromedriver'):
+                    exe_path = proc.info.get('exe') or ''
+                    if exe_path and normalize_profile_path(exe_path) == normalize_profile_path(expected_driver):
+                        _force_kill(proc)
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
-        
+
         if killed_count > 0:
-            time.sleep(0.5) 
+            time.sleep(0.5)
     except Exception as e:
         logging.warning(f"[{profile_name}] Lỗi khi kill process: {e}")
 
@@ -4292,7 +4302,8 @@ def _thread_sequential_stop(targets, context_name):
     try:
         update_status(f"Bắt đầu dừng {len(targets)} hồ sơ ({context_name})...")
         for name in targets:
-            if name not in profiles or not profiles[name]['running']: continue
+            if name not in profiles: continue
+            if not profiles[name]['running'] and not is_driver_valid(profiles[name].get('manual_driver')): continue
             try:
                 update_status(f"[{name}] Đang dừng...")
                 stop_profile(name)
@@ -4478,6 +4489,41 @@ def start_profile(name=None):
             
     threading.Thread(target=_worker, daemon=True).start()
 
+def _stop_profile_driver(name):
+    if name not in profiles:
+        return
+    profile = profiles[name]
+    ob = profile.get('observer')
+    if ob:
+        try:
+            ob.stop()
+            ob.join()
+        except Exception:
+            pass
+    profile['observer'] = None
+    drv = profile.get('driver')
+    profile['driver'] = None
+    if drv:
+        try:
+            _export_live_cookies_to_config(drv, name)
+            drv.get(TIKTOK_BASE_URL)
+            time.sleep(0.5)
+        except Exception:
+            pass
+        try:
+            drv.quit()
+        except Exception:
+            pass
+    manual = profile.get('manual_driver')
+    profile['manual_driver'] = None
+    if manual:
+        try:
+            manual.quit()
+        except Exception:
+            pass
+    running_profiles.discard(name)
+    kill_stale_chrome_processes(name)
+
 def close_profile_browser(name):
     if name not in profiles:
         return
@@ -4503,36 +4549,14 @@ def stop_profile(selected_name=None):
         sel = tree.selection()
         if not sel: return
         name = tree.item(sel[0])['values'][0]
-    
-    if name not in profiles or not profiles[name]['running']: return
-    
-    # Đánh dấu dừng trước để queue thread không cố restart watchdog
+
+    if name not in profiles: return
+    if not profiles[name]['running'] and not is_driver_valid(profiles[name].get('manual_driver')): return
+
     _set_profile_ui(name, status='Đang dừng', browser='Đang đóng', upload='Đang dừng')
     profiles[name]['running'] = False
-    drv = profiles[name].get('driver')
-    profiles[name]['driver'] = None
-    ob = profiles[name].get('observer')
-    profiles[name]['observer'] = None
-    
-    if ob:
-        try:
-            ob.stop()
-            ob.join()
-        except Exception: pass
-    
-    if drv:
-        try:
-            _export_live_cookies_to_config(drv, name)
-            drv.get(TIKTOK_BASE_URL)
-            time.sleep(0.5)
-        except Exception:
-            pass
-        try: drv.quit()
-        except Exception: pass
-    running_profiles.discard(name)
-    
-    kill_stale_chrome_processes(name)
-    
+    _stop_profile_driver(name)
+
     _set_profile_ui(name, status='Đã dừng', browser='Chưa mở', upload='Chờ video')
     update_status(f"[{name}] Đã dừng.")
     root.after(0, update_profile_list)
@@ -5187,13 +5211,33 @@ def copy_folder_path():
 # =========================
 # System Exit
 # =========================
+_shutting_down = False
+
 def on_closing():
+    global _shutting_down
+    if _shutting_down:
+        return
+    _shutting_down = True
+
     try:
         youtube_monitor.stop_monitor()
     except Exception as e:
         update_status(f"[YouTube] Lỗi dừng monitor khi đóng app: {e}")
-    stop_all_in_project()
-    root.after(2000, root.destroy)
+
+    def _shutdown_cleanup():
+        for name in list(profiles.keys()):
+            try:
+                has_active = profiles[name].get('running', False) or is_driver_valid(profiles[name].get('manual_driver'))
+                if has_active:
+                    profiles[name]['running'] = False
+                    _stop_profile_driver(name)
+            except Exception as e:
+                update_status(f"[{name}] Lỗi dừng khi tắt app: {e}")
+
+    t = threading.Thread(target=_shutdown_cleanup, daemon=True)
+    t.start()
+    t.join(timeout=10)
+    root.after(500, root.destroy)
 
 def change_license_key():
     global LICENSE_OK, LICENSE_KEY, LICENSE_INFO

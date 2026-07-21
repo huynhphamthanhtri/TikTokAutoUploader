@@ -1,3 +1,14 @@
+# Phiên bản 1.0.7
+
+## Cải thiện
+- Dọn dẹp browser Orbita/Chrome triệt để hơn khi dừng profile hoặc tắt ứng dụng.
+- Browser mở thủ công (chuột phải → Mở trình duyệt) nay cũng được đóng tự động khi bấm Stop hoặc tắt app.
+- Tắt ứng dụng: quét toàn bộ profiles, không phụ thuộc vào project đang chọn, có timeout dự phòng.
+- Cải thiện nhận diện chromedriver mồ côi theo đúng đường dẫn driver riêng của từng profile.
+
+## Sửa lỗi
+- Khắc phục browser thủ công không được đóng khi dừng profile (chỉ kill process, thiếu driver.quit() sạch sẽ).
+
 # Phiên bản 1.0.6
 
 ## Sửa lỗi
