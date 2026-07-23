@@ -77,7 +77,10 @@ jobs:
         shell: pwsh
         run: |
           $matches = git grep -n -E "seleniumwire|selenium-wire|TIKTOK_DEBUG_SELENIUM_WIRE|REQUEST_TRACE|request_traces" -- "*.py" "requirements.txt" 2>$null
-          if ($matches) { throw "Removed Selenium Wire/request trace references remain:`n$matches" }
+          $grepExit = $LASTEXITCODE
+          if ($grepExit -eq 0 -and $matches) { throw "Removed Selenium Wire/request trace references remain:`n$matches" }
+          if ($grepExit -gt 1) { throw "git grep failed with exit code $grepExit" }
+          $global:LASTEXITCODE = 0
 
       - name: Build with PyInstaller
         run: |
