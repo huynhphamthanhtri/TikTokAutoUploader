@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import uuid
 from pathlib import Path
 
 
@@ -43,11 +44,13 @@ def save_updater_config(cfg):
     merged = dict(DEFAULTS)
     merged.update(cfg or {})
     with _CONFIG_LOCK:
-        temp_path = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
+        temp_path = CONFIG_PATH.with_name(f"{CONFIG_PATH.name}.{uuid.uuid4().hex}.tmp")
         try:
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(merged, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(temp_path, CONFIG_PATH)
             return True
         except Exception:

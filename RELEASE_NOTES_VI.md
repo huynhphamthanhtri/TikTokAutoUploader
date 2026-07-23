@@ -1,3 +1,27 @@
+# Phiên bản 1.0.8
+
+## Điểm mới
+- Kiểm tra container video khi hoàn tất tải xuống: remux WebM/MKV sang MP4, transcode codec không tương thích.
+- Xác minh SHA-256 bắt buộc khi tải FFmpeg — nếu không lấy được checksum sẽ không cài đặt.
+- Sao lưu tài nguyên hiện tại trước khi thay thế (Browser/ngrok), khôi phục nếu thất bại.
+- Xác thực chữ ký WebSub HMAC-SHA256 để chống callback giả mạo.
+- Ghi JSON dạng nguyên tử (temp → fsync → replace) để chống hỏng file khi mất điện.
+- Dependency được pin version để build tái lập được.
+
+## Cải thiện
+- FFmpeg: xác minh cả ffprobe trước khi cài đặt, giữ bản cũ nếu bản mới thất bại.
+- Container: probe format/codec bằng ffprobe, không giả định .mp4 extension.
+- Tài nguyên: download vào file .part, kiểm tra ZIP traversal, validate trước khi swap.
+- WebSub callback: giới hạn body 1MB, từ chối request thiếu signature.
+- CI workflow: compile toàn bộ source, smoke test bản frozen, kiểm tra artifact không chứa secret.
+- Loại bỏ Selenium Wire/request trace debug để tránh dependency cũ và giảm kích thước/rủi ro build.
+
+## Sửa lỗi
+- Khắc phục cài đặt FFmpeg ngay cả khi SHA-256 không tải được (fail-open → fail-closed).
+- Khắc phục download tài nguyên ghi đè file đích trước khi xác minh.
+- Khắc phục WebSub callback server không kiểm tra chữ ký payload.
+- Khắc phục ghi JSON config/channels không dùng atomic write.
+
 # Phiên bản 1.0.7
 
 ## Cải thiện

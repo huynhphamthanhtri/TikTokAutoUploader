@@ -37,6 +37,9 @@ request_traces/
 *.log
 *.csv
 
+# Customer/release artifacts
+TikTokAutoUploader-v*-Customer.zip
+
 # Large binaries
 Browser/
 chromedriver.exe

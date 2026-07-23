@@ -24,7 +24,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
 
       - name: Validate version and Vietnamese release notes
         shell: pwsh
@@ -50,27 +49,139 @@ jobs:
           if (-not [regex]::IsMatch($notes, "(?m)^# Phiên bản $escapedVersion\s*$")) {
             throw "RELEASE_NOTES_VI.md không dành cho phiên bản $tagVersion"
           }
+          $sectionPattern = '(?ms)^# Phiên bản ' + $escapedVersion + '\s*\r?\n(?<body>.*?)(?=^# Phiên bản |\z)'
+          $versionSection = [regex]::Match($notes, $sectionPattern)
+          if (-not $versionSection.Success) {
+            throw "Không capture được section release notes cho $tagVersion"
+          }
+          $sectionBody = $versionSection.Groups['body'].Value
           foreach ($heading in @('## Điểm mới', '## Cải thiện', '## Sửa lỗi')) {
-            if (-not [regex]::IsMatch($notes, "(?m)^$([regex]::Escape($heading))\s*$")) {
-              throw "Thiếu mục bắt buộc: $heading"
+            if (-not [regex]::IsMatch($sectionBody, "(?m)^$([regex]::Escape($heading))\s*$")) {
+              throw "Thiếu mục bắt buộc trong section $tagVersion: $heading"
             }
           }
 
-      - name: Run tests
+      - name: Dependency check
+        run: |
+          python -m pip check
+
+      - name: Run tests and compile
         run: |
           python -m unittest discover -p "test*.py"
-          python -m py_compile main.py updater.py updater_config.py browser_environment.py config_store.py core_helpers.py
+          git ls-files "*.py" | ForEach-Object {
+            python -m py_compile $_
+            if ($LASTEXITCODE -ne 0) { throw "Compile failed: $_" }
+          }
+
+      - name: Ban removed Selenium Wire paths
+        shell: pwsh
+        run: |
+          $matches = git grep -n -E "seleniumwire|selenium-wire|TIKTOK_DEBUG_SELENIUM_WIRE|REQUEST_TRACE|request_traces" -- "*.py" "requirements.txt" 2>$null
+          if ($matches) { throw "Removed Selenium Wire/request trace references remain:`n$matches" }
 
       - name: Build with PyInstaller
         run: |
-          python -m PyInstaller TikTokAutoUploader.spec
+          python -m PyInstaller --clean --noconfirm TikTokAutoUploader.spec
+
+      - name: Analyze build warnings
+        shell: pwsh
+        run: |
+          $warnFile = "build\TikTokAutoUploader\warn-TikTokAutoUploader.txt"
+          if (-not (Test-Path $warnFile)) { throw "Missing PyInstaller warning file" }
+          $content = Get-Content -Raw $warnFile
+          if ($content -match "blinker\._saferef|seleniumwire|pydivert") {
+            throw "Removed/unsupported module appears in build warnings"
+          }
+          $criticalMissing = [regex]::Matches($content, "missing module named ['\"](?<module>[^'\"]+)['\"]") | Where-Object {
+            $_.Groups['module'].Value -match '^(main|config_store|core_helpers|browser_environment|browser_lifecycle|version|updater|updater_config|youtube_monitor|app_ui)(\.|$)'
+          }
+          if ($criticalMissing.Count -gt 0) {
+            throw "CRITICAL: Internal project modules missing! $($criticalMissing.Value -join ', ')"
+          }
+
+      - name: Validate artifact (pre-smoke)
+        shell: pwsh
+        run: |
+          $distDir = "dist\TikTokAutoUploader"
+          if (-not (Test-Path "$distDir\TikTokAutoUploader.exe")) { throw "Missing EXE" }
+          if (-not (Test-Path "$distDir\_internal")) { throw "Missing _internal" }
+
+      - name: Smoke test frozen executable (on temp copy)
+        shell: pwsh
+        run: |
+          $exe = "dist\TikTokAutoUploader\TikTokAutoUploader.exe"
+          if (-not (Test-Path $exe)) { throw "EXE not found" }
+          $smokeDir = Join-Path $env:RUNNER_TEMP "smoke_test"
+          Remove-Item -Recurse -Force $smokeDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $smokeDir -Force | Out-Null
+          Copy-Item -Recurse "dist\TikTokAutoUploader\*" $smokeDir
+          $smokeExe = Join-Path $smokeDir "TikTokAutoUploader.exe"
+          $markerDir = Join-Path $smokeDir "smoke_marker"
+          New-Item -ItemType Directory -Path $markerDir -Force | Out-Null
+          $nonce = [guid]::NewGuid().ToString('N')
+          $env:FROZEN_SMOKE_TEST = "1"
+          $env:FROZEN_SMOKE_MARKER_DIR = $markerDir
+          $env:FROZEN_SMOKE_NONCE = $nonce
+          $process = Start-Process -FilePath $smokeExe -PassThru -NoNewWindow -WorkingDirectory $smokeDir
+          $process | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
+          if (-not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw "Smoke test: EXE did not exit within 15 seconds"
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "Smoke test: EXE exited with code $($process.ExitCode)"
+          }
+          $markerFile = Join-Path $markerDir "smoke_ready.json"
+          if (-not (Test-Path $markerFile)) {
+            throw "Smoke test: readiness marker not found"
+          }
+          $marker = Get-Content -Raw $markerFile | ConvertFrom-Json
+          if (-not $marker.ready) {
+            throw "Smoke test: readiness marker indicates failure: $($marker.error)"
+          }
+          if ($marker.nonce -ne $nonce -or -not $marker.frozen -or -not $marker.charset_normalizer_version -or -not $marker.flask_version -or -not $marker.blinker_version) {
+            throw "Smoke test: marker missing required fields"
+          }
+          Write-Output "Smoke test passed (exit=$($process.ExitCode), version=$($marker.app_version))"
+
+      - name: Check no orphan processes
+        shell: pwsh
+        run: |
+          $children = Get-Process | Where-Object { $_.ProcessName -match "^(ngrok|chrome|chromedriver)$" }
+          if ($children) {
+            Write-Output "WARNING: Orphan processes found: $($children.Id -join ',')"
+          } else {
+            Write-Output "No orphan processes"
+          }
+
+      - name: Validate artifact (post-smoke)
+        shell: pwsh
+        run: |
+          $distDir = "dist\TikTokAutoUploader"
+          $forbidden = @("service_account.json", "configs.json", "youtube_config.json", "channels.json", "channel_cache.json", "license_cache.json", "downloa*.json", "updater_config.json", "*.log", "*.csv", "*.spec", "downloads", "temp_dl", "request_traces", "Auto_Data", "CookiesDir", "seleniumwire", "pydivert")
+          foreach ($pattern in $forbidden) {
+            $found = Get-ChildItem -Recurse -Path $distDir -Filter $pattern -ErrorAction SilentlyContinue
+            if ($found) { throw "Artifact contains forbidden: $($found.FullName -join ', ')" }
+          }
+          $pyFiles = Get-ChildItem -Recurse -Path $distDir -Filter "*.py" -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\_internal\\watchdog\\' }
+          if ($pyFiles) { throw "Artifact contains unexpected .py files: $($pyFiles.FullName -join ', ')" }
+          Write-Output "Artifact validated (post-smoke)"
 
       - name: Create release zip
         run: |
           $tag = "${{ github.ref_name }}"
           $zipName = "TikTokAutoUploader-${tag}.zip"
           Compress-Archive -Path "dist\TikTokAutoUploader\*" -DestinationPath "dist\$zipName"
+          $hash = (Get-FileHash "dist\$zipName" -Algorithm SHA256).Hash.ToLower()
           echo "ZIP_NAME=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "ZIP_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Determine prerelease
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $isPrerelease = $tag -match '-'
+          echo "IS_PRERELEASE=$isPrerelease" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
@@ -78,3 +189,4 @@ jobs:
           files: "dist/${{ env.ZIP_NAME }}"
           body_path: "RELEASE_NOTES_VI.md"
           generate_release_notes: false
+          prerelease: ${{ env.IS_PRERELEASE }}

@@ -24,8 +24,9 @@ project_datas = [
 
 datas = project_datas
 datas += collect_data_files('customtkinter')
-datas += collect_data_files('seleniumwire', include_py_files=True)
 datas += _collect_watchdog_files()
+datas += collect_data_files('charset_normalizer')
+datas += collect_data_files('requests')
 
 hidden_imports = [
     'selenium.webdriver',
@@ -50,8 +51,6 @@ hidden_imports = [
     'selenium.webdriver.safari.options',
     'selenium.webdriver.safari.service',
     'selenium.webdriver.safari.webdriver',
-    'seleniumwire',
-    'seleniumwire.webdriver',
     'watchdog',
     'watchdog.observers.winapi',
     'watchdog.observers.read_directory_changes',
@@ -64,8 +63,6 @@ hidden_imports = [
     'google.auth.transport.requests',
     'webdriver_manager.chrome',
     'psutil',
-    'seleniumwire.thirdparty',
-    'seleniumwire.thirdparty.mitmproxy',
     'flask',
     'yt_dlp',
     'pyngrok',
@@ -80,7 +77,6 @@ hidden_imports = [
     'packaging.version',
 ]
 
-hidden_imports += collect_submodules('seleniumwire')
 hidden_imports += [
     'watchdog',
     'watchdog.events',
@@ -112,6 +108,7 @@ hidden_imports += collect_submodules('customtkinter')
 hidden_imports += collect_submodules('yt_dlp')
 hidden_imports += collect_submodules('pyngrok')
 hidden_imports += collect_submodules('googleapiclient')
+hidden_imports += collect_submodules('charset_normalizer')
 
 a = Analysis(
     ['main.py'],
@@ -122,7 +119,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['seleniumwire', 'pydivert', 'undetected_chromedriver'],
     noarchive=False,
     optimize=2,
 )

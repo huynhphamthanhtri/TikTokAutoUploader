@@ -145,12 +145,8 @@ MAX_IMPORTANT_LOG_LINES = 300
 TIKTOK_BASE_URL = "https://www.tiktok.com"
 TIKTOK_PRIME_URL = "https://www.tiktok.com/robots.txt"
 TIKTOK_UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center"
-REQUEST_TRACE_DIR = app_base_dir() / "request_traces"
-REQUEST_TRACE_MAX_REQUESTS = 120
-REQUEST_TRACE_PREVIEW_BYTES = 1024
 FAILED_UPLOADS_LOG = app_base_dir() / "failed_uploads.log"
 UPLOAD_BENCHMARK_LOG = app_base_dir() / "upload_benchmarks.jsonl"
-DEBUG_SELENIUM_WIRE = os.environ.get("TIKTOK_DEBUG_SELENIUM_WIRE", "").strip().lower() in ("1", "true", "yes", "on")
 BLOCK_AUX_RESOURCES = os.environ.get("TIKTOK_BLOCK_AUX_RESOURCES", "").strip().lower() in ("1", "true", "yes", "on")
 PROXY_OK_CACHE_TTL_SECONDS = 60 * 60
 BLOCKED_AUX_RESOURCE_PATTERNS = [
@@ -366,6 +362,8 @@ profiles = {}
 projects = {}
 running_profiles = set()
 profile_operation_locks = {}
+
+from browser_lifecycle import get_lifecycle, _kill_service_process
 
 
 def _profile_operation_lock(profile_name):
@@ -877,26 +875,6 @@ def _build_requests_proxy_config(config):
     proxy_url = f"http://{proxy_data['user']}:{proxy_data['pass']}@{proxy_data['ip']}:{proxy_data['port']}"
     return {'http': proxy_url, 'https': proxy_url}
 
-def _active_webdriver_module():
-    if not DEBUG_SELENIUM_WIRE:
-        return webdriver
-    from seleniumwire import webdriver as seleniumwire_webdriver
-    return seleniumwire_webdriver
-
-def _build_seleniumwire_options(proxy_data):
-    if not DEBUG_SELENIUM_WIRE or not proxy_data:
-        return {}
-    proxy_url = f"http://{proxy_data['user']}:{proxy_data['pass']}@{proxy_data['ip']}:{proxy_data['port']}"
-    return {
-        'proxy': {
-            'http': proxy_url,
-            'https': proxy_url,
-            'no_proxy': 'localhost,127.0.0.1'
-        },
-        'verify_ssl': False,
-        'disable_capture': False,
-    }
-
 def _proxy_extension_dir(config, proxy_data):
     profile_path = Path(config['chrome_profile'])
     ext_key = f"{proxy_data['ip']}_{proxy_data['port']}"
@@ -962,7 +940,7 @@ chrome.webRequest.onAuthRequired.addListener(
     return ext_dir
 
 def _apply_chrome_proxy_options(chrome_options, config, proxy_data):
-    if not proxy_data or DEBUG_SELENIUM_WIRE:
+    if not proxy_data:
         return None
     if proxy_data.get('user') and proxy_data.get('pass'):
         if _using_orbita_browser():
@@ -993,7 +971,7 @@ def _has_extension_target(driver):
         return False
 
 def _warn_if_auth_extension_blocked(profile_name, driver, proxy_data):
-    if not proxy_data or not proxy_data.get('user') or not proxy_data.get('pass') or DEBUG_SELENIUM_WIRE:
+    if not proxy_data or not proxy_data.get('user') or not proxy_data.get('pass'):
         return
     if _using_orbita_browser():
         update_status(f"[{profile_name}] [DEBUG] Orbita proxy auth flags đang được sử dụng.")
@@ -1004,7 +982,7 @@ def _warn_if_auth_extension_blocked(profile_name, driver, proxy_data):
     if not _using_bundled_chrome() and _is_google_chrome_driver(driver):
         update_status(
             f"[{profile_name}] [WARN] Google Chrome hiện tại có thể chặn --load-extension; "
-            "proxy auth extension có thể không hoạt động. Nên dùng proxy whitelist/no-auth hoặc bật debug Selenium Wire."
+            "proxy auth extension có thể không hoạt động. Nên dùng proxy whitelist/no-auth."
         )
     elif _using_bundled_chrome():
         update_status(f"[{profile_name}] [WARN] Chưa phát hiện proxy auth extension trong Chrome target list; sẽ xác nhận bằng bước check IP.")
@@ -1036,156 +1014,11 @@ def _build_requests_session_from_driver(driver, config):
 
     return session, user_agent, proxies
 
-def _clear_wire_requests(driver):
-    if not DEBUG_SELENIUM_WIRE:
-        return 0
-    try:
-        del driver.requests
-        return 0
-    except Exception:
-        try:
-            return len(driver.requests)
-        except Exception:
-            return 0
-
-def _request_url_matches_upload(url):
-    text = str(url or '').lower()
-    keywords = (
-        'upload', 'publish', 'commit', 'complete', 'finish', 'chunk', 'part',
-        'project', 'video', 'aweme', 'tos', 'byte', 'storage', 'creator'
-    )
-    return any(k in text for k in keywords)
-
-def _truncate_text(value, max_len=REQUEST_TRACE_PREVIEW_BYTES):
-    if value is None:
-        return None
-    text = value if isinstance(value, str) else str(value)
-    return text if len(text) <= max_len else text[:max_len] + '...'
-
-def _preview_body_bytes(body, max_len=REQUEST_TRACE_PREVIEW_BYTES):
-    if not body:
-        return None
-    try:
-        sample = body[:max_len]
-        return sample.decode('utf-8', errors='replace')
-    except Exception:
-        return _truncate_text(body, max_len=max_len)
-
-def _normalize_headers(headers):
-    cleaned = {}
-    for key, value in headers.items():
-        k = str(key)
-        if k.lower() in ('cookie', 'authorization', 'proxy-authorization'):
-            continue
-        cleaned[k] = _truncate_text(value, max_len=300)
-    return cleaned
-
-def _serialize_wire_request(req):
-    response = getattr(req, 'response', None)
-    item = {
-        'method': getattr(req, 'method', ''),
-        'url': getattr(req, 'url', ''),
-        'request_headers': _normalize_headers(getattr(req, 'headers', {})),
-        'request_body_size': len(req.body or b'') if hasattr(req, 'body') and req.body else 0,
-        'request_body_preview': _preview_body_bytes(getattr(req, 'body', None)),
-        'status_code': getattr(response, 'status_code', None),
-        'response_headers': _normalize_headers(getattr(response, 'headers', {})) if response else {},
-        'response_body_size': len(response.body or b'') if response and getattr(response, 'body', None) else 0,
-        'response_body_preview': _preview_body_bytes(getattr(response, 'body', None)) if response else None,
-    }
-    return item
-
-def _collect_upload_wire_trace(driver, start_index=0, limit=REQUEST_TRACE_MAX_REQUESTS):
-    if not DEBUG_SELENIUM_WIRE:
-        return []
-    try:
-        requests_list = list(driver.requests)[start_index:]
-    except Exception:
-        return []
-
-    filtered = []
-    for req in requests_list:
-        url = getattr(req, 'url', '')
-        response = getattr(req, 'response', None)
-        if _request_url_matches_upload(url):
-            filtered.append(_serialize_wire_request(req))
-            continue
-        if response and _request_url_matches_upload(getattr(response, 'headers', {}).get('location', '')):
-            filtered.append(_serialize_wire_request(req))
-
-    return filtered[-limit:]
-
-def _extract_request_candidate_urls(trace_items):
-    candidates = []
-    seen = set()
-    for item in trace_items:
-        url = item.get('url', '')
-        method = item.get('method', '')
-        status = item.get('status_code')
-        key = (method, url)
-        if not url or key in seen:
-            continue
-        seen.add(key)
-        candidates.append({
-            'method': method,
-            'url': url,
-            'status_code': status,
-        })
-    return candidates
-
-def _prepare_request_assist_context(profile_name, driver):
-    config = profiles[profile_name]['config']
-    session, user_agent, proxies = _build_requests_session_from_driver(driver, config)
-    start_index = _clear_wire_requests(driver)
-    return {
-        'start_index': start_index,
-        'cookie_names': list(session.cookies.keys()),
-        'cookie_count': len(session.cookies),
-        'proxy_enabled': bool(proxies),
-        'proxy_hosts': sorted(list(proxies.keys())) if proxies else [],
-        'user_agent': user_agent,
-        'wire_debug_enabled': DEBUG_SELENIUM_WIRE,
-    }
-
-def _save_request_trace(profile_name, file_name, outcome, request_context, trace_items):
-    if not trace_items:
-        return None
-
-    os.makedirs(REQUEST_TRACE_DIR, exist_ok=True)
-    safe_profile = re.sub(r'[^\w\- ]+', '_', profile_name).strip() or 'profile'
-    safe_video = re.sub(r'[^\w\- .]+', '_', file_name).strip() or 'video'
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    out_path = Path(REQUEST_TRACE_DIR) / f"{safe_profile}__{timestamp}__{safe_video}.json"
-
-    payload = {
-        'profile_name': profile_name,
-        'video_name': file_name,
-        'captured_at': datetime.now().isoformat(timespec='seconds'),
-        'outcome': outcome,
-        'request_context': request_context,
-        'candidate_urls': _extract_request_candidate_urls(trace_items),
-        'trace': trace_items,
-    }
-    with open(out_path, 'w', encoding='utf-8') as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    return str(out_path)
-
-def _capture_request_trace(profile_name, driver, file_name, request_context, outcome):
-    if not request_context:
-        return None
-    trace_items = _collect_upload_wire_trace(driver, start_index=request_context.get('start_index', 0))
-    trace_path = _save_request_trace(profile_name, file_name, outcome, request_context, trace_items)
-    if trace_path:
-        update_status(f"[{profile_name}] [REQ] Đã lưu trace request: {trace_path}")
-    return trace_path
-
-def _append_failed_upload_log(profile_name, file_name, reason, trace_path=None, outcome='failed'):
+def _append_failed_upload_log(profile_name, file_name, reason, outcome='failed'):
     try:
         _set_profile_ui(profile_name, upload='Đăng lỗi', last_error=reason)
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         line = f"{timestamp} | profile={profile_name} | outcome={outcome} | file={file_name} | reason={reason}"
-        if trace_path:
-            line += f" | trace={trace_path}"
         line += "\n"
         with open(FAILED_UPLOADS_LOG, 'a', encoding='utf-8') as f:
             f.write(line)
@@ -1446,7 +1279,10 @@ def _snapshot_live_cookies_before_post(driver, profile_name):
 
 def _capture_tiktok_cookies_worker(profile_name):
     cfg = profiles[profile_name]['config']
+    lc = get_lifecycle(profile_name)
+    aux_gen = lc.generation
     driver = None
+    svc = None
     try:
         probe_config = dict(cfg)
         probe_config['headless'] = True
@@ -1456,21 +1292,22 @@ def _capture_tiktok_cookies_worker(profile_name):
             save_configs()
         probe_config['fingerprint'] = cfg.get('fingerprint', {})
         options = _build_fast_chrome_options(probe_config, block_images=False)
-        seleniumwire_options = _build_seleniumwire_options(proxy_data) if proxy_data else {}
         _apply_chrome_proxy_options(options, cfg, proxy_data)
         driver_path = _ensure_profile_driver(profile_name)
-        driver_module = _active_webdriver_module()
         for launch_attempt in range(2):
             try:
                 service = Service(driver_path)
-                if DEBUG_SELENIUM_WIRE:
-                    driver = driver_module.Chrome(service=service, options=options, seleniumwire_options=seleniumwire_options)
-                else:
-                    driver = driver_module.Chrome(service=service, options=options)
+                svc = service
+                lc.add_pid(getattr(getattr(service, 'process', None), 'pid', None))
+                driver = webdriver.Chrome(service=service, options=options)
                 break
             except Exception as error:
                 if launch_attempt == 0 and _is_driver_version_mismatch_error(error):
                     _invalidate_chromedriver_cache("cookie capture driver/browser version mismatch")
+                    if svc:
+                        _kill_service_process(svc)
+                        lc.pop_pid(getattr(getattr(svc, 'process', None), 'pid', None))
+                        svc = None
                     try:
                         _profile_driver_path(profile_name).unlink(missing_ok=True)
                     except Exception:
@@ -1514,6 +1351,8 @@ def _capture_tiktok_cookies_worker(profile_name):
                 driver.quit()
             except Exception:
                 pass
+        if svc:
+            _kill_service_process(svc)
         if profile_name in profiles:
             _set_profile_ui(profile_name, browser='Đã đóng')
 
@@ -1635,20 +1474,6 @@ def clean_browser():
                 profile['session_busy'] = False
 
     threading.Thread(target=worker, daemon=True).start()
-
-def _get_network_upload_signal(driver, request_start_index=0):
-    trace_items = _collect_upload_wire_trace(driver, start_index=request_start_index, limit=25)
-    for item in reversed(trace_items):
-        url = item.get('url', '').lower()
-        status = item.get('status_code')
-        if not status or status >= 500:
-            continue
-        short_url = _truncate_text(item.get('url', ''), max_len=120)
-        if any(k in url for k in ('commit', 'complete', 'finish')) and 200 <= status < 400:
-            return True, f"network-ready:{short_url}", True
-        if 200 <= status < 500:
-            return True, f"network:{short_url}", False
-    return False, None, False
 
 # =========================
 # LICENSE KEY: Core Logic
@@ -1857,8 +1682,7 @@ def _license_dialog(on_success):
 
     def on_close():
         if not LICENSE_OK:
-            try: root.destroy()
-            except Exception: os._exit(0)
+            on_closing()
 
     btn = ctk.CTkButton(dlg, text="Kích hoạt", command=do_check, width=120)
     btn.pack(pady=10)
@@ -1884,6 +1708,15 @@ def _set_ui_enabled(enabled: bool):
 
 def require_license_then_boot():
     global LICENSE_OK, LICENSE_KEY, LICENSE_INFO
+
+    FROZEN_SMOKE = os.environ.get('FROZEN_SMOKE_TEST', '').strip().lower() in ('1', 'true')
+    if FROZEN_SMOKE:
+        LICENSE_OK = True
+        LICENSE_KEY = 'FROZEN_SMOKE'
+        LICENSE_INFO = {'status': 'FROZEN_SMOKE'}
+        root.after(0, _smoke_mode_init)
+        return
+
     if os.environ.get('AUTO_TEST_MODE') == '1':
         LICENSE_OK = True
         LICENSE_KEY = 'AUTO_TEST'
@@ -1938,6 +1771,75 @@ def _license_guard():
     if LICENSE_OK: return True
     messagebox.showerror("License", "Bạn chưa kích hoạt License.")
     return False
+
+
+def _smoke_mode_init():
+    import sys
+    import platform
+    smoke_marker_dir = Path(os.environ.get('FROZEN_SMOKE_MARKER_DIR', ''))
+    smoke_nonce = os.environ.get('FROZEN_SMOKE_NONCE', '')
+    if not smoke_marker_dir.is_absolute() or not smoke_marker_dir.is_dir():
+        root.after(100, lambda: sys.exit(2))
+        return
+    smoke_marker_dir = Path(smoke_marker_dir)
+    marker_file = smoke_marker_dir / 'smoke_ready.json'
+
+    try:
+        _set_ui_enabled(True)
+        update_status("FROZEN_SMOKE_TEST: bỏ qua license, monitor, ngrok, updater, resource.")
+        requests_version = requests.__version__
+        import flask
+        import blinker
+        import importlib.metadata as importlib_metadata
+        def _package_version(dist_name):
+            try:
+                return importlib_metadata.version(dist_name)
+            except Exception:
+                return "import-ok"
+        try:
+            import charset_normalizer
+            csn_version = charset_normalizer.__version__
+        except Exception:
+            csn_version = None
+        marker = {
+            'ready': True,
+            'app_version': CURRENT_VERSION,
+            'python_version': platform.python_version(),
+            'frozen': getattr(sys, 'frozen', False),
+            'nonce': smoke_nonce,
+            'requests_version': requests_version,
+            'charset_normalizer_version': csn_version,
+            'flask_version': _package_version('Flask'),
+            'blinker_version': _package_version('blinker'),
+            'status': 'ok',
+        }
+    except Exception as e:
+        marker = {
+            'ready': False,
+            'app_version': CURRENT_VERSION,
+            'error': str(e),
+            'status': 'error',
+        }
+
+    try:
+        with open(marker_file, 'w', encoding='utf-8') as f:
+            json.dump(marker, f, indent=2)
+    except Exception:
+        pass
+
+    if marker.get('ready'):
+        root.after(100, _smoke_clean_exit)
+    else:
+        root.after(100, lambda: (update_status(f"FROZEN_SMOKE_ERROR: {marker.get('error', 'unknown')}"), sys.exit(1)))
+
+
+def _smoke_clean_exit():
+    import sys
+    try:
+        root.destroy()
+    except Exception:
+        pass
+    sys.exit(0)
 
 # =========================
 # Tiện ích UI
@@ -2202,6 +2104,14 @@ def check_system_resources(profile_name):
         return False
     except Exception: return True
 
+def after_kill_cleanup_running_profiles():
+    for name in list(running_profiles):
+        if name in profiles:
+            lc = get_lifecycle(name)
+            if not profiles[name].get('running', False) and not lc.has_active_driver():
+                running_profiles.discard(name)
+
+
 def kill_stale_chrome_processes(profile_name):
     target_dir = profiles[profile_name]['config']['chrome_profile']
     expected_driver = str(profile_driver_path(target_dir))
@@ -2219,21 +2129,41 @@ def kill_stale_chrome_processes(profile_name):
         killed_count += 1
 
     try:
+        # Kill tracked PIDs first (more precise)
+        lc = get_lifecycle(profile_name)
+        tracked_pids = lc.owned_pids()
+        for pid in tracked_pids:
+            try:
+                proc = psutil.Process(pid)
+                if proc.is_running():
+                    _force_kill(proc)
+                    killed_count += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        # Fallback: scan by path/command line
         for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'exe']):
+            proc_pid = None
             try:
                 if not proc.is_running():
                     continue
-                name = proc.info['name'].lower()
-                cmdline = proc.info['cmdline'] or []
-                if name not in ('chrome.exe', 'chromedriver.exe', 'chrome', 'chromedriver'):
+                proc_pid = proc.info['pid']
+                if proc_pid in tracked_pids:
                     continue
+                raw_name = proc.info.get('name') or ''
+                name_str = raw_name.lower() if raw_name else ''
+                if name_str not in ('chrome.exe', 'chromedriver.exe', 'chrome', 'chromedriver'):
+                    continue
+                cmdline = proc.info['cmdline'] or []
                 if process_uses_profile(cmdline, target_dir):
                     _force_kill(proc)
+                    killed_count += 1
                     continue
-                if name in ('chromedriver.exe', 'chromedriver'):
+                if name_str in ('chromedriver.exe', 'chromedriver'):
                     exe_path = proc.info.get('exe') or ''
                     if exe_path and normalize_profile_path(exe_path) == normalize_profile_path(expected_driver):
                         _force_kill(proc)
+                        killed_count += 1
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
 
@@ -2242,29 +2172,38 @@ def kill_stale_chrome_processes(profile_name):
     except Exception as e:
         logging.warning(f"[{profile_name}] Lỗi khi kill process: {e}")
 
-def _init_driver_inner(profile_name, service, chrome_options, seleniumwire_options):
+def _init_driver_inner(profile_name, service, chrome_options):
     update_status(f"[{profile_name}] [DEBUG] Đang gọi webdriver.Chrome()...")
-    driver_module = _active_webdriver_module()
-    if DEBUG_SELENIUM_WIRE:
-        driver = driver_module.Chrome(
-            service=service,
-            options=chrome_options,
-            seleniumwire_options=seleniumwire_options
-        )
-    else:
-        driver = driver_module.Chrome(service=service, options=chrome_options)
+    driver = webdriver.Chrome(service=service, options=chrome_options)
     update_status(f"[{profile_name}] [DEBUG] webdriver.Chrome() đã trả về driver object")
     return driver
 
-def _init_driver_with_timeout(profile_name, service, chrome_options, seleniumwire_options, timeout=DRIVER_INIT_TIMEOUT):
+def _init_driver_with_timeout(profile_name, service, chrome_options, timeout=DRIVER_INIT_TIMEOUT):
+    lc = get_lifecycle(profile_name)
     executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(_init_driver_inner, profile_name, service, chrome_options, seleniumwire_options)
+    future = executor.submit(_init_driver_inner, profile_name, service, chrome_options)
+    lc.set_startup_future(future)
     try:
         driver = future.result(timeout=timeout)
         return driver
     except FuturesTimeout:
         update_status(f"[{profile_name}] [ERROR] Khởi tạo driver quá {timeout}s, hủy tiến trình và thử lại...")
         executor.shutdown(wait=False, cancel_futures=True)
+
+        def _cleanup_late_driver(fut):
+            if fut.done() and not fut.cancelled():
+                try:
+                    late = fut.result(timeout=0)
+                    if late is not None:
+                        try:
+                            late.quit()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            _kill_service_process(service)
+
+        future.add_done_callback(_cleanup_late_driver)
         raise TimeoutError(f"Khởi tạo driver quá {timeout}s")
     except Exception as e:
         executor.shutdown(wait=False)
@@ -2272,7 +2211,8 @@ def _init_driver_with_timeout(profile_name, service, chrome_options, seleniumwir
     finally:
         executor.shutdown(wait=False)
 
-def ensure_driver(profile_name):
+
+def ensure_driver(profile_name, lifecycle_gen=None):
     global GLOBAL_DRIVER_PATH
     total_start = time.perf_counter()
     driver = profiles[profile_name]['driver']
@@ -2286,6 +2226,10 @@ def ensure_driver(profile_name):
         except Exception: pass
     profiles[profile_name]['driver'] = None
     
+    lc = get_lifecycle(profile_name)
+    if lifecycle_gen is None:
+        lifecycle_gen = lc.generation
+
     step_start = time.perf_counter()
     kill_stale_chrome_processes(profile_name)
     clean_chrome_lock_files(config['chrome_profile'])
@@ -2295,6 +2239,9 @@ def ensure_driver(profile_name):
     driver_refreshed_for_mismatch = False
     
     for attempt in range(max_attempts):
+        if lc.is_cancelled or not lc.is_current(lifecycle_gen):
+            update_status(f"[{profile_name}] Lifecycle đã bị hủy, không retry driver.")
+            raise RuntimeError("Lifecycle cancelled")
         driver = None
         try:
             attempt_start = time.perf_counter()
@@ -2311,18 +2258,13 @@ def ensure_driver(profile_name):
             
             # --- SETUP PROXY ---
             proxy_data = None
-            seleniumwire_options = {}
-            
             if config.get('use_proxy', False):
                 step_start = time.perf_counter()
                 _set_profile_ui(profile_name, proxy='Đang kiểm tra')
                 proxy_str = config.get('proxy_string', '')
                 proxy_data = parse_proxy_string(proxy_str)
                 if proxy_data:
-                    seleniumwire_options = _build_seleniumwire_options(proxy_data)
-                    if DEBUG_SELENIUM_WIRE:
-                        mode = "Selenium Wire debug"
-                    elif proxy_data.get('user') and proxy_data.get('pass') and _using_orbita_browser():
+                    if proxy_data.get('user') and proxy_data.get('pass') and _using_orbita_browser():
                         mode = "Orbita proxy auth"
                     elif proxy_data.get('user') and proxy_data.get('pass'):
                         mode = "Chrome proxy extension"
@@ -2370,7 +2312,6 @@ def ensure_driver(profile_name):
                 profile_name,
                 service,
                 chrome_options,
-                seleniumwire_options,
                 timeout=DRIVER_INIT_TIMEOUT
             )
             _timing_log(profile_name, "webdriver_chrome", step_start)
@@ -2428,6 +2369,22 @@ def ensure_driver(profile_name):
             if not upload_page_ready:
                 _open_upload_page(driver, profile_name)
             _timing_log(profile_name, "tiktok_prepare", step_start)
+
+            svc_pid = None
+            try:
+                sp = getattr(service, 'process', None)
+                if sp is not None:
+                    svc_pid = sp.pid
+            except Exception:
+                pass
+
+            if lifecycle_gen is None or not lc.register_automation(lifecycle_gen, driver, service, svc_pid):
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+                raise RuntimeError("Lifecycle changed before driver publish")
+
             profiles[profile_name]['driver'] = driver
             _set_profile_ui(profile_name, status='Đang chạy', browser='Sẵn sàng', upload='Chờ video')
             update_status(f"[{profile_name}] [DEBUG] Driver sẵn sàng!")
@@ -3044,12 +3001,12 @@ def _has_upload_progress_signal(driver):
     except Exception as e:
         return False, f"signal-error:{e}"
 
-def _classify_upload_phase(signal_reason, editor_state=None, network_source=None, network_ready_hint=False):
+def _classify_upload_phase(signal_reason, editor_state=None):
     editor_state = editor_state or {}
-    if editor_state.get('ready') or network_ready_hint or signal_reason == 'post-ready-js':
+    if editor_state.get('ready') or signal_reason == 'post-ready-js':
         return 'post-ready'
 
-    reason = network_source or signal_reason or editor_state.get('reason') or ''
+    reason = signal_reason or editor_state.get('reason') or ''
     reason = str(reason)
 
     if 'upload-progress' in reason or 'upload-loading' in reason:
@@ -3062,7 +3019,7 @@ def _classify_upload_phase(signal_reason, editor_state=None, network_source=None
         return 'processing'
     return 'unknown'
 
-def _watch_upload_until_ready_or_stalled(driver, profile_name, file_name, request_start_index=0):
+def _watch_upload_until_ready_or_stalled(driver, profile_name, file_name):
     """Watchdog nhẹ: chỉ quan sát, log và chỉ can thiệp khi xác nhận stalled."""
     short_name = shorten_filename(file_name)
     start_ts = time.time()
@@ -3071,11 +3028,9 @@ def _watch_upload_until_ready_or_stalled(driver, profile_name, file_name, reques
     last_stage_log_ts = 0
     last_stage_key = None
     last_signal_check_ts = 0.0
-    last_network_check_ts = 0.0
     last_signal_result = (False, "no-signal")
     last_phase = None
     last_phase_change_ts = start_ts
-    last_network_source = None
     last_progress_fingerprint = None
     last_content_check_ts = 0.0
 
@@ -3104,16 +3059,6 @@ def _watch_upload_until_ready_or_stalled(driver, profile_name, file_name, reques
                 if post_button:
                     return True, editor_state.get('reason', 'editor-ready'), post_button
 
-            network_alive = False
-            network_source = None
-            network_ready_hint = False
-            if now - last_network_check_ts >= NETWORK_READY_POLL_INTERVAL:
-                network_alive, network_source, network_ready_hint = _get_network_upload_signal(driver, request_start_index)
-                last_network_check_ts = now
-                last_network_source = network_source
-                if network_ready_hint and _find_ready_post_button(driver):
-                    return True, "request trace + nút Đăng đã sẵn sàng", _find_ready_post_button(driver)
-
             if now - last_signal_check_ts >= UPLOAD_SIGNAL_POLL_INTERVAL:
                 last_signal_result = _has_upload_progress_signal(driver)
                 last_signal_check_ts = now
@@ -3122,12 +3067,9 @@ def _watch_upload_until_ready_or_stalled(driver, profile_name, file_name, reques
             if editor_state.get('alive'):
                 alive = True
                 source = editor_state.get('reason', source)
-            if network_alive:
-                alive = True
-                source = network_source or source
 
-            phase = _classify_upload_phase(source, editor_state=editor_state, network_source=network_source, network_ready_hint=network_ready_hint)
-            progress_fingerprint = (phase, source, bool(network_ready_hint), bool(editor_state.get('ready')))
+            phase = _classify_upload_phase(source, editor_state=editor_state)
+            progress_fingerprint = (phase, source, bool(editor_state.get('ready')))
 
             made_progress = False
             if phase != last_phase:
@@ -3178,7 +3120,7 @@ def _watch_upload_until_ready_or_stalled(driver, profile_name, file_name, reques
 
             if elapsed_total >= UPLOAD_HARD_TIMEOUT:
                 update_status(f"[{profile_name}] [DEBUG] Phát hiện video bị kẹt cứng sau {int(elapsed_total)} giây tổng thời gian upload: {short_name}")
-                return False, f"video vượt hard-timeout {UPLOAD_HARD_TIMEOUT}s (phase={last_phase}, source={last_network_source or source})", None
+                return False, f"video vượt hard-timeout {UPLOAD_HARD_TIMEOUT}s (phase={last_phase}, source={source})", None
 
             if phase in {'processing', 'file-selected', 'uploading'} and phase_idle_for >= UPLOAD_PHASE_STALL_TIMEOUT:
                 update_status(f"[{profile_name}] [DEBUG] Phát hiện video bị kẹt quá lâu ở phase `{phase}` sau {int(phase_idle_for)} giây: {short_name}")
@@ -3211,6 +3153,13 @@ def _ensure_upload_container_ready(driver, quick_only=False):
     except Exception: return False
 
 def _force_reopen_driver(profile_name, reason):
+    if not profiles.get(profile_name, {}).get('running', False):
+        update_status(f"[{profile_name}] Profile không còn chạy, bỏ qua reopen: {reason}")
+        return None
+    lc = get_lifecycle(profile_name)
+    if lc.is_cancelled:
+        update_status(f"[{profile_name}] Lifecycle đã hủy, bỏ qua reopen: {reason}")
+        return None
     driver = profiles.get(profile_name, {}).get('driver')
     if driver:
         try:
@@ -3219,11 +3168,18 @@ def _force_reopen_driver(profile_name, reason):
             pass
     profiles[profile_name]['driver'] = None
     update_status(f"[{profile_name}] [DEBUG] Đang mở lại browser sau lỗi upload: {reason}")
-    ensure_driver(profile_name)
+    try:
+        ensure_driver(profile_name)
+    except Exception as e:
+        update_status(f"[{profile_name}] Reopen thất bại: {e}")
+        return None
     return profiles[profile_name].get('driver')
 
 def _recover_upload_page_after_failure(profile_name, driver, reason, force_reopen=False):
     if not profiles.get(profile_name, {}).get('running', False):
+        return False
+    lc = get_lifecycle(profile_name)
+    if lc.is_cancelled:
         return False
     update_status(f"[{profile_name}] [DEBUG] Đang reset trang upload sau lỗi: {reason}")
     if not force_reopen and is_driver_valid(driver):
@@ -3246,7 +3202,6 @@ def _recover_upload_page_after_failure(profile_name, driver, reason, force_reope
 
 def upload_video(profile_name, video_path):
     last_error = None
-    request_context = None
     driver = None
     file_name = Path(video_path).name
     short_name = shorten_filename(file_name)
@@ -3264,7 +3219,6 @@ def upload_video(profile_name, video_path):
         ensure_driver(profile_name)
         record_phase('ensure_driver_seconds', phase_started)
         driver = profiles[profile_name]['driver']
-        request_context = _prepare_request_assist_context(profile_name, driver)
         stall_retry_used = False
         recovered_after_failure = False
         max_attempts = 1 if os.environ.get('UPLOAD_TEST_MODE') == '1' else RETRY_COUNT + 1
@@ -3296,7 +3250,6 @@ def upload_video(profile_name, video_path):
                     driver,
                     profile_name,
                     file_name,
-                    request_start_index=request_context.get('start_index', 0) if request_context else 0,
                 )
                 record_phase('wait_until_ready_seconds', phase_started)
                 if not ready:
@@ -3335,10 +3288,6 @@ def upload_video(profile_name, video_path):
                         _safe_open_upload_page(driver, profile_name)
                 except Exception as error:
                     update_status(f"[{profile_name}] [WARN] Đã đăng nhưng chưa reset được trang upload: {error}")
-                try:
-                    _capture_request_trace(profile_name, driver, file_name, request_context, outcome='success')
-                except Exception as error:
-                    update_status(f"[{profile_name}] [WARN] Đã đăng nhưng không lưu được request trace: {error}")
                 try:
                     _export_live_cookies_to_config(driver, profile_name)
                 except Exception as error:
@@ -3382,8 +3331,7 @@ def upload_video(profile_name, video_path):
                     break
                 if "File not found" in str(e):
                     _set_profile_ui(profile_name, upload='Đăng lỗi', last_error=str(e))
-                    trace_path = _capture_request_trace(profile_name, driver, file_name, request_context, outcome='file_not_found')
-                    _append_failed_upload_log(profile_name, file_name, str(e), trace_path=trace_path, outcome='file_not_found')
+                    _append_failed_upload_log(profile_name, file_name, str(e), outcome='file_not_found')
                     return False
                 if os.environ.get('UPLOAD_TEST_MODE') != '1' and "Video bị treo trước khi nút Đăng sẵn sàng" in str(e) and not stall_retry_used:
                     stall_retry_used = True
@@ -3410,14 +3358,12 @@ def upload_video(profile_name, video_path):
         else:
             update_status(f"[{profile_name}] [DEBUG] Đánh dấu video lỗi và chuyển sang video kế tiếp, giữ nguyên driver hiện tại: {short_name}")
         _set_profile_ui(profile_name, upload='Đăng lỗi', last_error=str(last_error or 'Không đăng được video'))
-        trace_path = _capture_request_trace(profile_name, driver, file_name, request_context, outcome='failed_after_retries')
-        _append_failed_upload_log(profile_name, file_name, last_error or 'failed_after_retries', trace_path=trace_path, outcome='failed_after_retries')
+        _append_failed_upload_log(profile_name, file_name, last_error or 'failed_after_retries', outcome='failed_after_retries')
         return False
     except Exception as e:
         last_error = str(e)
         try:
-            trace_path = _capture_request_trace(profile_name, driver, file_name, request_context, outcome='fatal')
-            _append_failed_upload_log(profile_name, file_name, str(e), trace_path=trace_path, outcome='fatal')
+            _append_failed_upload_log(profile_name, file_name, str(e), outcome='fatal')
         except Exception:
             pass
         update_status(f"[{profile_name}] Lỗi nghiêm trọng: {e}")
@@ -3447,9 +3393,10 @@ def upload_video(profile_name, video_path):
 
 def process_video_queue_thread(profile_name):
     idle_start = None
+    lc = get_lifecycle(profile_name)
     while True:
         try:
-            if profile_name not in profiles or not profiles[profile_name]['running']:
+            if profile_name not in profiles or not profiles[profile_name]['running'] or lc.is_cancelled:
                 break
 
             limit = profiles[profile_name]['config'].get('max_uploads_per_day', 0)
@@ -3683,17 +3630,6 @@ def cleanup_failed_videos():
         except Exception:
             pass
     
-    if failed_to_delete and os.path.isdir(REQUEST_TRACE_DIR):
-        all_failed_fnames = {f for fnames in failed_files.values() for f in fnames}
-        for tf in os.listdir(REQUEST_TRACE_DIR):
-            for vname in all_failed_fnames:
-                if vname in tf:
-                    try:
-                        os.remove(os.path.join(REQUEST_TRACE_DIR, tf))
-                    except Exception:
-                        pass
-                    break
-    
     try:
         open(FAILED_UPLOADS_LOG, 'w', encoding='utf-8').close()
     except Exception:
@@ -3806,26 +3742,33 @@ def _refresh_status_bar():
         pass
 
 def _first_run_download_check():
-    """Kiểm tra và tải tài nguyên thiếu (Browser, ngrok.exe, service_account.json)."""
-    from version import RESOURCE_ASSETS
+    """Kiểm tra và tải tài nguyên thiếu (Browser, ngrok.exe, service_account.json, FFmpeg)."""
+    from version import RESOURCE_ASSETS, RESOURCE_RELEASE_VERSION
+
     missing = {}
     for local_name, info in RESOURCE_ASSETS.items():
         path = app_base_dir() / local_name
         if not path.exists():
             missing[local_name] = info
 
-    if not missing:
+    import youtube_monitor.ffmpeg_helper as fh
+    ffmpeg_ok, ffmpeg_msg, ffmpeg_src = fh.check_ffmpeg()
+    ffmpeg_needed = not ffmpeg_ok
+
+    if not missing and not ffmpeg_needed:
         return
 
-    if not messagebox.askyesno(
-        "Tải tài nguyên",
-        "Cần tải tài nguyên lần đầu (Browser, ngrok, service_account). Tiếp tục?",
-    ):
+    items_list = [f"- {name}" for name in missing]
+    if ffmpeg_needed:
+        items_list.append("- FFmpeg")
+    popup_msg = "Cần tải tài nguyên lần đầu:\n" + "\n".join(items_list) + "\n\nTiếp tục?"
+
+    if not messagebox.askyesno("Tải tài nguyên", popup_msg):
         return
 
     dlg = ctk.CTkToplevel(root)
     dlg.title("Đang tải tài nguyên lần đầu...")
-    dlg.geometry("480x140")
+    dlg.geometry("480x180")
     dlg.grab_set()
     dlg.resizable(False, False)
     label = ctk.CTkLabel(dlg, text="Đang tải...", font=("", 13))
@@ -3836,9 +3779,14 @@ def _first_run_download_check():
 
     def _update_status(text, pct):
         try:
+            root.after(0, lambda t=text, p=pct: _do_update(t, p))
+        except Exception:
+            pass
+
+    def _do_update(text, pct):
+        try:
             label.configure(text=text)
             progress.set(pct)
-            dlg.update_idletasks()
         except Exception:
             pass
 
@@ -3851,61 +3799,139 @@ def _first_run_download_check():
             messagebox.showerror("Lỗi", f"Tải tài nguyên thất bại:\n{msg}")
 
     def _run():
+        def _cleanup_part(part):
+            try:
+                p = Path(part)
+                if p.exists():
+                    p.unlink()
+            except Exception:
+                pass
         try:
-            tag = f"v{CURRENT_VERSION}"
-            base_url = f"https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/download/{tag}"
-            total = len(missing)
-            for i, (local_name, info) in enumerate(missing.items()):
-                _update_status(f"Đang tải {local_name}...", (i + 0.1) / total)
-                asset_name = info["asset"].format(version=CURRENT_VERSION)
+            total = len(missing) + (1 if ffmpeg_needed else 0)
+            i = 0
+            resource_tag = f"v{RESOURCE_RELEASE_VERSION}"
+            base_url = f"https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/download/{resource_tag}"
+            for local_name, info in missing.items():
+                i += 1
+                _update_status(f"Đang tải {local_name}...", (i - 0.9) / total)
+                asset_name = info["asset"].format(version=RESOURCE_RELEASE_VERSION)
                 url = f"{base_url}/{asset_name}"
-
-                if info["type"] == "zip_dir":
-                    temp_dir = app_base_dir() / "temp_dl" / "resources"
-                    temp_dir.mkdir(parents=True, exist_ok=True)
-                    zip_path = temp_dir / asset_name
-                    updater = GitHubReleaseUpdater(app_base_dir(), GITHUB_REPO_OWNER, GITHUB_REPO_NAME)
-                    updater.download_asset(url, zip_path)
-                    _update_status(f"Đang giải nén {local_name}...", (i + 0.6) / total)
-                    extract_temp = temp_dir / f"extract_{local_name}"
-                    shutil.rmtree(extract_temp, ignore_errors=True)
-                    extract_temp.mkdir(parents=True, exist_ok=True)
-                    with zipfile.ZipFile(zip_path, "r") as zf:
-                        zf.extractall(extract_temp)
-                    dest = app_base_dir() / local_name
-                    shutil.rmtree(dest, ignore_errors=True)
-                    items = list(extract_temp.iterdir())
-                    if len(items) == 1 and items[0].is_dir():
-                        shutil.copytree(items[0], dest)
+                try:
+                    if info["type"] == "zip_dir":
+                        temp_dir = app_base_dir() / "temp_dl" / "resources"
+                        temp_dir.mkdir(parents=True, exist_ok=True)
+                        part_path = temp_dir / (asset_name + ".part")
+                        zip_path = temp_dir / asset_name
+                        zip_path.unlink(missing_ok=True)
+                        _cleanup_part(part_path)
+                        updater = GitHubReleaseUpdater(app_base_dir(), GITHUB_REPO_OWNER, GITHUB_REPO_NAME)
+                        updater.download_asset(url, part_path)
+                        os.replace(part_path, zip_path)
+                        _update_status(f"Đang giải nén {local_name}...", (i - 0.4) / total)
+                        extract_temp = temp_dir / f"extract_{local_name}"
+                        shutil.rmtree(extract_temp, ignore_errors=True)
+                        extract_temp.mkdir(parents=True, exist_ok=True)
+                        root_dir = extract_temp.resolve()
+                        with zipfile.ZipFile(zip_path, "r") as zf:
+                            for member in zf.infolist():
+                                target = (root_dir / member.filename).resolve()
+                                if os.path.commonpath([str(root_dir), str(target)]) != str(root_dir):
+                                    raise RuntimeError(f"ZIP path traversal detected: {member.filename}")
+                            zf.extractall(extract_temp)
+                        dest = app_base_dir() / local_name
+                        dest_backup = app_base_dir() / f"{local_name}.bak"
+                        dest_backup_exists = dest.exists()
+                        if dest_backup_exists:
+                            shutil.rmtree(dest_backup, ignore_errors=True)
+                            shutil.copytree(dest, dest_backup)
+                        shutil.rmtree(dest, ignore_errors=True)
+                        try:
+                            items = list(extract_temp.iterdir())
+                            if len(items) == 1 and items[0].is_dir():
+                                shutil.copytree(items[0], dest)
+                            else:
+                                shutil.copytree(extract_temp, dest)
+                            for validate_path in info.get("validate", []):
+                                if not (app_base_dir() / validate_path).exists():
+                                    raise RuntimeError(f"Thiếu file bắt buộc: {validate_path}")
+                            shutil.rmtree(dest_backup, ignore_errors=True)
+                        except Exception:
+                            if dest_backup_exists:
+                                shutil.rmtree(dest, ignore_errors=True)
+                                shutil.copytree(dest_backup, dest)
+                                shutil.rmtree(dest_backup, ignore_errors=True)
+                            elif not dest.exists() or not any(dest.iterdir()):
+                                shutil.rmtree(dest, ignore_errors=True)
+                            raise
+                        finally:
+                            shutil.rmtree(extract_temp, ignore_errors=True)
+                            zip_path.unlink(missing_ok=True)
+                            _cleanup_part(part_path)
                     else:
-                        shutil.copytree(extract_temp, dest)
-                    shutil.rmtree(extract_temp, ignore_errors=True)
-                    zip_path.unlink(missing_ok=True)
-                    for validate_path in info.get("validate", []):
-                        if not (app_base_dir() / validate_path).exists():
-                            raise RuntimeError(f"Thiếu file bắt buộc: {validate_path}")
-                else:
-                    updater = GitHubReleaseUpdater(app_base_dir(), GITHUB_REPO_OWNER, GITHUB_REPO_NAME)
-                    dest = app_base_dir() / local_name
-                    updater.download_asset(url, dest)
-                    if not dest.exists() or dest.stat().st_size == 0:
-                        raise RuntimeError(f"Tải {local_name} thất bại: file rỗng hoặc không tồn tại.")
+                        dest = app_base_dir() / local_name
+                        part_path = dest.with_suffix(dest.suffix + ".part")
+                        _cleanup_part(part_path)
+                        updater = GitHubReleaseUpdater(app_base_dir(), GITHUB_REPO_OWNER, GITHUB_REPO_NAME)
+                        updater.download_asset(url, part_path)
+                        if not part_path.exists() or part_path.stat().st_size == 0:
+                            _cleanup_part(part_path)
+                            raise RuntimeError(f"Tải {local_name} thất bại: file rỗng hoặc không tồn tại.")
+                        dest_backup = app_base_dir() / f"{local_name}.bak"
+                        dest_backup_exists = dest.exists()
+                        if dest_backup_exists:
+                            shutil.copy2(dest, dest_backup)
+                        try:
+                            os.replace(part_path, dest)
+                            if not dest.exists() or dest.stat().st_size == 0:
+                                raise RuntimeError(f"Xác minh {local_name} thất bại")
+                            if dest_backup_exists:
+                                dest_backup.unlink(missing_ok=True)
+                        except Exception:
+                            if dest_backup_exists and dest_backup.exists():
+                                shutil.move(str(dest_backup), str(dest))
+                            else:
+                                _cleanup_part(part_path)
+                                dest.unlink(missing_ok=True)
+                            raise
+                        finally:
+                            _cleanup_part(part_path)
+                except Exception as e:
+                    _cleanup_part(part_path)
+                    raise
+                _update_status(f"Đã tải {local_name}.", i / total)
 
-                _update_status(f"Đã tải {local_name}.", (i + 1) / total)
-            _update_status("Hoàn tất.", 1.0)
+            if ffmpeg_needed:
+                i += 1
+                _update_status("Đang tải FFmpeg...", (i - 0.9) / total)
+                def _ff_progress(text, pct):
+                    _update_status(text, (i - 1 + pct) / total)
+                ff_ok, ff_msg = fh.ensure_ffmpeg(progress_callback=_ff_progress)
+                if not ff_ok:
+                    raise RuntimeError(f"FFmpeg: {ff_msg}")
+                _update_status("Đã tải FFmpeg.", i / total)
+
             root.after(500, lambda: _done(True, ""))
         except requests.RequestException as e:
-            root.after(0, lambda: _done(False, f"Lỗi mạng: {e}"))
+            error_msg = f"Lỗi mạng: {e}"
+            root.after(0, lambda msg=error_msg: _done(False, msg))
         except Exception as e:
-            root.after(0, lambda: _done(False, str(e)))
+            error_msg = str(e).strip() or "Lỗi không xác định"
+            root.after(0, lambda msg=error_msg: _done(False, msg))
 
     threading.Thread(target=_run, daemon=True).start()
 
 
 def _stop_all_profiles():
-    for name in list(running_profiles):
-        if profiles.get(name, {}).get("running"):
+    for name in list(profiles.keys()):
+        lc = get_lifecycle(name)
+        if profiles.get(name, {}).get("running") or lc.has_active_driver() or is_driver_valid(lc.get_automation_driver()) or is_driver_valid(lc.get_manual_driver()):
+            lc.cancel()
+    for name in list(profiles.keys()):
+        try:
             stop_profile(name)
+        except Exception:
+            pass
+    after_kill_cleanup_running_profiles()
     return len(running_profiles) == 0
 
 
@@ -4096,6 +4122,7 @@ def _show_update_available_dialog(result):
         if running_count > 0:
             update_status("[Update] Đang dừng profiles...")
             _stop_all_profiles()
+            after_kill_cleanup_running_profiles()
         try:
             update_updater_config(skip_version='', remind_after_epoch=0)
         except Exception as error:
@@ -4302,8 +4329,13 @@ def _thread_sequential_stop(targets, context_name):
     try:
         update_status(f"Bắt đầu dừng {len(targets)} hồ sơ ({context_name})...")
         for name in targets:
+            if name in profiles:
+                lc = get_lifecycle(name)
+                if profiles[name].get('running', False) or lc.has_active_driver() or is_driver_valid(profiles[name].get('manual_driver')):
+                    lc.cancel()
+                lc.cancel()
+        for name in targets:
             if name not in profiles: continue
-            if not profiles[name]['running'] and not is_driver_valid(profiles[name].get('manual_driver')): continue
             try:
                 update_status(f"[{name}] Đang dừng...")
                 stop_profile(name)
@@ -4407,6 +4439,8 @@ def start_profile(name=None):
         _set_profile_ui(name, status='Lỗi', last_error='Profile đang được sử dụng bởi thao tác session khác')
         return
     
+    lc = get_lifecycle(name)
+    start_gen = lc.begin()
     config = profiles[name]['config']
 
     duplicate_profile = _find_running_profile_with_same_data_dir(name)
@@ -4445,6 +4479,9 @@ def start_profile(name=None):
 
     def _worker():
         try:
+            if name not in profiles or not profiles[name].get('running', False) or lc.is_cancelled or not lc.is_current(start_gen):
+                return
+
             if config.get('open_only_when_video', False):
                 profiles[name]['watch_started_at'] = time.time()
                 h = VideoFolderHandler(name)
@@ -4452,13 +4489,14 @@ def start_profile(name=None):
                 o.schedule(h, config["folder_path"], recursive=False)
                 o.start()
                 profiles[name]['observer'] = o
+                lc.set_observer(o)
                 _set_profile_ui(name, status='Đang chạy', browser='Chờ video', upload='Chờ video mới')
                 update_status(f"[{name}] Chế độ chỉ mở khi có video mới: bỏ qua video cũ, đang chờ video mới.")
                 threading.Thread(target=process_video_queue_thread, args=(name,), daemon=True).start()
                 return
 
-            ensure_driver(name)
-            if name not in profiles or not profiles[name].get('running', False):
+            ensure_driver(name, lifecycle_gen=start_gen)
+            if name not in profiles or not profiles[name].get('running', False) or lc.is_cancelled or not lc.is_current(start_gen):
                 drv = profiles.get(name, {}).get('driver')
                 if drv:
                     try: drv.quit()
@@ -4493,40 +4531,48 @@ def _stop_profile_driver(name):
     if name not in profiles:
         return
     profile = profiles[name]
+    lc = get_lifecycle(name)
+    lc.cancel()
+    stop_gen = lc.generation
+    profile['running'] = False
+    running_profiles.discard(name)
+
+    drv_auto = profile.get('driver')
+    profile['driver'] = None
+    drv_manual = profile.get('manual_driver')
+    profile['manual_driver'] = None
     ob = profile.get('observer')
-    if ob:
+    profile['observer'] = None
+
+    # Save cookies best-effort before cleanup
+    for drv in (drv_auto, drv_manual):
+        if drv is not None:
+            try:
+                _export_live_cookies_to_config(drv, name)
+            except Exception:
+                pass
+
+    if ob is not None:
         try:
             ob.stop()
-            ob.join()
+            ob.join(timeout=2)
         except Exception:
             pass
-    profile['observer'] = None
-    drv = profile.get('driver')
-    profile['driver'] = None
-    if drv:
-        try:
-            _export_live_cookies_to_config(drv, name)
-            drv.get(TIKTOK_BASE_URL)
-            time.sleep(0.5)
-        except Exception:
-            pass
-        try:
-            drv.quit()
-        except Exception:
-            pass
-    manual = profile.get('manual_driver')
-    profile['manual_driver'] = None
-    if manual:
-        try:
-            manual.quit()
-        except Exception:
-            pass
-    running_profiles.discard(name)
+
+    # Gen-scoped cleanup: only clean if gen still current
+    report = lc.cleanup_gen(stop_gen, quit_timeout=3, kill_timeout=2)
+    if report.get("gen_mismatch"):
+        logging.info(f"[{name}] Generation changed during stop, skipping lifecycle cleanup")
+    else:
+        if report.get("errors"):
+            for err in report["errors"]:
+                logging.warning(f"[{name}] Cleanup warning: {err}")
     kill_stale_chrome_processes(name)
 
 def close_profile_browser(name):
     if name not in profiles:
         return
+    lc = get_lifecycle(name)
     drv = profiles[name].get('driver')
     profiles[name]['driver'] = None
     if drv:
@@ -4534,6 +4580,7 @@ def close_profile_browser(name):
             _export_live_cookies_to_config(drv, name)
         except Exception:
             pass
+        lc.clear_driver_refs()
         try:
             drv.quit()
         except Exception:
@@ -4551,10 +4598,20 @@ def stop_profile(selected_name=None):
         name = tree.item(sel[0])['values'][0]
 
     if name not in profiles: return
-    if not profiles[name]['running'] and not is_driver_valid(profiles[name].get('manual_driver')): return
+
+    lc = get_lifecycle(name)
+    has_any_driver = (
+        profiles[name].get('running', False)
+        or is_driver_valid(profiles[name].get('driver'))
+        or is_driver_valid(profiles[name].get('manual_driver'))
+        or lc.has_active_driver()
+    )
+    if not has_any_driver:
+        profiles[name]['running'] = False
+        running_profiles.discard(name)
+        return
 
     _set_profile_ui(name, status='Đang dừng', browser='Đang đóng', upload='Đang dừng')
-    profiles[name]['running'] = False
     _stop_profile_driver(name)
 
     _set_profile_ui(name, status='Đã dừng', browser='Chưa mở', upload='Chờ video')
@@ -5035,20 +5092,21 @@ def open_browser():
     if is_driver_valid(profiles[nm].get('manual_driver')):
         messagebox.showwarning('Mở Chrome', 'Browser của profile này đang mở.')
         return
-    
+
+    lc = get_lifecycle(nm)
+    manual_gen = lc.begin()
+    driver = None
+    svc = None
+
     update_status(f"[{nm}] Kiểm tra cập nhật Driver...")
     _set_profile_ui(nm, browser='Đang mở', last_error='')
     try:
-        seleniumwire_options = {}
         proxy_data = None
         if cfg.get('use_proxy', False):
             _set_profile_ui(nm, proxy='Đang kiểm tra')
             proxy_data = parse_proxy_string(cfg.get('proxy_string', ''))
             if proxy_data:
-                seleniumwire_options = _build_seleniumwire_options(proxy_data)
-                if DEBUG_SELENIUM_WIRE:
-                    mode = "Selenium Wire debug"
-                elif proxy_data.get('user') and proxy_data.get('pass') and _using_orbita_browser():
+                if proxy_data.get('user') and proxy_data.get('pass') and _using_orbita_browser():
                     mode = "Orbita proxy auth"
                 elif proxy_data.get('user') and proxy_data.get('pass'):
                     mode = "Chrome proxy extension"
@@ -5067,20 +5125,20 @@ def open_browser():
                 update_status(f"[{nm}] [DEBUG] Đã cấu hình Orbita proxy auth")
             else:
                 update_status(f"[{nm}] [DEBUG] Đã nạp proxy extension: {proxy_ext_dir}")
-        
-        driver = None
+
         path = None
+        old_svc = None
         for launch_attempt in range(2):
             try:
                 path = _ensure_profile_driver(nm)
                 svc = Service(path)
+                if old_svc:
+                    _kill_service_process(old_svc)
+                old_svc = svc
+                lc.add_pid(getattr(getattr(svc, 'process', None), 'pid', None))
                 chrome_path = _find_preferred_chrome_executable()
                 update_status(f"[{nm}] [DEBUG] Browser ({_browser_mode_label()}): {chrome_path or 'không tìm thấy'}")
-                driver_module = _active_webdriver_module()
-                if DEBUG_SELENIUM_WIRE:
-                    driver = driver_module.Chrome(service=svc, options=opt, seleniumwire_options=seleniumwire_options)
-                else:
-                    driver = driver_module.Chrome(service=svc, options=opt)
+                driver = webdriver.Chrome(service=svc, options=opt)
                 break
             except Exception as e:
                 if launch_attempt == 0 and _is_driver_version_mismatch_error(e):
@@ -5098,6 +5156,13 @@ def open_browser():
                             pass
                     continue
                 raise
+
+        if lc.is_cancelled or not lc.is_current(manual_gen):
+            if driver:
+                try: driver.quit()
+                except: pass
+            raise RuntimeError("Lifecycle cancelled after manual browser open")
+
         driver.implicitly_wait(0)
         driver.set_page_load_timeout(PAGELOAD_TIMEOUT)
         driver.set_script_timeout(SCRIPT_TIMEOUT)
@@ -5106,7 +5171,6 @@ def open_browser():
         _enable_aux_resource_blocking(driver, nm)
         _set_profile_ui(nm, browser='Đã mở')
         
-        # --- VERIFY PROXY IP ---
         if proxy_data:
             update_status(f"[{nm}] [DEBUG] Đang check IP...")
             try:
@@ -5119,21 +5183,27 @@ def open_browser():
                     _set_profile_ui(nm, proxy='Sai IP', last_error=f"Proxy sai IP: {current_ip}")
                     update_status(f"[{nm}] LỖI PROXY: IP THỰC TẾ ({current_ip}) != PROXY ({proxy_data['ip']}).")
                     driver.quit()
-                    messagebox.showerror("Lỗi Proxy", f"IP không khớp: {current_ip} != {proxy_data['ip']}")
-                    return
+                    raise RuntimeError(f"Proxy Mismatch: {current_ip} != {proxy_data['ip']}")
                 else:
                     _set_profile_ui(nm, proxy=f"OK: {current_ip}")
                     update_status(f"[{nm}] Proxy OK: {current_ip}")
+            except RuntimeError:
+                raise
             except Exception as e:
                 _set_profile_ui(nm, proxy='Proxy lỗi', last_error=str(e))
                 update_status(f"[{nm}] Lỗi check Proxy: {e}")
                 try: driver.quit()
                 except: pass
-                messagebox.showerror("Lỗi Proxy", str(e))
-                return
+                raise RuntimeError(f"Proxy error: {e}")
         
         _prepare_tiktok_cookies(driver, nm, cfg, require_upload_ready=False)
         driver.get(TIKTOK_BASE_URL)
+        if manual_gen is None or not lc.register_manual(manual_gen, driver):
+            try:
+                driver.quit()
+            except Exception:
+                pass
+            raise RuntimeError("Lifecycle changed before manual driver publish")
         profiles[nm]['manual_driver'] = driver
         _set_profile_ui(nm, browser='Chrome đang mở')
         messagebox.showinfo("Info", "Đóng trình duyệt khi xong.")
@@ -5146,13 +5216,23 @@ def open_browser():
                 time.sleep(0.5)
             try: driver.quit()
             except: pass
-            profiles[nm]['manual_driver'] = None
+            if profiles.get(nm, {}).get('manual_driver') is driver:
+                profiles[nm]['manual_driver'] = None
             _set_profile_ui(nm, browser='Đã đóng', login='Chờ lấy cookie')
             update_status(f"[{nm}] Browser thủ công đã đóng. Bấm 'Lấy Cookie TikTok' trong menu chuột phải để đồng bộ session.")
         threading.Thread(target=_wait_close, daemon=True).start()
     except Exception as e:
+        if driver:
+            try: driver.quit()
+            except: pass
+            driver = None
+        if svc:
+            _kill_service_process(svc)
         _set_profile_ui(nm, browser='Bị lỗi', last_error=str(e))
         messagebox.showerror("Lỗi", str(e))
+    finally:
+        if not is_driver_valid(driver) and not lc.is_current(manual_gen):
+            lc.cleanup_fast()
 
 def _wait_and_close_driver(driver, name):
     pass 
@@ -5213,6 +5293,34 @@ def copy_folder_path():
 # =========================
 _shutting_down = False
 
+APP_SHUTDOWN_DEADLINE = 15
+
+
+def _shutdown_all_profiles():
+    for name in list(profiles.keys()):
+        lc = get_lifecycle(name)
+        lc.cancel()
+        profiles[name]['running'] = False
+        running_profiles.discard(name)
+
+    def _stop_one(name):
+        try:
+            _stop_profile_driver(name)
+        except Exception as e:
+            update_status(f"[{name}] Lỗi dừng khi tắt app: {e}")
+
+    threads = []
+    for name in list(profiles.keys()):
+        t = threading.Thread(target=_stop_one, args=(name,), daemon=True)
+        t.start()
+        threads.append(t)
+    deadline = time.time() + APP_SHUTDOWN_DEADLINE
+    for t in threads:
+        remaining = max(0.1, deadline - time.time())
+        t.join(timeout=remaining)
+    after_kill_cleanup_running_profiles()
+
+
 def on_closing():
     global _shutting_down
     if _shutting_down:
@@ -5224,19 +5332,7 @@ def on_closing():
     except Exception as e:
         update_status(f"[YouTube] Lỗi dừng monitor khi đóng app: {e}")
 
-    def _shutdown_cleanup():
-        for name in list(profiles.keys()):
-            try:
-                has_active = profiles[name].get('running', False) or is_driver_valid(profiles[name].get('manual_driver'))
-                if has_active:
-                    profiles[name]['running'] = False
-                    _stop_profile_driver(name)
-            except Exception as e:
-                update_status(f"[{name}] Lỗi dừng khi tắt app: {e}")
-
-    t = threading.Thread(target=_shutdown_cleanup, daemon=True)
-    t.start()
-    t.join(timeout=10)
+    _shutdown_all_profiles()
     root.after(500, root.destroy)
 
 def change_license_key():
@@ -5631,6 +5727,13 @@ batch_download_view = ui_widgets.get('batch_download_view')
 activity_view = ui_widgets.get('activity_view')
 
 def _start_youtube_monitor_safe():
+    if os.environ.get('FROZEN_SMOKE_TEST', '').strip().lower() in ('1', 'true'):
+        update_status("[YouTube] Smoke mode: bỏ qua monitor auto-start")
+        return
+    cfg = youtube_monitor.get_config()
+    if not cfg.get('auto_start', True):
+        update_status("[YouTube] auto_start=false, bỏ qua.")
+        return
     def _run():
         try:
             ok, msg = youtube_monitor.start_monitor()

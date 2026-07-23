@@ -1,7 +1,13 @@
 import json
+import os
+import threading
+import uuid
 from datetime import datetime
+from pathlib import Path
 
 from browser_environment import ensure_fingerprint_defaults
+
+_CONFIG_SAVE_LOCK = threading.RLock()
 
 
 def build_configs_payload(profiles, projects):
@@ -20,8 +26,20 @@ def build_configs_payload(profiles, projects):
 
 
 def save_configs_file(config_path, payload):
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=4, ensure_ascii=False)
+    config_path = Path(config_path) if isinstance(config_path, str) else config_path
+    tmp = config_path.with_name(f"{config_path.name}.{uuid.uuid4().hex}.tmp")
+    with _CONFIG_SAVE_LOCK:
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=4, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, config_path)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def load_configs_file(config_path):

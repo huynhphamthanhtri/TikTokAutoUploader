@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -50,6 +51,8 @@ def append_activity(event_type, video_name="", video_url="", profile="", status=
         with open(ACTIVITY_LOG, "a", encoding="utf-8-sig", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
             writer.writerow(row)
+            f.flush()
+            os.fsync(f.fileno())
     return row
 
 
@@ -141,10 +144,18 @@ def _load_download_index():
 
 
 def _save_download_index(data):
-    tmp = DOWNLOAD_INDEX_JSON.with_suffix(DOWNLOAD_INDEX_JSON.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, DOWNLOAD_INDEX_JSON)
+    tmp = DOWNLOAD_INDEX_JSON.with_name(f"{DOWNLOAD_INDEX_JSON.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, DOWNLOAD_INDEX_JSON)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def remember_download(file_path, video_id, title="", channel_id="", profile=""):

@@ -8,6 +8,7 @@ from .core import (
     get_config,
     get_cookies_file,
     get_logs,
+    get_monitor_health,
     get_status,
     remove_channel,
     set_channel_profile,
@@ -27,3 +28,4 @@ from .activity import (
     lookup_download,
     remember_download,
 )
+from . import ffmpeg_helper

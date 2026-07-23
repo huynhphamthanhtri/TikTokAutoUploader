@@ -19,6 +19,7 @@ class YouTubeMonitorView(ctk.CTkFrame):
         self._first_channel_render = True
 
         self.status_var = ctk.StringVar(value="Monitor: Chưa chạy")
+        self.health_var = ctk.StringVar(value="Health: -")
         self.callback_var = ctk.StringVar(value="Callback: -")
         self.stats_var = ctk.StringVar(value="Channels: 0 | Queue: 0 | Workers: 0 | Hôm nay: 0")
         self.api_status_var = ctk.StringVar(value="API: -")
@@ -35,6 +36,7 @@ class YouTubeMonitorView(ctk.CTkFrame):
         status_frame.pack(fill="x", pady=(0, 6))
         ctk.CTkLabel(status_frame, textvariable=self.status_var, text_color="#0f172a", font=("Segoe UI Semibold", 12)).pack(side="left", padx=10, pady=6)
         ctk.CTkLabel(status_frame, textvariable=self.stats_var, text_color="#334155").pack(side="left", padx=12)
+        ctk.CTkLabel(status_frame, textvariable=self.health_var, text_color="#64748b", font=("Segoe UI", 10)).pack(side="left", padx=6)
         ctk.CTkLabel(status_frame, textvariable=self.api_status_var, text_color="#2563eb").pack(side="right", padx=10)
 
         callback_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -124,6 +126,16 @@ class YouTubeMonitorView(ctk.CTkFrame):
         ctk.CTkButton(row5, text="Lưu giới hạn", width=110, height=30, command=self._save_max_minutes).pack(side="left", padx=3)
         ctk.CTkLabel(row5, text="0 = không giới hạn", text_color="#64748b").pack(side="left", padx=8)
 
+        row6 = ctk.CTkFrame(controls, fg_color="transparent")
+        row6.pack(fill="x", padx=8, pady=(0, 8))
+        self.quality_label = ctk.CTkLabel(row6, text="Chất lượng: 720p nhanh", text_color="#334155")
+        self.quality_label.pack(side="left", padx=(0, 12))
+        self.ffmpeg_status_label = ctk.CTkLabel(row6, text="FFmpeg: Đang kiểm tra...", text_color="#64748b")
+        self.ffmpeg_status_label.pack(side="left", padx=(0, 12))
+        self.dl_workers_label = ctk.CTkLabel(row6, text="Tải đồng thời: 4", text_color="#64748b")
+        self.dl_workers_label.pack(side="left", padx=(0, 12))
+        ctk.CTkButton(row6, text="Cài FFmpeg", width=100, height=28, command=self._install_ffmpeg).pack(side="right", padx=3)
+
         self.log_text = ScrolledText(self, height=6, state="disabled", font=("Consolas", 9), relief="flat", bd=0)
         self.log_text.pack(fill="x", pady=(0, 0))
         self.log_text.tag_configure("ERROR", foreground="#b91c1c")
@@ -171,10 +183,44 @@ class YouTubeMonitorView(ctk.CTkFrame):
         running = "Đang chạy" if status.get("running") else "Đã dừng"
         color = "#16a34a" if status.get("running") else "#ef4444"
         self.status_var.set(f"Monitor: {running}")
+        healthy = status.get("healthy", False) if status.get("running") else False
+        if status.get("running"):
+            if healthy:
+                ngrok_ok = status.get("callback_verified", False)
+                subs_total = status.get("subscriptions_total", 0)
+                subs_ok = status.get("subscriptions_ok", 0)
+                degraded = subs_total - subs_ok
+                if degraded > 0:
+                    health_text = f"Degraded (WebSub: {subs_ok}/{subs_total})"
+                elif not ngrok_ok:
+                    health_text = "No ngrok"
+                else:
+                    health_text = "OK"
+                hcolor = "#b45309" if degraded > 0 else "#16a34a" if ngrok_ok else "#ef4444"
+            else:
+                health_text = f"Lỗi: {status.get('health_msg', '?')}"
+                hcolor = "#ef4444"
+        else:
+            health_text = "-"
+            hcolor = "#64748b"
+        self.health_var.set(f"Health: {health_text}")
+        try:
+            for child in self.health_var._label.winfo_children():
+                pass
+        except Exception:
+            pass
         self.stats_var.set(f"Channels: {status.get('channels', 0)} | Queue: {status.get('queue', 0)} | Workers: {status.get('workers', 0)} | Hôm nay: {status.get('downloaded_today', 0)}")
         cookie_state = "OK" if status.get("cookies_set") else "Chưa có"
         self.api_status_var.set(("API: OK" if status.get("api_key_set") else "API: Chưa nhập") + f" | Cookie: {cookie_state}")
-        self.callback_var.set(f"Callback: {status.get('callback_url') or '-'}")
+        port = status.get("callback_port", "")
+        cb_url = status.get("callback_url", "") or ""
+        last_post = status.get("last_callback_post", "")
+        cb_parts = [f"Port: {port}" if port else ""]
+        if cb_url:
+            cb_parts.append(f"Ngrok: {'OK' if status.get('callback_verified') else '?'}")
+        if last_post:
+            cb_parts.append(f"POST cuối: {last_post[11:19] if len(last_post) > 19 else last_post}")
+        self.callback_var.set(f"Callback: {' | '.join(cb_parts) if cb_parts else '-'}")
         cookie_path = self.handlers.get("get_cookies_file", lambda: "")()
         if cookie_path and self.cookie_var.get() != cookie_path:
             self.cookie_var.set(cookie_path)
@@ -192,6 +238,20 @@ class YouTubeMonitorView(ctk.CTkFrame):
         logs = self.handlers.get("get_logs", lambda: [])()
         for line in logs:
             self.append_log(line, error=("lỗi" in line.lower() or "error" in line.lower() or "fail" in line.lower()))
+
+        self._update_ffmpeg_status()
+
+    def _update_ffmpeg_status(self):
+        try:
+            from . import ffmpeg_helper
+            ok, msg, src = ffmpeg_helper.check_ffmpeg()
+            if ok:
+                label = f"FFmpeg: Sẵn sàng ({src})" if src else "FFmpeg: Sẵn sàng"
+                self.ffmpeg_status_label.configure(text=label, text_color="#16a34a")
+            else:
+                self.ffmpeg_status_label.configure(text="FFmpeg: Chưa cài", text_color="#b91c1c")
+        except Exception:
+            self.ffmpeg_status_label.configure(text="FFmpeg: ?", text_color="#64748b")
 
     def append_log(self, line, error=False):
         self.log_text.configure(state="normal")
@@ -345,6 +405,23 @@ class YouTubeMonitorView(ctk.CTkFrame):
                     pass
             self._append_threadsafe(msg, error=not ok)
         threading.Thread(target=run, daemon=True).start()
+
+    def _install_ffmpeg(self):
+        def _run():
+            try:
+                self.after(0, lambda: self.ffmpeg_status_label.configure(text="FFmpeg: Đang tải...", text_color="#b45309"))
+            except Exception:
+                pass
+            self._append_threadsafe("Đang tải FFmpeg...", error=False)
+            from . import ffmpeg_helper
+            try:
+                ffmpeg_helper.ensure_ffmpeg(progress_callback=lambda msg, pct: self._append_threadsafe(msg, error=False))
+                self._append_threadsafe("FFmpeg đã cài đặt thành công", error=False)
+                self._update_ffmpeg_status()
+            except Exception as e:
+                self._append_threadsafe(f"Lỗi cài FFmpeg: {e}", error=True)
+                self._update_ffmpeg_status()
+        threading.Thread(target=_run, daemon=True).start()
 
     def _toggle_active(self):
         if self.selected_channel_id:
