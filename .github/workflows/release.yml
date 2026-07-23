@@ -57,7 +57,7 @@ jobs:
           $sectionBody = $versionSection.Groups['body'].Value
           foreach ($heading in @('## Điểm mới', '## Cải thiện', '## Sửa lỗi')) {
             if (-not [regex]::IsMatch($sectionBody, "(?m)^$([regex]::Escape($heading))\s*$")) {
-              throw "Thiếu mục bắt buộc trong section $tagVersion: $heading"
+              throw "Thiếu mục bắt buộc trong section ${tagVersion}: $heading"
             }
           }
 
