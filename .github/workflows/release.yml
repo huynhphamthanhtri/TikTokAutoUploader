@@ -95,7 +95,8 @@ jobs:
           if ($content -match "blinker\._saferef|seleniumwire|pydivert") {
             throw "Removed/unsupported module appears in build warnings"
           }
-          $criticalMissing = [regex]::Matches($content, "missing module named ['\"](?<module>[^'\"]+)['\"]") | Where-Object {
+          $missingPattern = 'missing module named [''"](?<module>[^''"]+)[''"]'
+          $criticalMissing = [regex]::Matches($content, $missingPattern) | Where-Object {
             $_.Groups['module'].Value -match '^(main|config_store|core_helpers|browser_environment|browser_lifecycle|version|updater|updater_config|youtube_monitor|app_ui)(\.|$)'
           }
           if ($criticalMissing.Count -gt 0) {
