@@ -4215,8 +4215,12 @@ def _do_download_update(result):
             script = updater.write_update_script(extract_dir)
             def _launch_when_ready():
                 _done(True, "Sẵn sàng cập nhật. Ứng dụng sẽ tự động đóng và khởi động lại.")
-                root.after(2000, lambda: updater.launch_update(script))
-                root.after(2500, root.destroy)
+                def _shutdown_and_launch_update():
+                    try:
+                        on_closing()
+                    finally:
+                        updater.launch_update(script)
+                root.after(2000, _shutdown_and_launch_update)
             _enqueue_update_ui(_launch_when_ready)
         except Exception as e:
             error_message = str(e)

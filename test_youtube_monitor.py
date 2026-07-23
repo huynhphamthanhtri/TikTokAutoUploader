@@ -150,6 +150,59 @@ class TestWebSubXmlParsing(unittest.TestCase):
         self.assertEqual(len(result), 0)
 
 
+class TestPollingBackfillPrevention(unittest.TestCase):
+    def test_empty_history_needs_polling_baseline(self):
+        from youtube_monitor.core import _channel_needs_polling_baseline
+        self.assertTrue(_channel_needs_polling_baseline({"seen": set(), "last_pub_utc": None}))
+        self.assertTrue(_channel_needs_polling_baseline({}))
+        self.assertFalse(_channel_needs_polling_baseline({"seen": {"vid1"}, "last_pub_utc": None}))
+        self.assertFalse(_channel_needs_polling_baseline({"seen": set(), "last_pub_utc": 100.0}))
+
+    def test_polling_watermark_rejects_existing_or_older_items(self):
+        from youtube_monitor.core import _polling_item_is_at_or_before_watermark
+        meta = {"last_pub_utc": 100.0}
+        self.assertTrue(_polling_item_is_at_or_before_watermark(meta, 99.0))
+        self.assertTrue(_polling_item_is_at_or_before_watermark(meta, 100.0))
+        self.assertFalse(_polling_item_is_at_or_before_watermark(meta, 101.0))
+        self.assertFalse(_polling_item_is_at_or_before_watermark({"last_pub_utc": None}, 99.0))
+        self.assertFalse(_polling_item_is_at_or_before_watermark(meta, None))
+
+    def test_published_before_monitor_start_is_rejected(self):
+        from youtube_monitor.core import _published_before_monitor_start
+        with patch("youtube_monitor.core._monitor_started_epoch", 100.0):
+            self.assertTrue(_published_before_monitor_start(99.0))
+            self.assertFalse(_published_before_monitor_start(100.0))
+            self.assertFalse(_published_before_monitor_start(101.0))
+            self.assertFalse(_published_before_monitor_start(None))
+
+    def test_mark_pre_start_seen_updates_state(self):
+        from youtube_monitor.core import _mark_pre_start_seen
+        with patch("youtube_monitor.core.channels_store") as store:
+            with patch("youtube_monitor.core.log") as mock_log:
+                _mark_pre_start_seen("UCtest", "oldvid", 99.0, "Polling")
+        store.mark_seen_only.assert_called_once_with("UCtest", "oldvid")
+        store.update_watermark.assert_called_once_with("UCtest", 99.0)
+        mock_log.assert_called_once()
+
+    def test_seed_polling_baseline_marks_existing_items(self):
+        from youtube_monitor.core import _seed_polling_baseline, iso_to_epoch
+        items = [
+            {
+                "contentDetails": {"videoId": "old1"},
+                "snippet": {"publishedAt": "2026-07-23T10:00:00Z"},
+            },
+            {
+                "contentDetails": {"videoId": "old2"},
+                "snippet": {"publishedAt": "2026-07-23T11:00:00Z"},
+            },
+        ]
+        with patch("youtube_monitor.core.channels_store") as store:
+            seeded = _seed_polling_baseline("UCtest", items)
+        self.assertEqual(seeded, 2)
+        store.mark_seen_only.assert_has_calls([call("UCtest", "old1"), call("UCtest", "old2")])
+        store.update_watermark.assert_called_once_with("UCtest", iso_to_epoch("2026-07-23T11:00:00Z"))
+
+
 class TestSubscriptionStatus(unittest.TestCase):
     def setUp(self):
         from youtube_monitor.core import _subscription_status, _subscription_lock

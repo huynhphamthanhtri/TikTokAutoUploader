@@ -1,3 +1,19 @@
+# Phiên bản 1.0.9
+
+## Điểm mới
+- YouTube Monitor giờ chỉ tải video được đăng sau khi monitor bắt đầu chạy.
+- Khi thêm kênh YouTube mới hoặc mở monitor lần đầu với kênh chưa có lịch sử, ứng dụng sẽ ghi nhận các video hiện có làm mốc ban đầu thay vì tải lại ngay.
+
+## Cải thiện
+- Cải thiện cơ chế ghi nhớ video đã thấy của từng kênh, giúp hạn chế tải lại video cũ sau khi cập nhật hoặc mở lại tool.
+- Khi cập nhật phiên bản, ứng dụng sẽ dừng YouTube Monitor đúng cách trước khi thay file để lưu trạng thái kênh an toàn hơn.
+- Nếu một kênh YouTube bị lỗi API, monitor sẽ bỏ qua kênh đó và tiếp tục kiểm tra các kênh còn lại.
+
+## Sửa lỗi
+- Khắc phục lỗi sau khi cập nhật, tool có thể tải lại video cũ nếu danh sách video đã xử lý bị rỗng hoặc chưa có mốc thời gian.
+- Khắc phục trường hợp video đã đăng trước lúc mở tool vài phút vẫn bị tải xuống. Từ bản này, các video có trước thời điểm monitor bắt đầu chạy sẽ chỉ được ghi nhận là đã thấy, không tải lại.
+- Khắc phục nguy cơ mất trạng thái YouTube Monitor khi cập nhật app trong lúc monitor đang chạy.
+
 # Phiên bản 1.0.8
 
 ## Điểm mới

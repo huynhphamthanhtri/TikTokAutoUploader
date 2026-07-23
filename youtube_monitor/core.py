@@ -101,6 +101,7 @@ _callback_port = None
 _callback_instance_id = None
 _callback_owner_token = None
 _monitor_started = False
+_monitor_started_epoch = None
 _monitor_gen = 0
 _monitor_gen_lock = threading.Lock()
 _all_threads = []
@@ -714,6 +715,51 @@ def iso_to_epoch(value):
         return None
 
 
+def _playlist_item_video_id(item):
+    return item.get("contentDetails", {}).get("videoId") or item.get("snippet", {}).get("resourceId", {}).get("videoId")
+
+
+def _playlist_item_published(item):
+    return item.get("snippet", {}).get("publishedAt", "")
+
+
+def _channel_needs_polling_baseline(meta):
+    return not meta.get("last_pub_utc") and not meta.get("seen")
+
+
+def _polling_item_is_at_or_before_watermark(meta, pub_epoch):
+    watermark = meta.get("last_pub_utc")
+    return pub_epoch is not None and watermark is not None and pub_epoch <= watermark
+
+
+def _published_before_monitor_start(pub_epoch):
+    return pub_epoch is not None and _monitor_started_epoch is not None and pub_epoch < _monitor_started_epoch
+
+
+def _mark_pre_start_seen(channel_id, video_id, pub_epoch, source):
+    channels_store.mark_seen_only(channel_id, video_id)
+    channels_store.update_watermark(channel_id, pub_epoch)
+    log(f"[{source}] Skip {video_id}: published before monitor start")
+
+
+def _seed_polling_baseline(channel_id, items):
+    seeded = 0
+    latest_pub_epoch = None
+    for item in items:
+        vid = _playlist_item_video_id(item)
+        if not vid:
+            continue
+        channels_store.mark_seen_only(channel_id, vid)
+        seeded += 1
+        published = _playlist_item_published(item)
+        pub_epoch = iso_to_epoch(published) if published else None
+        if pub_epoch is not None and (latest_pub_epoch is None or pub_epoch > latest_pub_epoch):
+            latest_pub_epoch = pub_epoch
+    if latest_pub_epoch is not None:
+        channels_store.update_watermark(channel_id, latest_pub_epoch)
+    return seeded
+
+
 def websub_processor_worker(run_gen=None):
     log("[WebSub] Processor started")
     while not stop_event.is_set():
@@ -746,6 +792,9 @@ def websub_processor_worker(run_gen=None):
                 channels_store.mark_seen_only(chan, vid)
                 channels_store.update_watermark(chan, pub_epoch)
                 log(f"[WebSub] Skip {vid}: too old ({_format_duration(now_epoch - pub_epoch)})")
+                continue
+            if _published_before_monitor_start(pub_epoch):
+                _mark_pre_start_seen(chan, vid, pub_epoch, "WebSub")
                 continue
             seen = meta.get("seen", set())
             if vid in seen:
@@ -1869,19 +1918,32 @@ def _polling_worker(run_gen=None):
                     ).execute()
                 except Exception as e:
                     log(f"[Polling] API lỗi {cid}: {e}")
-                    break
+                    continue
+                items = response.get("items", [])
+                if _channel_needs_polling_baseline(meta):
+                    seeded = _seed_polling_baseline(cid, items)
+                    if seeded:
+                        log(f"[Polling] Baseline {seeded} videos for {cid}")
+                    continue
                 seen = meta.get("seen", set())
-                for item in response.get("items", []):
-                    vid = item.get("contentDetails", {}).get("videoId") or item.get("snippet", {}).get("resourceId", {}).get("videoId")
+                for item in items:
+                    vid = _playlist_item_video_id(item)
                     if not vid or vid in seen or _is_pending(cid, vid):
                         continue
-                    published = item.get("snippet", {}).get("publishedAt", "")
+                    published = _playlist_item_published(item)
                     pub_epoch = iso_to_epoch(published) if published else None
                     if pub_epoch and time.time() - pub_epoch > MAX_ACCEPTABLE_AGE_HOURS * 3600:
                         channels_store.mark_seen_only(cid, vid)
                         continue
+                    if _published_before_monitor_start(pub_epoch):
+                        _mark_pre_start_seen(cid, vid, pub_epoch, "Polling")
+                        continue
+                    if _polling_item_is_at_or_before_watermark(meta, pub_epoch):
+                        channels_store.mark_seen_only(cid, vid)
+                        continue
                     if _try_pending(cid, vid):
                         download_queue.put((cid, vid, published or None, datetime.now(timezone.utc).isoformat()))
+                        channels_store.update_watermark(cid, pub_epoch)
                         log(f"[Polling] Enqueue {vid}@{cid}")
                 time.sleep(0.3)
         except Exception as e:
@@ -1972,7 +2034,7 @@ def _add_thread(t):
 
 
 def start_monitor():
-    global _monitor_started, _monitor_gen, last_error, _proxy_pool, _proxy_by_profile, _proxy_rr_index, _download_sem, public_callback_url, public_callback_verified
+    global _monitor_started, _monitor_started_epoch, _monitor_gen, last_error, _proxy_pool, _proxy_by_profile, _proxy_rr_index, _download_sem, public_callback_url, public_callback_verified
     with _state_lock:
         if _monitor_started:
             ok, msg = get_monitor_health()
@@ -1986,6 +2048,7 @@ def start_monitor():
         with _monitor_gen_lock:
             _monitor_gen += 1
             run_gen = _monitor_gen
+        _monitor_started_epoch = time.time()
         stop_event.clear()
         _all_threads[:] = [t for t in _all_threads if t.is_alive()]
         channels_store.load()
@@ -2008,12 +2071,14 @@ def start_monitor():
             last_error = f"Callback server: {port_or_err}"
             log(f"[Monitor] {last_error}")
             channels_store.stop_autosave()
+            _monitor_started_epoch = None
             return False, last_error
         if not _get_websub_secret():
             _stop_callback_server()
             channels_store.stop_autosave()
             last_error = "Không tạo được WebSub secret"
             log(f"[Monitor] {last_error}")
+            _monitor_started_epoch = None
             return False, last_error
         t = threading.Thread(target=websub_processor_worker, args=(run_gen,), daemon=True)
         _add_thread(t)
@@ -2041,6 +2106,7 @@ def start_monitor():
             channels_store.stop_autosave()
             last_error = "Ngrok tunnel không hoạt động"
             log(f"[Monitor] {last_error}")
+            _monitor_started_epoch = None
             return False, last_error
         channels_store.subscribe_all(public_callback_url)
         t = threading.Thread(target=_polling_worker, args=(run_gen,), daemon=True)
@@ -2064,7 +2130,7 @@ def get_monitor_health():
 
 
 def _force_stop():
-    global _monitor_started, _callback_server, _callback_server_thread, _callback_port, _callback_instance_id, public_callback_url, public_callback_verified
+    global _monitor_started, _monitor_started_epoch, _callback_server, _callback_server_thread, _callback_port, _callback_instance_id, public_callback_url, public_callback_verified
     stop_event.set()
     _stop_callback_server()
     try:
@@ -2081,10 +2147,11 @@ def _force_stop():
     _pending_video_ids.clear()
     _retry_after.clear()
     _monitor_started = False
+    _monitor_started_epoch = None
 
 
 def stop_monitor():
-    global _monitor_started, public_callback_url, public_callback_verified
+    global _monitor_started, _monitor_started_epoch, public_callback_url, public_callback_verified
     with _state_lock:
         if not _monitor_started:
             return True, "YouTube Monitor chưa chạy."
@@ -2105,6 +2172,7 @@ def stop_monitor():
         _retry_after.clear()
         _all_threads.clear()
         _monitor_started = False
+        _monitor_started_epoch = None
         log("[Monitor] Stopped")
     return True, "YouTube Monitor đã dừng."
 
@@ -2115,6 +2183,19 @@ def add_channel_for_profile(channel_input, profile_name, folder_path):
     if not info or not info.get("id"):
         return False, "Không lấy được Channel ID."
     channels_store.add_channel(info["id"], folder_path, profile_name=profile_name, process_short=True)
+    try:
+        playlist_id = info.get("playlistId") or _get_uploads_playlist_id(info["id"], youtube)
+        if playlist_id:
+            response = youtube.playlistItems().list(
+                part="snippet,contentDetails",
+                playlistId=playlist_id,
+                maxResults=5
+            ).execute()
+            seeded = _seed_polling_baseline(info["id"], response.get("items", []))
+            if seeded:
+                log(f"[Channel] Baseline {seeded} existing videos for {info['id']}")
+    except Exception as e:
+        log(f"[Channel] Baseline lỗi {info['id']}: {e}")
     channels_store.save_now()
     if public_callback_url:
         subscribe_websub(info["id"], public_callback_url)
