@@ -2071,6 +2071,7 @@ def _build_fast_chrome_options(config, block_images=True, force_visible=False):
     
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
     
     prefs = {
         "profile.default_content_setting_values.notifications": 2,
@@ -2322,7 +2323,12 @@ def ensure_driver(profile_name, lifecycle_gen=None):
             driver.implicitly_wait(0)
             driver.set_page_load_timeout(PAGELOAD_TIMEOUT)
             driver.set_script_timeout(SCRIPT_TIMEOUT)
-            driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+                "source": """
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                    Object.defineProperty(Navigator.prototype, 'webdriver', {get: () => undefined});
+                """
+            })
             _warn_if_auth_extension_blocked(profile_name, driver, proxy_data)
             update_status(f"[{profile_name}] [DEBUG] Đã cấu hình driver xong")
 
@@ -2706,7 +2712,15 @@ def _click_post_button(driver, profile_name, post_button):
     )
     if blocked_by:
         raise Exception(f'Nút Đăng vẫn bị che bởi: {blocked_by}')
-    ActionChains(driver).move_to_element(post_button).click().perform()
+    driver.execute_script("""
+        const el = arguments[0];
+        const rect = el.getBoundingClientRect();
+        el.dispatchEvent(new MouseEvent('click', {
+            bubbles: true, cancelable: true, view: window, composed: true,
+            clientX: rect.left + rect.width / 2,
+            clientY: rect.top + rect.height / 2
+        }));
+    """, post_button)
 
 def _has_blocking_post_modal(driver):
     try:
@@ -5170,7 +5184,12 @@ def open_browser():
         driver.implicitly_wait(0)
         driver.set_page_load_timeout(PAGELOAD_TIMEOUT)
         driver.set_script_timeout(SCRIPT_TIMEOUT)
-        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(Navigator.prototype, 'webdriver', {get: () => undefined});
+            """
+        })
         _inject_fingerprint_js(driver, nm)
         _enable_aux_resource_blocking(driver, nm)
         _set_profile_ui(nm, browser='Đã mở')

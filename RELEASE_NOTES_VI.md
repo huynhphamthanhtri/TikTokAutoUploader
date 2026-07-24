@@ -1,3 +1,14 @@
+# Phiên bản 1.0.10
+
+## Điểm mới
+- Không có.
+
+## Cải thiện
+- Cải thiện khả năng đăng video lên TikTok.
+
+## Sửa lỗi
+- Sửa lỗi bấm Đăng rồi nhưng video không lên TikTok.
+
 # Phiên bản 1.0.9
 
 ## Điểm mới
