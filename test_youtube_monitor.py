@@ -455,7 +455,12 @@ class TestResourceAssetsNoFFmpeg(unittest.TestCase):
 
     def test_resource_assets_still_has_core(self):
         from version import RESOURCE_ASSETS
-        self.assertNotIn("Browser", RESOURCE_ASSETS)
+        browser = RESOURCE_ASSETS.get("Browser")
+        self.assertIsNotNone(browser)
+        self.assertEqual(browser["type"], "zip_dir")
+        self.assertEqual(browser["asset"], "Browser-v{version}.zip")
+        self.assertIn("Browser/orbita-browser-123/chrome.exe", browser["validate"])
+        self.assertNotIn("Browser/chromedriver.exe", browser["validate"])
         self.assertIn("ngrok.exe", RESOURCE_ASSETS)
         self.assertIn("service_account.json", RESOURCE_ASSETS)
 

@@ -2288,6 +2288,8 @@ def _first_run_download_check():
     items_list = [f"- {name}" for name in missing]
     if ffmpeg_needed:
         items_list.append("- FFmpeg")
+    if "Browser" in missing:
+        items_list.append("  (Browser ~150 MB; tải về sẽ giải nén và xác minh)")
     popup_msg = "Cần tải tài nguyên lần đầu:\n" + "\n".join(items_list) + "\n\nTiếp tục?"
 
     if not messagebox.askyesno("Tải tài nguyên", popup_msg):

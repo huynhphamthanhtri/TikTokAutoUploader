@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -195,6 +196,80 @@ def active_profile_path(config):
     return str(config.get("chrome_profile", ""))
 
 
+def _app_base_dir():
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _bundled_browser_dir(app_base=None):
+    root = Path(app_base or _app_base_dir())
+    root_dir = root / "Browser"
+    if root_dir.exists():
+        return root_dir
+    internal_dir = root / "_internal" / "Browser"
+    if internal_dir.exists():
+        return internal_dir
+    return root_dir
+
+
+def _find_system_chrome_executable():
+    candidates = []
+    try:
+        import winreg
+
+        for root_key in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(
+                    root_key,
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe",
+                ) as key:
+                    value, _ = winreg.QueryValueEx(key, None)
+                    if value:
+                        candidates.append(value)
+            except OSError:
+                pass
+    except Exception:
+        pass
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)", "LocalAppData"):
+        base = os.environ.get(env_name)
+        if base:
+            candidates.append(
+                os.path.join(base, "Google", "Chrome", "Application", "chrome.exe")
+            )
+    for path in candidates:
+        if path and _is_valid_executable(path):
+            return str(path)
+    return None
+
+
+def _is_valid_executable(path):
+    try:
+        return bool(path) and Path(path).is_file() and Path(path).stat().st_size > 0
+    except OSError:
+        return False
+
+
+def resolve_browser_executable(app_base=None):
+    """Return a Chromium-compatible executable path for Patchright.
+
+    Preference order: bundled ``Browser`` resource, then system Google Chrome.
+    Returns ``None`` when no usable browser is found so callers can fail with a
+    clear Vietnamese message instead of relying on Patchright's default
+    ``.local-browsers`` lookup."""
+    browser_dir = _bundled_browser_dir(app_base)
+    candidates = [
+        browser_dir / "orbita-browser-123" / "chrome.exe",
+        browser_dir / "chrome-win64" / "chrome.exe",
+        browser_dir / "chrome.exe",
+        browser_dir / "chrome" / "chrome.exe",
+    ]
+    for path in candidates:
+        if _is_valid_executable(path):
+            return str(path)
+    return _find_system_chrome_executable()
+
+
 def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None):
     """Map app config to a patchright native session configuration."""
     profile_path = config.get("browser_profile_path")
@@ -204,6 +279,14 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None):
         headed = not config.get("headless", True)
 
     kwargs = {"profile_path": profile_path, "mode": mode, "headed": headed}
+
+    executable = config.get("browser_executable") or resolve_browser_executable()
+    if not executable:
+        raise SessionSetupError(
+            "Không tìm thấy browser. Hãy tải tài nguyên Browser lần đầu "
+            "(nút 'Tải tài nguyên') hoặc cài Google Chrome rồi thử lại."
+        )
+    kwargs["executable_path"] = str(executable)
 
     proxy = None
     if config.get("use_proxy", False):

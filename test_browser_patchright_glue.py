@@ -55,27 +55,35 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
             "proxy_string": "http://127.0.0.1:8080:user:secret",
         }
 
-        session = glue.build_session_config(config)
+        with patch.object(
+            glue, "resolve_browser_executable", return_value=r"C:\browser\chrome.exe"
+        ):
+            session = glue.build_session_config(config)
 
         self.assertEqual(dict(session.proxy), {
             "server": "http://127.0.0.1:8080",
             "username": "user",
             "password": "secret",
         })
+        self.assertEqual(session.executable_path, r"C:\browser\chrome.exe")
 
     def test_geo_environment_maps_to_native_context_options(self):
-        session = glue.build_session_config({
-            "browser_profile_path": "profile",
-            "fingerprint": {
-                "lang": "en-US",
-                "timezone": "Asia/Ho_Chi_Minh",
-                "geolocation": {"latitude": 10.75, "longitude": 106.67, "accuracy": 50},
-            },
-        })
+        with patch.object(
+            glue, "resolve_browser_executable", return_value=r"C:\browser\chrome.exe"
+        ):
+            session = glue.build_session_config({
+                "browser_profile_path": "profile",
+                "fingerprint": {
+                    "lang": "en-US",
+                    "timezone": "Asia/Ho_Chi_Minh",
+                    "geolocation": {"latitude": 10.75, "longitude": 106.67, "accuracy": 50},
+                },
+            })
 
         self.assertEqual(session.timezone_id, "Asia/Ho_Chi_Minh")
         self.assertEqual(dict(session.geolocation)["longitude"], 106.67)
         self.assertEqual(session.permissions, ("geolocation",))
+        self.assertEqual(session.executable_path, r"C:\browser\chrome.exe")
 
     def test_invalid_proxy_fails_closed(self):
         config = {
@@ -84,8 +92,93 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
             "proxy_string": "127.0.0.1:not-a-port",
         }
 
-        with self.assertRaises(glue.SessionSetupError):
-            glue.build_session_config(config)
+        with patch.object(
+            glue, "resolve_browser_executable", return_value=r"C:\browser\chrome.exe"
+        ):
+            with self.assertRaises(glue.SessionSetupError):
+                glue.build_session_config(config)
+
+    def test_no_browser_raises_clear_error(self):
+        with patch.object(glue, "resolve_browser_executable", return_value=None):
+            with self.assertRaisesRegex(glue.SessionSetupError, "Không tìm thấy browser"):
+                glue.build_session_config({"browser_profile_path": "profile"})
+
+    def test_config_browser_executable_override_resolver(self):
+        config = {
+            "browser_profile_path": "profile",
+            "browser_executable": r"C:\custom\chrome.exe",
+        }
+        session = glue.build_session_config(config)
+        self.assertEqual(session.executable_path, r"C:\custom\chrome.exe")
+
+    def test_resolve_bundled_orbita_first(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            browser = Path(temporary) / "Browser" / "orbita-browser-123"
+            browser.mkdir(parents=True)
+            exe = browser / "chrome.exe"
+            exe.write_bytes(b"x")
+            self.assertEqual(
+                glue.resolve_browser_executable(app_base=temporary),
+                str(exe),
+            )
+
+    def test_resolve_chrome_win64_when_orbita_missing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            browser = Path(temporary) / "Browser" / "chrome-win64"
+            browser.mkdir(parents=True)
+            exe = browser / "chrome.exe"
+            exe.write_bytes(b"x")
+            self.assertEqual(
+                glue.resolve_browser_executable(app_base=temporary),
+                str(exe),
+            )
+
+    def test_resolve_bundled_beats_system_chrome(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            browser = Path(temporary) / "Browser"
+            browser.mkdir(parents=True)
+            bundled = browser / "chrome.exe"
+            bundled.write_bytes(b"x")
+            with patch.object(
+                glue, "_find_system_chrome_executable", return_value=r"C:\system\chrome.exe"
+            ):
+                self.assertEqual(
+                    glue.resolve_browser_executable(app_base=temporary),
+                    str(bundled),
+                )
+
+    def test_resolve_falls_back_to_system_chrome(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(
+                glue, "_find_system_chrome_executable", return_value=r"C:\system\chrome.exe"
+            ):
+                self.assertEqual(
+                    glue.resolve_browser_executable(app_base=temporary),
+                    r"C:\system\chrome.exe",
+                )
+
+    def test_resolve_ignores_empty_or_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            browser = Path(temporary) / "Browser"
+            browser.mkdir(parents=True)
+            empty = browser / "chrome-win64" / "chrome.exe"
+            empty.parent.mkdir(parents=True)
+            empty.write_bytes(b"")
+            dir_exe = browser / "chrome.exe"
+            dir_exe.mkdir()
+            with patch.object(glue, "_find_system_chrome_executable", return_value=None):
+                self.assertIsNone(glue.resolve_browser_executable(app_base=temporary))
+
+    def test_resolve_internal_browser_dir(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            browser = Path(temporary) / "_internal" / "Browser" / "orbita-browser-123"
+            browser.mkdir(parents=True)
+            exe = browser / "chrome.exe"
+            exe.write_bytes(b"x")
+            self.assertEqual(
+                glue.resolve_browser_executable(app_base=temporary),
+                str(exe),
+            )
 
     def test_profile_creation_and_resume_after_legacy_delete(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -222,7 +315,9 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
                 future.set_exception(ProfileInUseError("profile is already in use: profile"))
                 return future
 
-        with patch.object(glue, "browser_service", return_value=BusyService()):
+        with patch.object(
+            glue, "resolve_browser_executable", return_value=r"C:\browser\chrome.exe"
+        ), patch.object(glue, "browser_service", return_value=BusyService()):
             with self.assertRaises(glue.ProfileBusyError):
                 glue.open_session({"browser_profile_path": "profile"}, "account")
 
@@ -243,7 +338,9 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
                 future.set_result(SessionResult(handle=handle, page_count=1))
                 return future
 
-        with patch.object(glue, "browser_service", return_value=Service()):
+        with patch.object(
+            glue, "resolve_browser_executable", return_value=r"C:\browser\chrome.exe"
+        ), patch.object(glue, "browser_service", return_value=Service()):
             token = glue.open_session({"browser_profile_path": profile_path}, "AUTO 6")
 
         self.assertEqual(token.profile_name, "AUTO 6")
@@ -271,7 +368,9 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
                 return completed
 
         service = Service()
-        with patch.object(glue, "browser_service", return_value=service):
+        with patch.object(
+            glue, "resolve_browser_executable", return_value=r"C:\browser\chrome.exe"
+        ), patch.object(glue, "browser_service", return_value=service):
             with self.assertRaisesRegex(glue.SessionSetupError, "Session trả về không hợp lệ"):
                 glue.open_session({"browser_profile_path": "profile"}, "AUTO 6")
 
@@ -303,7 +402,9 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
                 return completed
 
         service = Service()
-        with patch.object(glue, "browser_service", return_value=service):
+        with patch.object(
+            glue, "resolve_browser_executable", return_value=r"C:\browser\chrome.exe"
+        ), patch.object(glue, "browser_service", return_value=service):
             with self.assertRaisesRegex(glue.SessionSetupError, "Session trả về không hợp lệ"):
                 glue.open_session({"browser_profile_path": "profile"}, "AUTO 6")
 
@@ -319,7 +420,9 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
         browser = PatchrightBrowser(runtime)
         config = {"browser_profile_path": "profile"}
         try:
-            with patch.object(glue, "browser_service", return_value=browser):
+            with patch.object(
+                glue, "resolve_browser_executable", return_value=r"C:\browser\chrome.exe"
+            ), patch.object(glue, "browser_service", return_value=browser):
                 token = glue.open_session(config, "AUTO 6")
                 with patch.object(glue, "import_cookies", side_effect=RuntimeError("cookie import failed")):
                     with self.assertRaisesRegex(RuntimeError, "cookie import failed"):

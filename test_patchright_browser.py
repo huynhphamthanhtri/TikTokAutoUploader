@@ -179,11 +179,13 @@ class PatchrightBrowserTests(unittest.TestCase):
             locale="en-US",
             geolocation={"latitude": 10.75, "longitude": 106.67, "accuracy": 50},
             permissions=("geolocation",),
+            executable_path=r"C:\browser\chrome.exe",
         )
         owner = self.runtime.snapshot().thread_id
         launch_thread, kwargs = self.playwright.chromium.launches[0]
         self.assertEqual(launch_thread, owner)
         self.assertTrue(kwargs["headless"])
+        self.assertEqual(kwargs["executable_path"], r"C:\browser\chrome.exe")
         self.assertEqual(kwargs["viewport"], {"width": 1280, "height": 720})
         self.assertEqual(kwargs["geolocation"]["latitude"], 10.75)
         self.assertEqual(kwargs["permissions"], ["geolocation"])

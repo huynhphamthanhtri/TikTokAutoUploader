@@ -1,3 +1,16 @@
+# Phiên bản 1.0.13
+
+## Điểm mới
+- Khôi phục cơ chế tự động tải Browser cần thiết để mở profile TikTok (Browser-v1.0.7.zip từ resource release).
+
+## Cải thiện
+- Patchright ưu tiên sử dụng Browser do ứng dụng quản lý; nếu chưa có, dùng Google Chrome hệ thống làm dự phòng.
+- Hiển thị hướng dẫn tiếng Việt rõ ràng khi máy chưa có browser phù hợp, thay vì yêu cầu chạy "patchright install".
+
+## Sửa lỗi
+- Khắc phục lỗi mở browser thủ công báo "Executable doesn't exist ... .local-browsers" do bản phát hành thiếu Chromium mặc định.
+- Khắc phục không thể chạy upload hoặc mở browser trên máy người dùng mới.
+
 # Phiên bản 1.0.12
 
 ## Điểm mới

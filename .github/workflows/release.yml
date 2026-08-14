@@ -103,6 +103,21 @@ jobs:
             throw "CRITICAL: Internal project modules missing! $($criticalMissing.Value -join ', ')"
           }
 
+      - name: Browser launch smoke (bundled resource)
+        shell: pwsh
+        run: |
+          $browserTag = "v1.0.7"
+          $browserZip = "Browser-v1.0.7.zip"
+          $url = "https://github.com/${{ github.repository }}/releases/download/$browserTag/$browserZip"
+          $tmp = Join-Path $env:RUNNER_TEMP "browser_smoke"
+          New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile (Join-Path $tmp $browserZip)
+          Expand-Archive -Path (Join-Path $tmp $browserZip) -DestinationPath $tmp -Force
+          $exe = Join-Path $tmp "Browser\orbita-browser-123\chrome.exe"
+          if (-not (Test-Path $exe)) { throw "Bundled chrome.exe missing after extract" }
+          $env:BROWSER_SMOKE_EXECUTABLE = $exe
+          python browser_launch_smoke.py
+
       - name: Validate artifact (pre-smoke)
         shell: pwsh
         run: |
