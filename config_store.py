@@ -6,8 +6,37 @@ from datetime import datetime
 from pathlib import Path
 
 from browser_environment import ensure_fingerprint_defaults
+from account_io import ACCOUNT_DEFAULTS
 
 _CONFIG_SAVE_LOCK = threading.RLock()
+
+# Metadata trạng thái xác thực session độc lập với migration_state.
+# Chỉ là cache/audit/UI: mỗi lần Start vẫn live-verify persistent profile.
+SESSION_AUTH_DEFAULTS = {
+    'session_auth_state': 'unknown',
+    'session_source': '',
+    'session_verified_at': '',
+    'session_verified_profile_path': '',
+    'session_verified_proxy_key': '',
+    'session_last_failure_at': '',
+    'session_last_failure_reason': '',
+    'manual_login_pending': False,
+    'proxy_change_classification': '',
+    'proxy_environment_warning': '',
+    'proxy_environment_changed_at': '',
+    'proxy_previous_exit_ip': '',
+    'proxy_environment_history': [],
+}
+
+# Ownership browser profile riêng cho mỗi tài khoản (tránh checkpoint).
+# account_uuid là định danh bất biến, không phụ thuộc tên hiển thị.
+ACCOUNT_OWNERSHIP_DEFAULTS = {
+    'account_uuid': '',
+    'profile_schema_version': 1,
+    'profile_owner_state': 'unverified',
+    'profile_created_at': '',
+    'profile_isolation_state': 'unknown',
+}
 
 
 def _normalize_browser_config(config):
@@ -16,6 +45,12 @@ def _normalize_browser_config(config):
     normalized.setdefault('browser_profile_path', '')
     normalized.setdefault('browser_engine', 'patchright')
     normalized.setdefault('migration_state', 'pending')
+    for key, default in ACCOUNT_DEFAULTS.items():
+        normalized.setdefault(key, default)
+    for key, default in SESSION_AUTH_DEFAULTS.items():
+        normalized.setdefault(key, default)
+    for key, default in ACCOUNT_OWNERSHIP_DEFAULTS.items():
+        normalized.setdefault(key, default)
     return normalized
 
 

@@ -19,7 +19,8 @@ class ProxyConfigurationTests(unittest.TestCase):
         start = self.glue_source.index("def build_session_config")
         end = self.glue_source.index("def open_session", start)
         setup_source = self.glue_source[start:end]
-        self.assertIn('"server": "http://{}:{}".format(host, port)', setup_source)
+        self.assertIn('"server": "{}://{}:{}".format(scheme, host, port)', setup_source)
+        self.assertIn('scheme = "socks5" if proxy_type == "socks5" else "http"', setup_source)
         self.assertIn('native["username"] = proxy_data["user"]', setup_source)
         self.assertIn('native["password"] = proxy_data["pass"]', setup_source)
         self.assertIn('kwargs["proxy"] = proxy', setup_source)

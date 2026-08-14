@@ -1,8 +1,10 @@
 import unittest
 
 from browser_environment import (
+    GEO_ENVIRONMENT_KEYS,
     ensure_fingerprint_defaults,
     geo_cache_is_current,
+    locale_for_country,
     normalize_geoip_payload,
     proxy_cache_key,
     resolve_geoip,
@@ -22,8 +24,13 @@ class FakeResponse:
         return {
             "success": True,
             "ip": "198.51.100.12",
+            "country_code": "VN",
+            "country": "Vietnam",
+            "region": "Ho Chi Minh City",
+            "city": "Ho Chi Minh City",
             "latitude": 1.5,
             "longitude": 2.5,
+            "connection": {"asn": 140353, "isp": "VNPT", "org": "VNPT"},
             "timezone": {"id": "Asia/Ho_Chi_Minh"},
         }
 
@@ -75,8 +82,13 @@ class BrowserEnvironmentTests(unittest.TestCase):
             {
                 "success": True,
                 "ip": "198.51.100.12",
+                "country_code": "VN",
+                "country": "Vietnam",
+                "region": "Ho Chi Minh City",
+                "city": "Ho Chi Minh City",
                 "latitude": 1.5,
                 "longitude": 2.5,
+                "connection": {"asn": 140353, "isp": "VNPT"},
                 "timezone": {"id": "Asia/Ho_Chi_Minh"},
             },
             proxy,
@@ -84,6 +96,50 @@ class BrowserEnvironmentTests(unittest.TestCase):
         self.assertEqual(result["timezone"], "Asia/Ho_Chi_Minh")
         self.assertEqual(result["geolocation"]["latitude"], 1.5)
         self.assertEqual(result["geo_proxy_hash"], proxy_cache_key(proxy))
+        self.assertEqual(result["geo_country_code"], "VN")
+        self.assertEqual(result["geo_country"], "Vietnam")
+        self.assertEqual(result["geo_region"], "Ho Chi Minh City")
+        self.assertEqual(result["geo_city"], "Ho Chi Minh City")
+        self.assertEqual(result["geo_asn"], "140353")
+        self.assertEqual(result["geo_isp"], "VNPT")
+
+    def test_geoip_payload_tolerates_missing_connection_and_country(self):
+        proxy = {"ip": "203.0.113.8", "port": "8080"}
+        result = normalize_geoip_payload(
+            {
+                "success": True,
+                "ip": "198.51.100.12",
+                "latitude": 1.5,
+                "longitude": 2.5,
+                "timezone": {"id": "Asia/Tokyo"},
+            },
+            proxy,
+        )
+        self.assertEqual(result["geo_country_code"], "")
+        self.assertEqual(result["geo_asn"], "")
+        self.assertEqual(result["geo_isp"], "")
+        self.assertEqual(result["timezone"], "Asia/Tokyo")
+
+    def test_country_locale_mapping_and_fallback(self):
+        self.assertEqual(locale_for_country("JP"), "ja-JP")
+        self.assertEqual(locale_for_country("vn"), "vi-VN")
+        self.assertEqual(locale_for_country("US"), "en-US")
+        self.assertEqual(locale_for_country("ZZ"), "en-US")
+
+    def test_geo_environment_keys_present_in_normalized_payload(self):
+        proxy = {"ip": "203.0.113.8", "port": "8080"}
+        result = normalize_geoip_payload(
+            {
+                "success": True,
+                "ip": "198.51.100.12",
+                "latitude": 1.5,
+                "longitude": 2.5,
+                "timezone": {"id": "Asia/Ho_Chi_Minh"},
+            },
+            proxy,
+        )
+        for key in GEO_ENVIRONMENT_KEYS:
+            self.assertIn(key, result)
 
     def test_geoip_request_uses_proxy(self):
         calls = []

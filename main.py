@@ -4,6 +4,7 @@ import queue
 import json
 import shutil
 import requests
+import copy
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -28,12 +29,32 @@ from tkinter import filedialog, messagebox, ttk, StringVar, Menu
 from tkinter.scrolledtext import ScrolledText
 from app_ui import configure_ttk_styles, build_dashboard, classify_log_message
 from core_helpers import (
-    parse_cookie,
     parse_proxy_string,
     is_file_stable,
     normalize_profile_path,
     process_uses_profile,
     copy_video_atomically,
+)
+from account_io import (
+    DEFAULT_FIELDS,
+    DEFAULT_FORMAT,
+    LEGACY_FORMAT,
+    SENSITIVE_FIELDS,
+    parse_format,
+    parse_data_into_records,
+    plan_import,
+    apply_update_to_config,
+    serialize_records,
+    record_from_config,
+    masked_record,
+)
+from profile_ownership import (
+    build_profile_inventory,
+    conflict_account_names,
+    detect_profile_conflicts,
+    ensure_account_uuid,
+    invalidate_session_auth,
+    session_proxy_key as ownership_session_proxy_key,
 )
 from browser_maintenance import (
     FULL as BROWSER_MAINTENANCE_FULL,
@@ -49,6 +70,7 @@ from patchright_profile_migration import (
     MigrationState,
     advance_migration,
     cleanup_legacy_profile,
+    create_patchright_profile,
     migration_status,
 )
 from config_store import (
@@ -59,12 +81,29 @@ from config_store import (
     build_runtime_profiles,
 )
 from browser_environment import (
+    GEO_ENVIRONMENT_KEYS,
     ensure_fingerprint_defaults,
     geo_cache_is_current,
+    locale_for_country,
     proxy_cache_key,
     resolve_geoip,
     verify_direct_endpoint,
     verify_proxy_endpoint,
+)
+from proxy_environment import (
+    RISKY_CHANGE as PROXY_ENV_RISKY,
+    SAME as PROXY_ENV_SAME,
+    UNKNOWN as PROXY_ENV_UNKNOWN,
+    apply_proxy_environment_warning,
+    compare_proxy_environment,
+    proxy_environment_snapshot,
+)
+from browser_profile_quarantine import (
+    cleanup_quarantines,
+    latest_quarantine,
+    quarantine_profile,
+    restore_quarantine,
+    restore_target,
 )
 import youtube_monitor
 from youtube_monitor.activity import append_activity, clear_activity_log, get_activity_logs, get_activity_mtime, get_activity_stats, lookup_download
@@ -137,12 +176,12 @@ def _refresh_profile_geoip(profile_name, config, proxy_data, force=False):
     config['fingerprint'] = fingerprint
     if not proxy_data:
         if fingerprint.get('geo_source') == 'ipwho.is':
-            for key in ('timezone', 'geolocation', 'geo_exit_ip', 'geo_proxy_hash', 'geo_resolved_at', 'geo_source'):
+            for key in GEO_ENVIRONMENT_KEYS:
                 fingerprint.pop(key, None)
             return True
         return False
     if fingerprint.get('geo_proxy_hash') != proxy_cache_key(proxy_data):
-        for key in ('timezone', 'geolocation', 'geo_exit_ip', 'geo_proxy_hash', 'geo_resolved_at', 'geo_source'):
+        for key in GEO_ENVIRONMENT_KEYS:
             fingerprint.pop(key, None)
     if not force and geo_cache_is_current(fingerprint, proxy_data):
         return False
@@ -400,6 +439,43 @@ def _save_cookie_injection_metadata(profile_name, cookie_str):
     except Exception:
         pass
 
+def _session_proxy_key(config):
+    return ownership_session_proxy_key(config)
+
+def _save_session_auth_metadata(profile_name, state, source=''):
+    try:
+        config = profiles[profile_name]['config']
+        config['session_auth_state'] = state
+        config['session_source'] = source
+        config['session_verified_at'] = datetime.now(timezone.utc).isoformat()
+        config['session_verified_profile_path'] = browser_glue.active_profile_path(config)
+        config['session_verified_proxy_key'] = _session_proxy_key(config)
+        if state == 'verified':
+            config['session_last_failure_at'] = ''
+            config['session_last_failure_reason'] = ''
+            config['manual_login_pending'] = False
+        save_configs()
+    except Exception:
+        pass
+
+def _mark_session_failure(profile_name, reason):
+    try:
+        config = profiles[profile_name]['config']
+        config['session_auth_state'] = 'expired'
+        config['session_last_failure_at'] = datetime.now(timezone.utc).isoformat()
+        config['session_last_failure_reason'] = str(reason)[:200]
+        save_configs()
+    except Exception:
+        pass
+
+def _wait_profile_lock_release(profile_name, max_wait=6.0):
+    deadline = time.monotonic() + max_wait
+    while time.monotonic() < deadline:
+        if _profile_browser_process_count(profile_name) == 0:
+            return True
+        time.sleep(0.4)
+    return _profile_browser_process_count(profile_name) == 0
+
 def _find_profile_with_data_dir(profile_path, exclude_name=None):
     target = normalize_profile_path(profile_path)
     if not target:
@@ -417,6 +493,31 @@ def _find_profile_with_same_data_dir(profile_name):
     profile = profiles.get(profile_name, {})
     profile_path = browser_glue.active_profile_path(profile.get('config', {}))
     return _find_profile_with_data_dir(profile_path, exclude_name=profile_name)
+
+
+def _profile_conflicts():
+    """Global shared-profile conflicts across all accounts (read-only)."""
+    try:
+        inventory = build_profile_inventory(profiles)
+        return detect_profile_conflicts(inventory)
+    except Exception:
+        return []
+
+
+def _profile_conflict_blocked_names():
+    return conflict_account_names(_profile_conflicts())
+
+
+def _blocked_by_profile_conflict(profile_name):
+    return profile_name in _profile_conflict_blocked_names()
+
+
+def _profile_conflict_message(profile_name):
+    for conflict in _profile_conflicts():
+        if profile_name in conflict.get('names', []):
+            names = ", ".join(conflict.get('names', []))
+            return f"Profile đang bị nhiều tài khoản dùng chung: {names}. Hãy tách profile trước."
+    return "Profile đang xung đột ownership; không thể mở."
 
 
 def _profile_browser_process_count(profile_name):
@@ -451,9 +552,9 @@ def _export_live_cookies_to_config(driver, profile_name):
             login_state = browser_glue.page_login_state(driver, timeout=15)
         except Exception:
             login_state = 'indeterminate'
-        if login_state == 'login_required':
+        if login_state != 'authenticated':
             update_status(
-                f"[{profile_name}] [WARN] Không lưu cookie live: browser đang ở trang đăng nhập."
+                f"[{profile_name}] [WARN] Không lưu cookie live: browser chưa xác nhận trạng thái đăng nhập."
             )
             return False
         cookie_json = json.dumps(live_cookies, ensure_ascii=False)
@@ -466,10 +567,12 @@ def _export_live_cookies_to_config(driver, profile_name):
     return False
 
 
-def _capture_tiktok_cookies_worker(profile_name):
+def _capture_tiktok_cookies_worker(profile_name, source_label='profile_session', auto_after_manual=False):
     cfg = profiles[profile_name]['config']
     token = None
     try:
+        if auto_after_manual:
+            _wait_profile_lock_release(profile_name)
         proxy_data = parse_proxy_string(cfg.get('proxy_string', '')) if cfg.get('use_proxy', False) else None
         if cfg.get('use_proxy', False) and not proxy_data:
             raise ValueError("Proxy sai định dạng; từ chối mở browser trực tiếp")
@@ -488,10 +591,6 @@ def _capture_tiktok_cookies_worker(profile_name):
         _sync_patchright_migration(cfg)
         save_configs()
         token = browser_glue.open_session(cfg, profile_name)
-        imported = browser_glue.import_cookies(token, parse_cookie(cfg.get('cookie_str', '')))
-        if imported:
-            _save_cookie_injection_metadata(profile_name, cfg.get('cookie_str', ''))
-        _advance_patchright_migration(cfg, MigrationState.CREATED.value, MigrationState.COOKIES_IMPORTED)
         if proxy_data:
             is_match, current_ip = browser_glue.verify_exit_ip(token, proxy_expected_ip)
             if not is_match and direct_ip and current_ip and current_ip != direct_ip:
@@ -500,14 +599,14 @@ def _capture_tiktok_cookies_worker(profile_name):
                 if not current_ip:
                     raise RuntimeError("Không xác minh được proxy trong browser khi lấy cookie")
                 raise RuntimeError(f"Proxy mismatch khi lấy cookie: {current_ip} != {proxy_expected_ip}")
-        current_url = browser_glue.navigate(token, TIKTOK_UPLOAD_URL)
+        browser_glue.navigate(token, TIKTOK_UPLOAD_URL)
         login_state = browser_glue.wait_page_login_state(token, timeout=30)
         if login_state != 'authenticated':
-            raise TikTokLoginRequiredError(
-                'TikTok yêu cầu đăng nhập lại.'
-                if login_state == 'login_required'
-                else 'Không xác minh được trạng thái đăng nhập TikTok.'
-            )
+            _mark_session_failure(profile_name, 'Không xác minh được session trên profile')
+            _set_profile_ui(profile_name, login='Cần đăng nhập lại', last_error='Profile chưa đăng nhập; hãy bấm Mở Chrome để đăng nhập tay')
+            update_status(f"[{profile_name}] Profile chưa đăng nhập. Hãy bấm 'Mở Chrome' để đăng nhập thủ công rồi đóng lại.")
+            return False
+        _advance_patchright_migration(cfg, MigrationState.CREATED.value, MigrationState.COOKIES_IMPORTED)
         _advance_patchright_migration(cfg, MigrationState.COOKIES_IMPORTED.value, MigrationState.LOGIN_VERIFIED)
         live_cookies = browser_glue.export_cookies(token)
         if not browser_glue.has_primary_tiktok_auth_cookie(live_cookies):
@@ -516,11 +615,13 @@ def _capture_tiktok_cookies_worker(profile_name):
         cfg['cookie_str'] = cookie_json
         _save_cookie_injection_metadata(profile_name, cookie_json)
         cfg['cookies_last_captured_at'] = datetime.now(timezone.utc).isoformat()
+        _save_session_auth_metadata(profile_name, 'verified', source_label)
         save_configs()
-        _set_profile_ui(profile_name, login='Đã đăng nhập', browser='Đã đóng', last_error='')
-        update_status(f"[{profile_name}] Đã lấy và lưu {len(live_cookies)} cookie TikTok từ session Patchright.")
+        _set_profile_ui(profile_name, login='Session đã lưu', browser='Đã đóng', last_error='')
+        update_status(f"[{profile_name}] Đã lưu {len(live_cookies)} cookie TikTok từ session profile (nguồn: {source_label}).")
         return True
     except TikTokLoginRequiredError as e:
+        _mark_session_failure(profile_name, str(e))
         _set_profile_ui(profile_name, login='Cần đăng nhập lại', last_error=str(e))
         update_status(f"[{profile_name}] Không lấy cookie: {e}")
         return False
@@ -545,6 +646,9 @@ def get_tiktok_cookies():
     profile_name = tree.item(sel[0])['values'][0]
     profile = profiles.get(profile_name)
     if not profile:
+        return
+    if _blocked_by_profile_conflict(profile_name):
+        messagebox.showerror('Lấy Cookie', _profile_conflict_message(profile_name))
         return
     if profile.get('running') or profile.get('uploading'):
         messagebox.showwarning('Lấy Cookie', 'Hãy Stop profile và đóng browser trước khi lấy cookie.')
@@ -572,20 +676,20 @@ def get_tiktok_cookies():
 def _choose_browser_maintenance_mode(profile_name):
     result = {'mode': None}
     dialog = ctk.CTkToplevel(root)
-    dialog.title('Làm sạch browser')
-    dialog.geometry('520x420')
+    dialog.title('Reset Browser')
+    dialog.geometry('560x560')
     dialog.resizable(False, False)
     dialog.transient(root)
     dialog.grab_set()
 
     ctk.CTkLabel(
         dialog,
-        text=f"Làm sạch browser: {profile_name}",
+        text=f"Reset Browser: {profile_name}",
         font=("", 18, "bold"),
     ).pack(pady=(18, 8))
     ctk.CTkLabel(
         dialog,
-        text="Chọn mức làm sạch. Browser phải được đóng trước khi thực hiện.",
+        text="Chọn mức reset. Browser phải được đóng trước khi thực hiện.",
         text_color="#475569",
     ).pack(pady=(0, 12))
 
@@ -608,26 +712,104 @@ def _choose_browser_maintenance_mode(profile_name):
         )
 
     add_choice(
-        'Làm sạch nhanh (khuyên dùng)',
+        'Dọn cache',
         'Xóa cache và file tạm; giữ đăng nhập, cookie và fingerprint.',
         BROWSER_MAINTENANCE_QUICK,
         '#2563eb',
     )
     add_choice(
-        'Xóa phiên đăng nhập',
-        'Xóa cache, cookie và dữ liệu đăng nhập của các website trong profile.',
+        'Đăng xuất và login lại',
+        'Xóa cache, cookie và dữ liệu đăng nhập; giữ fingerprint và proxy.',
         BROWSER_MAINTENANCE_SESSION,
         '#d97706',
     )
     add_choice(
-        'Khôi phục browser mới',
-        'Xóa toàn bộ User Data do tool quản lý và tạo fingerprint mới.',
+        'Tạo môi trường login mới',
+        'Chuyển browser profile hiện tại vào BrowserQuarantine (giữ 7 ngày), '
+        'tạo profile sạch và fingerprint mới theo GEO proxy.',
         BROWSER_MAINTENANCE_FULL,
         '#dc2626',
     )
+
+    try:
+        quarantine = latest_quarantine(
+            browser_glue.active_profile_path(profiles[profile_name]['config'])
+        )
+    except Exception:
+        quarantine = None
+    if quarantine:
+        created = str(quarantine.get('created_at', ''))[:19].replace('T', ' ')
+        expires = str(quarantine.get('expires_at', ''))[:19].replace('T', ' ')
+        add_choice(
+            'Khôi phục browser trước đó',
+            f"Khôi phục profile đã quarantine (tạo lúc {created}, hết hạn {expires}).",
+            'restore',
+            '#16a34a',
+        )
     dialog.protocol('WM_DELETE_WINDOW', dialog.destroy)
     root.wait_window(dialog)
     return result['mode']
+
+
+def _reset_full_with_quarantine(profile_name, cfg):
+    """Move the active Patchright profile into quarantine and create a clean one.
+
+    Returns True when the quarantine-based reset ran, False when the active
+    profile is not an owned Patchright profile (caller falls back to legacy).
+    """
+    active = browser_glue.active_profile_path(cfg)
+    active_path = Path(active) if active else None
+    if not active_path or active_path.name != 'Profile-Patchright' or not active_path.is_dir():
+        return False
+
+    account_uuid = str(cfg.get('account_uuid', '') or '')
+    try:
+        quarantine_profile(
+            active_path,
+            account_uuid=account_uuid,
+            profile_name=profile_name,
+            proxy_environment=proxy_environment_snapshot(cfg.get('fingerprint', {})),
+        )
+    except Exception as error:
+        raise RuntimeError(f'Không quarantine được profile hiện tại: {error}')
+
+    managed_root = active_path.parent
+    legacy_dir = managed_root / 'Profile'
+    if not legacy_dir.is_dir():
+        create_owned_root(str(legacy_dir))
+    try:
+        new_profile = create_patchright_profile(str(legacy_dir), str(managed_root), account_id=account_uuid or None)
+    except Exception as error:
+        raise RuntimeError(f'Không tạo được browser profile sạch: {error}')
+    cfg['browser_profile_path'] = str(new_profile)
+    cfg['migration_state'] = migration_status(new_profile)['state']
+
+    for key in ('cookie_str', 'cookie_hash', 'cookies_last_injected_at', 'cookies_last_captured_at', 'cookies_last_injected_profile_path'):
+        cfg.pop(key, None)
+    invalidate_session_auth(cfg, 'Tạo môi trường login mới')
+    cfg['session_auth_state'] = 'expired'
+    cfg['session_last_failure_reason'] = 'Browser environment reset'
+    cfg['manual_login_pending'] = True
+
+    seed = profile_name + str(time.time_ns())
+    cfg['fingerprint'] = _generate_fingerprint(seed=seed)
+    cfg['fingerprint_reset_at'] = datetime.now(timezone.utc).isoformat()
+    if cfg.get('use_proxy', False):
+        proxy_data = parse_proxy_string(cfg.get('proxy_string', ''))
+        if proxy_data:
+            try:
+                resolved = resolve_geoip(proxy_data, timeout=8)
+                resolved['lang'] = locale_for_country(resolved.get('geo_country_code', ''))
+                cfg['fingerprint'].update(resolved)
+            except Exception as error:
+                cfg['geoip_last_error'] = str(error)
+    save_configs()
+    _set_profile_ui(profile_name, login='Cần đăng nhập', browser='Môi trường mới', upload='Chờ video', last_error='')
+    update_status(
+        f"[{profile_name}] Đã tạo môi trường login mới. Profile cũ đã chuyển vào "
+        f"BrowserQuarantine (giữ 7 ngày, có thể khôi phục)."
+    )
+    return True
 
 
 def _clean_browser_worker(profile_name, mode):
@@ -663,6 +845,8 @@ def _clean_browser_worker(profile_name, mode):
                 adopt_legacy_owned_root(cfg['chrome_profile'], managed_data_root)
             except ValueError:
                 pass
+        if _reset_full_with_quarantine(profile_name, cfg):
+            return
 
     report = maintain_browser(
         browser_glue.active_profile_path(cfg),
@@ -698,6 +882,44 @@ def _clean_browser_worker(profile_name, mode):
     )
 
 
+def _restore_browser_profile_worker(profile_name):
+    profile = profiles[profile_name]
+    cfg = profile['config']
+    lifecycle_report = get_lifecycle(profile_name).cleanup(quit_timeout=3, kill_timeout=2)
+    profile['driver'] = None
+    profile['manual_driver'] = None
+    profile['observer'] = None
+    if lifecycle_report.get('errors'):
+        raise RuntimeError('; '.join(lifecycle_report['errors']))
+    if _profile_browser_process_count(profile_name):
+        raise RuntimeError('User Data vẫn đang được một tiến trình Chrome sử dụng.')
+
+    active = browser_glue.active_profile_path(cfg)
+    active_path = Path(active) if active else None
+    quarantine = latest_quarantine(active_path if active_path else cfg.get('chrome_profile', ''))
+    if not quarantine:
+        raise RuntimeError('Không tìm thấy browser profile đã quarantine.')
+    quarantine_dir = Path(quarantine['_path'])
+    target = restore_target(quarantine_dir)
+    if target.exists():
+        raise RuntimeError(
+            'Không thể khôi phục vì browser profile hiện tại vẫn tồn tại. '
+            'Hãy tạo môi trường login mới trước rồi thử lại.'
+        )
+
+    restore_quarantine(quarantine_dir)
+    cfg['browser_profile_path'] = str(target)
+    cfg['migration_state'] = migration_status(target)['state']
+    invalidate_session_auth(cfg, 'Khôi phục browser profile từ quarantine')
+    cfg['manual_login_pending'] = True
+    save_configs()
+    _set_profile_ui(profile_name, login='Cần đăng nhập', browser='Đã khôi phục', upload='Chờ video', last_error='')
+    update_status(
+        f"[{profile_name}] Đã khôi phục browser profile từ quarantine. "
+        f"Hãy dùng 'Mở Chrome' để đăng nhập và xác minh session."
+    )
+
+
 def clean_browser():
     if not _license_guard():
         return
@@ -722,13 +944,20 @@ def clean_browser():
     if not mode:
         return
     if mode == BROWSER_MAINTENANCE_SESSION and not messagebox.askyesno(
-        'Xóa phiên đăng nhập',
+        'Đăng xuất và login lại',
         'Thao tác này sẽ đăng xuất các website trong browser. Tiếp tục?',
     ):
         return
     if mode == BROWSER_MAINTENANCE_FULL and not messagebox.askyesno(
-        'Khôi phục browser mới',
-        'Toàn bộ User Data và đăng nhập sẽ bị xóa. Chỉ dữ liệu browser do tool quản lý mới được phép xóa. Tiếp tục?',
+        'Tạo môi trường login mới',
+        'Browser profile hiện tại sẽ được chuyển vào BrowserQuarantine '
+        '(giữ 7 ngày, có thể khôi phục) và tạo profile sạch mới. Tiếp tục?',
+    ):
+        return
+    if mode == 'restore' and not messagebox.askyesno(
+        'Khôi phục browser',
+        'Profile hiện tại sẽ bị thay thế bằng profile đã quarantine. '
+        'Session hiện tại có thể không còn tác dụng. Tiếp tục?',
     ):
         return
 
@@ -736,8 +965,12 @@ def clean_browser():
         with _profile_operation_lock(profile_name):
             profile['session_busy'] = True
             try:
-                _set_profile_ui(profile_name, browser='Đang làm sạch')
-                _clean_browser_worker(profile_name, mode)
+                if mode == 'restore':
+                    _set_profile_ui(profile_name, browser='Đang khôi phục')
+                    _restore_browser_profile_worker(profile_name)
+                else:
+                    _set_profile_ui(profile_name, browser='Đang làm sạch')
+                    _clean_browser_worker(profile_name, mode)
             except Exception as e:
                 _set_profile_ui(profile_name, browser='Bị lỗi', last_error=str(e))
                 update_status(f'[{profile_name}] Lỗi làm sạch browser: {e}')
@@ -1119,8 +1352,13 @@ def _treeview_sort_column(tv, col, reverse):
     try:
         data = [(tv.set(k, col), k) for k in tv.get_children('')]
         if col == 'status':
-            key_map = {'Running': 1, 'Stopped': 0, 'Đang chạy': 1, 'Đã dừng': 0}
-            data.sort(key=lambda t: key_map.get(t[0], -1), reverse=reverse)
+            def sort_key_status(t):
+                val = str(t[0]).lower()
+                if 'lỗi' in val: return 3
+                if 'đang xử lý' in val: return 2
+                if 'đang chạy' in val or 'running' in val: return 1
+                return 0
+            data.sort(key=sort_key_status, reverse=reverse)
         elif col == 'headless':
             data.sort(key=lambda t: str(t[0]).lower() in ('có', 'true', 'yes'), reverse=reverse)
         elif col == 'limit':
@@ -1172,10 +1410,25 @@ def load_configs():
         selected_project_var.set(ALL_OPTION)
         update_profile_list()
         _migrate_profile_drivers()
+        _cleanup_expired_quarantines()
     except FileNotFoundError:
         projects['Mặc định'] = set()
         update_project_dropdown()
         selected_project_var.set(ALL_OPTION)
+
+
+def _cleanup_expired_quarantines():
+    for profile_name, profile in profiles.items():
+        try:
+            active = browser_glue.active_profile_path(profile['config'])
+            removed = cleanup_quarantines(active)
+            if removed:
+                update_status(
+                    f"[{profile_name}] Đã dọn {len(removed)} browser profile "
+                    f"quarantine hết hạn/quá cũ."
+                )
+        except Exception:
+            continue
 
 
 def _migrate_profile_drivers():
@@ -1431,12 +1684,6 @@ def ensure_driver(profile_name, lifecycle_gen=None):
             token = browser_glue.open_session(config, profile_name)
             token.generation = lifecycle_gen
 
-            cookies = parse_cookie(config.get('cookie_str', ''))
-            imported = browser_glue.import_cookies(token, cookies)
-            if imported:
-                _save_cookie_injection_metadata(profile_name, config.get('cookie_str', ''))
-            _advance_patchright_migration(config, MigrationState.CREATED.value, MigrationState.COOKIES_IMPORTED)
-
             if proxy_data:
                 update_status(f"[{profile_name}] [DEBUG] Đang check IP trên browser mới...")
                 is_match, current_ip = browser_glue.verify_exit_ip(token, proxy_expected_ip)
@@ -1450,14 +1697,18 @@ def ensure_driver(profile_name, lifecycle_gen=None):
                 _set_profile_ui(profile_name, proxy=f"OK: {current_ip}")
                 update_status(f"[{profile_name}] Proxy OK: {current_ip}")
 
-            current_url = browser_glue.navigate(token, TIKTOK_UPLOAD_URL)
-            login_state = browser_glue.wait_page_login_state(token, timeout=30)
-            if login_state != 'authenticated':
-                raise TikTokLoginRequiredError(
-                    "TikTok chuyển về trang đăng nhập. Cookie/session không hợp lệ hoặc đã hết hạn."
-                    if login_state == 'login_required'
-                    else "Không xác minh được trạng thái đăng nhập TikTok trên trang upload."
-                )
+            auth_source = browser_glue.authenticate_session(
+                token,
+                config,
+                profile_name,
+                TIKTOK_UPLOAD_URL,
+                allow_cookie_fallback=True,
+                status_callback=update_status,
+            )
+            if auth_source == 'cookie_fallback':
+                _save_cookie_injection_metadata(profile_name, config.get('cookie_str', ''))
+            _save_session_auth_metadata(profile_name, 'verified', auth_source)
+            _advance_patchright_migration(config, MigrationState.CREATED.value, MigrationState.COOKIES_IMPORTED)
             _advance_patchright_migration(config, MigrationState.COOKIES_IMPORTED.value, MigrationState.LOGIN_VERIFIED)
             save_configs()
 
@@ -1476,7 +1727,8 @@ def ensure_driver(profile_name, lifecycle_gen=None):
             if token:
                 token.set_cancelled()
                 token.quit()
-            if isinstance(error, TikTokLoginRequiredError):
+            if isinstance(error, (TikTokLoginRequiredError, browser_glue.LoginRequiredError)):
+                _mark_session_failure(profile_name, str(error))
                 _set_profile_ui(
                     profile_name,
                     status='Lỗi',
@@ -2002,7 +2254,11 @@ def _profile_row_tag(ui, running):
 
 def _refresh_status_bar():
     total = sum(1 for _ in tree.get_children(''))
-    running = sum(1 for iid in tree.get_children('') if tree.item(iid, 'values')[1] == 'Đang chạy')
+    running = 0
+    for iid in tree.get_children(''):
+        name = tree.item(iid, 'values')[0]
+        if profiles.get(name, {}).get('running'):
+            running += 1
     status_count_label.configure(text=f"Hồ sơ: {total} | Đang chạy: {running}")
     clock_label.configure(text=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     try:
@@ -2500,6 +2756,28 @@ def _do_download_update(result):
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _profile_region(cfg):
+    fp = cfg.get('fingerprint', {}) or {}
+    code = str(fp.get('geo_country_code', '') or '').strip()
+    if code:
+        return code
+    country = str(fp.get('geo_country', '') or '').strip()
+    if country:
+        return country[:2].upper()
+    return ''
+
+
+def _health_summary(ui, running):
+    tag = _profile_row_tag(ui, running)
+    if 'tag_error' in tag:
+        return 'Lỗi'
+    if 'tag_processing' in tag:
+        return 'Đang xử lý'
+    if running:
+        return 'Đang chạy'
+    return 'Đã dừng'
+
+
 def update_profile_list(*args):
     sp = selected_project_var.get()
     for item in tree.get_children(): tree.delete(item)
@@ -2509,26 +2787,29 @@ def update_profile_list(*args):
     for name in iter_names:
         if name in profiles:
             ui = _profile_ui(name)
-            st = ui.get('status') or ('Đang chạy' if profiles[name]['running'] else 'Đã dừng')
+            running = profiles[name]['running']
             cfg = profiles[name]['config']
             lim = str(cfg.get('max_uploads_per_day', 0)) if cfg.get('max_uploads_per_day', 0) > 0 else "Không"
             headless_text = "Có" if cfg.get("headless", True) else "Không"
+            tiktok_id = str(cfg.get('tiktok_id', '') or '').lstrip('@')
+            region = _profile_region(cfg)
+            health = _health_summary(ui, running)
             row = (
-                f"{name} {st} {ui.get('login','')} {ui.get('proxy','')} {ui.get('browser','')} "
+                f"{name} {health} {ui.get('login','')} {ui.get('proxy','')} {ui.get('browser','')} "
                 f"{ui.get('upload','')} {ui.get('last_error','')} {cfg.get('folder_path','')} "
-                f"{cfg.get('chrome_profile','')} {headless_text} {lim}"
+                f"{cfg.get('chrome_profile','')} {headless_text} {lim} {tiktok_id} {region}"
             ).lower()
             if kw and kw not in row: continue
-            tags = _profile_row_tag(ui, profiles[name]['running'])
+            tags = _profile_row_tag(ui, running)
             tree.insert(
                 '',
                 'end',
                 values=(
                     name,
-                    st,
-                    ui.get('login', ''),
+                    health,
+                    tiktok_id,
                     ui.get('proxy', ''),
-                    ui.get('browser', ''),
+                    region,
                     ui.get('upload', ''),
                     _short_ui_text(ui.get('last_error', '')),
                     cfg.get('folder_path',''),
@@ -2715,6 +2996,12 @@ def start_profile(name=None):
         return
     
     config = profiles[name]['config']
+
+    if _blocked_by_profile_conflict(name):
+        message = _profile_conflict_message(name)
+        _set_profile_ui(name, status='Lỗi', browser='Bị lỗi', last_error=message)
+        update_status(f"[{name}] Không thể khởi động: {message}.")
+        return
 
     duplicate_profile = _find_profile_with_same_data_dir(name)
     if duplicate_profile:
@@ -2989,15 +3276,47 @@ def add_profile():
     if not _license_guard(): return
     dlg = ctk.CTkToplevel(root)
     dlg.title("Thêm hồ sơ")
-    dlg.geometry("600x850")
+    dlg.geometry("640x1050")
     
-    scroll_frame = ctk.CTkScrollableFrame(dlg, width=580, height=620)
+    scroll_frame = ctk.CTkScrollableFrame(dlg, width=620, height=900)
     scroll_frame.pack(fill='both', expand=True, padx=10, pady=(10, 0))
     
     ctk.CTkLabel(scroll_frame, text="Tên:").pack(pady=2)
     e_name = ctk.CTkEntry(scroll_frame, width=400)
     e_name.pack(pady=2)
     
+    ctk.CTkLabel(scroll_frame, text="Email:").pack(pady=2)
+    e_email = ctk.CTkEntry(scroll_frame, width=400)
+    e_email.pack(pady=2)
+
+    ctk.CTkLabel(scroll_frame, text="Mật khẩu TikTok:").pack(pady=2)
+    e_password = ctk.CTkEntry(scroll_frame, width=400, show='*')
+    e_password.pack(pady=2)
+
+    ctk.CTkLabel(scroll_frame, text="ID TikTok:").pack(pady=2)
+    e_tiktok_id = ctk.CTkEntry(scroll_frame, width=400)
+    e_tiktok_id.pack(pady=2)
+
+    ctk.CTkLabel(scroll_frame, text="Khóa 2FA:").pack(pady=2)
+    e_auth2fa = ctk.CTkEntry(scroll_frame, width=400, show='*')
+    e_auth2fa.pack(pady=2)
+
+    ctk.CTkLabel(scroll_frame, text="Mật khẩu email:").pack(pady=2)
+    e_passmail = ctk.CTkEntry(scroll_frame, width=400, show='*')
+    e_passmail.pack(pady=2)
+
+    ctk.CTkLabel(scroll_frame, text="Email backup:").pack(pady=2)
+    e_mail_backup = ctk.CTkEntry(scroll_frame, width=400)
+    e_mail_backup.pack(pady=2)
+
+    ctk.CTkLabel(scroll_frame, text="Mật khẩu email backup:").pack(pady=2)
+    e_pass_mail_backup = ctk.CTkEntry(scroll_frame, width=400, show='*')
+    e_pass_mail_backup.pack(pady=2)
+
+    ctk.CTkLabel(scroll_frame, text="Ghi chú:").pack(pady=2)
+    e_note = ctk.CTkEntry(scroll_frame, width=400)
+    e_note.pack(pady=2)
+
     ctk.CTkLabel(scroll_frame, text="Thư mục video:").pack(pady=2)
     e_folder = ctk.CTkEntry(scroll_frame, width=400)
     e_folder.pack()
@@ -3011,10 +3330,6 @@ def add_profile():
     ctk.CTkLabel(scroll_frame, text="Cookie:").pack(pady=2)
     e_cookie = ctk.CTkEntry(scroll_frame, width=400)
     e_cookie.pack()
-    
-    ctk.CTkLabel(scroll_frame, text="ID TikTok:").pack(pady=2)
-    e_tiktok_id = ctk.CTkEntry(scroll_frame, width=400)
-    e_tiktok_id.pack()
     
     # --- PROXY UI ---
     v_use_proxy = ctk.BooleanVar(scroll_frame, value=False)
@@ -3072,8 +3387,16 @@ def add_profile():
                 "folder_path": fd, 
                 "chrome_profile": cp, 
                 "cookie_str": e_cookie.get(),
+                "email": e_email.get().strip(),
+                "password": e_password.get(),
                 "tiktok_id": _normalize_tiktok_id(e_tiktok_id.get()),
+                "auth2fa": e_auth2fa.get(),
+                "passmail": e_passmail.get(),
+                "mail_backup": e_mail_backup.get().strip(),
+                "pass_mail_backup": e_pass_mail_backup.get(),
+                "note": e_note.get().strip(),
                 "proxy_string": e_proxy.get().strip(),
+                "proxy_type": "http",
                 "use_proxy": v_use_proxy.get(),
                 "headless": v_head.get(), 
                 "open_only_when_video": v_open_only.get(),
@@ -3089,224 +3412,909 @@ def add_profile():
             'uploads_yesterday_count': 0,
             'uploads_today_date': datetime.now().strftime('%Y-%m-%d')
         }
+        ensure_account_uuid(profiles[nm]['config'])
         projects[pj].add(nm)
         save_configs()
         dlg.destroy()
     ctk.CTkButton(dlg, text="Lưu", command=save).pack(pady=10)
 
-# --- BATCH ADD FUNCTION (NEW) ---
-def batch_add_profiles():
-    if not _license_guard(): return
-    
-    dlg = ctk.CTkToplevel(root)
-    dlg.title("Thêm hàng loạt (Batch Add)")
-    dlg.geometry("600x500")
-    dlg.grab_set() 
-    
-    ctk.CTkLabel(dlg, text="Nhập dữ liệu: Tên|Cookie|Proxy|ID TikTok (Mỗi dòng 1 profile)", font=("", 13, "bold")).pack(pady=5)
-    
-    txt_input = ctk.CTkTextbox(dlg, width=550, height=350)
-    txt_input.pack(pady=5)
-    txt_input.focus_set()
+# --- IMPORT HÀNG LOẠT ---
+def _apply_import_plans(plans, proxy_type='http', default_project='Mặc định'):
+    added = []
+    updated_backup = {}
+    created_dirs = []
+    default_project_created = False
+    if default_project not in projects:
+        projects[default_project] = set()
+        default_project_created = True
 
-    BASE_DATA_DIR = app_base_dir() / "Auto_Data"
-    
-    def process_batch():
-        raw_data = txt_input.get("1.0", "end").strip()
-        if not raw_data:
-            return
-
-        lines = raw_data.split('\n')
-        added_count = 0
-        skipped_count = 0
-        
-        if 'Mặc định' not in projects:
-            projects['Mặc định'] = set()
-
-        for line in lines:
-            line = line.strip()
-            if not line: continue
-            
-            parts = line.split('|', 3)
-            p_name = parts[0].strip()
-            if not p_name:
-                skipped_count += 1
-                continue
-
-            if p_name in profiles:
-                update_status(f"[Batch] Bỏ qua {p_name} (Đã tồn tại).")
-                skipped_count += 1
-                continue
-
-            p_cookie = parts[1].strip() if len(parts) > 1 else ""
-            p_proxy = parts[2].strip() if len(parts) > 2 else ""
-            p_tiktok_id = _normalize_tiktok_id(parts[3]) if len(parts) > 3 else ""
-            
-            safe_foldername = "".join([c for c in p_name if c.isalnum() or c in (' ', '-', '_')]).strip()
-            if not safe_foldername: safe_foldername = f"Profile_{uuid.uuid4().hex[:8]}"
-
-            profile_root = os.path.join(BASE_DATA_DIR, safe_foldername)
+    for plan in plans:
+        action = plan['action']
+        record = plan['record']
+        name = record.get('name', '')
+        if action in ('skip', 'error') or not name:
+            continue
+        cfg = profiles.get(name, {}).get('config')
+        if action == 'add':
+            safe = "".join(c for c in name if c.isalnum() or c in (' ', '-', '_')).strip()
+            if not safe:
+                safe = f"Profile_{uuid.uuid4().hex[:8]}"
+            profile_root = os.path.join(str(app_base_dir() / "Auto_Data"), safe)
             video_dir = os.path.join(profile_root, "Video")
             chrome_dir = os.path.join(profile_root, "Profile")
-
-            duplicate = _find_profile_with_data_dir(chrome_dir)
-            if duplicate:
-                update_status(f"[Batch] Bỏ qua {p_name} (Chrome User Data trùng với {duplicate}).")
-                skipped_count += 1
+            if _find_profile_with_data_dir(chrome_dir):
                 continue
-
             try:
                 os.makedirs(video_dir, exist_ok=True)
                 if not Path(chrome_dir).exists():
                     create_owned_root(chrome_dir)
-            except Exception as e:
-                update_status(f"[Batch] Lỗi tạo folder {p_name}: {e}")
-                skipped_count += 1
+            except Exception as error:
+                update_status(f"[Import] Lỗi tạo folder {name}: {error}")
                 continue
-
-            fp_seed = p_name + p_cookie + str(time.time_ns())
+            created_dirs.append(video_dir)
+            fp_seed = name + record.get('cookie_str', '') + str(time.time_ns())
             fingerprint = _generate_fingerprint(seed=fp_seed)
             config = {
                 "folder_path": video_dir,
                 "chrome_profile": chrome_dir,
-                "cookie_str": p_cookie,
-                "proxy_string": p_proxy,
-                "use_proxy": True if p_proxy else False,
+                "cookie_str": record.get('cookie_str', ''),
+                "email": record.get('email', ''),
+                "password": record.get('password', ''),
+                "tiktok_id": _normalize_tiktok_id(record.get('tiktok_id', '')),
+                "auth2fa": record.get('auth2fa', ''),
+                "passmail": record.get('passmail', ''),
+                "mail_backup": record.get('mail_backup', ''),
+                "pass_mail_backup": record.get('pass_mail_backup', ''),
+                "note": record.get('note', ''),
+                "proxy_string": record.get('proxy_string', ''),
+                "proxy_type": proxy_type,
+                "use_proxy": bool(record.get('proxy_string', '')),
                 "headless": True,
                 "open_only_when_video": False,
-                "tiktok_id": p_tiktok_id,
                 "max_uploads_per_day": 3,
                 "fingerprint": fingerprint,
                 "stats_today": 0,
                 "stats_yesterday": 0,
                 "stats_date": datetime.now().strftime('%Y-%m-%d')
             }
-
-            profiles[p_name] = {
+            profiles[name] = {
                 'config': config,
                 'queue': queue.Queue(), 'observer': None, 'driver': None, 'running': False,
-                'processed_files': set(), 'last_event_time': {}, 'uploading': False, 
-                'project': 'Mặc định', 
-                'uploads_today_count': 0, 
+                'processed_files': set(), 'last_event_time': {}, 'uploading': False,
+                'project': default_project,
+                'uploads_today_count': 0,
                 'uploads_yesterday_count': 0,
                 'uploads_today_date': datetime.now().strftime('%Y-%m-%d')
             }
-            projects['Mặc định'].add(p_name)
-            added_count += 1
+            projects[default_project].add(name)
+            ensure_account_uuid(profiles[name]['config'])
+            added.append(name)
+        elif action == 'update' and cfg is not None:
+            updated_backup[name] = copy.deepcopy(cfg)
+            invalidation_reasons = []
+            for key in ('cookie_str', 'tiktok_id', 'email', 'proxy_string'):
+                if record.get(key) and record.get(key) != cfg.get(key):
+                    invalidation_reasons.append(key)
+            updated = apply_update_to_config(cfg, record, proxy_type)
+            if record.get('tiktok_id'):
+                updated['tiktok_id'] = _normalize_tiktok_id(record['tiktok_id'])
+            cfg.clear()
+            cfg.update(updated)
+            if invalidation_reasons:
+                invalidate_session_auth(cfg, 'Thay đổi khi import: ' + ', '.join(invalidation_reasons))
 
-        save_configs()
-        messagebox.showinfo("Hoàn tất", f"Đã thêm: {added_count}\nBỏ qua/Lỗi: {skipped_count}")
-        dlg.destroy()
+    return {
+        'added': added,
+        'updated': list(updated_backup.keys()),
+        'updated_backup': updated_backup,
+        'created_dirs': created_dirs,
+        'default_project_created': default_project_created,
+    }
 
-    ctk.CTkButton(dlg, text="Xử lý & Thêm", command=process_batch, fg_color="#16a34a", hover_color="#15803d").pack(pady=15)
-# --------------------------------
 
-def edit_profile():
+def _rollback_import(result):
+    for name in result.get('added', []):
+        prof_project = profiles.get(name, {}).get('project')
+        if prof_project in projects:
+            projects[prof_project].discard(name)
+        profiles.pop(name, None)
+    for name, backup in result.get('updated_backup', {}).items():
+        if name in profiles:
+            profiles[name]['config'] = backup
+    for directory in result.get('created_dirs', []):
+        try:
+            if Path(directory).exists() and not any(Path(directory).iterdir()):
+                Path(directory).rmdir()
+        except Exception:
+            pass
+    if result.get('default_project_created') and 'Mặc định' in projects and not projects['Mặc định']:
+        del projects['Mặc định']
+
+
+def batch_add_profiles():
     if not _license_guard(): return
-    sel = tree.selection()
-    if not sel: return
-    nm = tree.item(sel[0])['values'][0]
-    if profiles[nm].get('running') or profiles[nm].get('session_busy') or _browser_session_valid(profiles[nm].get('manual_driver')):
-        messagebox.showwarning('Sửa hồ sơ', 'Hãy Stop profile và đóng browser trước khi sửa.')
-        return
-    cfg = profiles[nm]['config']
-    
+
     dlg = ctk.CTkToplevel(root)
-    dlg.title("Sửa hồ sơ")
-    dlg.geometry("600x800")
-    
-    scroll_frame = ctk.CTkScrollableFrame(dlg, width=580, height=520)
-    scroll_frame.pack(fill='both', expand=True, padx=10, pady=(10, 0))
-    
-    ctk.CTkLabel(scroll_frame, text=f"Tên: {nm}").pack(pady=5)
-    
-    ctk.CTkLabel(scroll_frame, text="Thư mục video:").pack(pady=2)
-    e_folder = ctk.CTkEntry(scroll_frame, width=400)
-    e_folder.insert(0, cfg["folder_path"])
-    e_folder.pack()
-    ctk.CTkButton(scroll_frame, text="...", width=50, command=lambda: e_folder.insert(0, filedialog.askdirectory())).pack()
-    
-    ctk.CTkLabel(scroll_frame, text="Chrome User Data:").pack(pady=2)
-    e_chrome = ctk.CTkEntry(scroll_frame, width=400)
-    e_chrome.insert(0, cfg["chrome_profile"])
-    e_chrome.pack()
-    ctk.CTkButton(scroll_frame, text="...", width=50, command=lambda: e_chrome.insert(0, filedialog.askdirectory())).pack()
-    
-    ctk.CTkLabel(scroll_frame, text="Cookie:").pack(pady=2)
-    e_cookie = ctk.CTkEntry(scroll_frame, width=400)
-    e_cookie.insert(0, cfg.get("cookie_str", ""))
-    e_cookie.pack()
-    
-    ctk.CTkLabel(scroll_frame, text="ID TikTok:").pack(pady=2)
-    e_tiktok_id = ctk.CTkEntry(scroll_frame, width=400)
-    e_tiktok_id.insert(0, cfg.get("tiktok_id", ""))
-    e_tiktok_id.pack()
-    
-    # --- PROXY UI ---
-    v_use_proxy = ctk.BooleanVar(scroll_frame, value=cfg.get("use_proxy", False))
-    ctk.CTkCheckBox(scroll_frame, text="Sử dụng Proxy", variable=v_use_proxy).pack(pady=(10, 2))
-    
-    ctk.CTkLabel(scroll_frame, text="Proxy (IP:Port:User:Pass):").pack(pady=2)
-    e_proxy = ctk.CTkEntry(scroll_frame, width=400)
-    e_proxy.insert(0, cfg.get("proxy_string", ""))
-    e_proxy.pack()
-    
-    ctk.CTkLabel(scroll_frame, text="Limit/Ngày:").pack(pady=2)
-    e_limit = ctk.CTkEntry(scroll_frame, width=400)
-    e_limit.insert(0, str(cfg.get("max_uploads_per_day", 0)))
-    e_limit.pack()
-    
-    v_head = ctk.BooleanVar(scroll_frame, value=cfg.get("headless", True))
-    ctk.CTkCheckBox(scroll_frame, text="Headless", variable=v_head).pack(pady=5)
+    dlg.title("Import tài khoản hàng loạt")
+    dlg.geometry("960x760")
+    dlg.grab_set()
 
-    current_fp = ensure_fingerprint_defaults(cfg.get('fingerprint', {}), seed=nm + cfg.get('cookie_str', ''))
-    geo = current_fp.get('geolocation') or {}
-    geo_label = ctk.CTkLabel(
-        scroll_frame,
-        text=f"GeoIP: {current_fp.get('timezone', 'chưa tra')} | "
-             f"{geo.get('latitude', '-')} / {geo.get('longitude', '-')}",
-    )
-    geo_label.pack(pady=2)
+    top = ctk.CTkFrame(dlg)
+    top.pack(fill='x', padx=10, pady=(10, 4))
+    top.grid_columnconfigure(1, weight=1)
 
-    def refresh_geo():
-        proxy_data = parse_proxy_string(e_proxy.get().strip()) if v_use_proxy.get() else None
-        if not proxy_data:
-            geo_label.configure(text="GeoIP: cần proxy hợp lệ")
+    ctk.CTkLabel(top, text="Format:").grid(row=0, column=0, sticky='w')
+    preset_var = StringVar(value='Đầy đủ 11 trường')
+    presets = {
+        'Đầy đủ 11 trường': DEFAULT_FORMAT,
+        'Format cũ (Tên|Cookie|Proxy|ID TikTok)': LEGACY_FORMAT,
+        'Tùy chỉnh': '',
+    }
+    def _apply_preset(*_):
+        if preset_var.get() in presets and presets[preset_var.get()]:
+            format_var.set(presets[preset_var.get()])
+    preset_combo = ctk.CTkComboBox(top, values=list(presets.keys()), variable=preset_var, width=300, height=30, command=lambda _: _apply_preset())
+    preset_combo.grid(row=0, column=1, sticky='w', padx=4)
+
+    format_var = StringVar(value=DEFAULT_FORMAT)
+    format_entry = ctk.CTkEntry(top, textvariable=format_var, width=340, height=30)
+    format_entry.grid(row=1, column=1, sticky='ew', padx=4, pady=(4, 0))
+
+    ctk.CTkLabel(top, text="(Delimiter `|`, nháy đôi trường bên phải để chèn)").grid(row=2, column=1, sticky='w', padx=4)
+
+    opt = ctk.CTkFrame(dlg)
+    opt.pack(fill='x', padx=10, pady=2)
+    skip_header_var = ctk.BooleanVar(opt, value=False)
+    ctk.CTkCheckBox(opt, text="Dòng đầu là tiêu đề", variable=skip_header_var).pack(side='left', padx=(0, 14))
+    ctk.CTkLabel(opt, text="Proxy type:").pack(side='left')
+    proxy_type_var = StringVar(opt, value='http')
+    ctk.CTkComboBox(opt, values=['http', 'socks5'], variable=proxy_type_var, width=110, height=28).pack(side='left', padx=(4, 14))
+    ctk.CTkLabel(opt, text="Trùng tên:").pack(side='left')
+    dup_policy_var = StringVar(opt, value='Bỏ qua')
+    ctk.CTkComboBox(opt, values=['Bỏ qua', 'Cập nhật', 'Báo lỗi'], variable=dup_policy_var, width=120, height=28).pack(side='left', padx=4)
+
+    middle = ctk.CTkFrame(dlg)
+    middle.pack(fill='both', expand=True, padx=10, pady=4)
+    middle.grid_columnconfigure(0, weight=1)
+    middle.grid_columnconfigure(1, weight=0)
+    middle.grid_rowconfigure(0, weight=1)
+
+    txt_input = ctk.CTkTextbox(middle, width=600, height=300)
+    txt_input.grid(row=0, column=0, sticky='nsew', padx=(0, 8))
+
+    field_panel = ctk.CTkScrollableFrame(middle, width=240, height=300, label_text="Nhấn đôi để chèn trường")
+    field_panel.grid(row=0, column=1, sticky='ns')
+    for field in DEFAULT_FIELDS:
+        ctk.CTkButton(
+            field_panel, text=field, height=26, fg_color='#e2e8f0', hover_color='#cbd5e1', text_color='#0f172a',
+            command=lambda f=field: format_var.set((format_var.get() + ('' if format_var.get().endswith('|') else '|') + f)),
+        ).pack(fill='x', pady=2)
+
+    prev_frame = ctk.CTkFrame(dlg)
+    prev_frame.pack(fill='x', padx=10, pady=(2, 4))
+    prev_cols = ('name', 'email', 'tiktok', 'proxy', 'status')
+    prev_tree = ttk.Treeview(prev_frame, columns=prev_cols, show='headings', height=8)
+    for col, text, width in (
+        ('name', 'Name', 160), ('email', 'Email', 180), ('tiktok', 'TikTok ID', 120),
+        ('proxy', 'Proxy', 140), ('status', 'Trạng thái', 120),
+    ):
+        prev_tree.heading(col, text=text)
+        prev_tree.column(col, width=width, anchor='w')
+    prev_tree.pack(fill='x')
+    error_label = ctk.CTkLabel(prev_frame, text="", text_color='#b91c1c')
+    error_label.pack(anchor='w')
+
+    def _parse_current():
+        fields = parse_format(format_var.get())
+        text = txt_input.get('1.0', 'end')
+        records, errors = parse_data_into_records(text, fields, skip_header=skip_header_var.get())
+        return fields, records, errors
+
+    def do_preview():
+        for item in prev_tree.get_children():
+            prev_tree.delete(item)
+        try:
+            _, records, errors = _parse_current()
+        except ValueError as exc:
+            error_label.configure(text=str(exc))
             return
-        if _refresh_profile_geoip(nm, cfg, proxy_data, force=True):
-            save_configs()
-            updated = cfg.get('fingerprint', {})
-            updated_geo = updated.get('geolocation') or {}
-            geo_label.configure(
-                text=f"GeoIP: {updated.get('timezone', 'chưa tra')} | "
-                     f"{updated_geo.get('latitude', '-')} / {updated_geo.get('longitude', '-')}",
-            )
-    ctk.CTkButton(scroll_frame, text="Làm mới GeoIP", command=refresh_geo).pack(pady=4)
+        existing = set(profiles.keys())
+        policy = 'skip' if dup_policy_var.get() == 'Bỏ qua' else ('update' if dup_policy_var.get() == 'Cập nhật' else 'error')
+        plans = plan_import(records, existing, policy)
+        for plan in plans:
+            mask = masked_record(plan['record'])
+            status = {'skip': 'Đã tồn tại', 'update': 'Cập nhật', 'error': 'Trùng tên', 'add': 'Thêm mới'}[plan['action']]
+            prev_tree.insert('', 'end', values=(mask.get('name', ''), mask.get('email', ''), mask.get('tiktok_id', ''), mask.get('proxy_string', ''), status))
+        error_label.configure(text=f"Hợp lệ: {len(records)} | Lỗi: {len(errors)}" + (f" | ví dụ dòng {errors[0][0]}: {errors[0][1]}" if errors else ""))
 
-    v_open_only = ctk.BooleanVar(scroll_frame, value=cfg.get("open_only_when_video", False))
-    ctk.CTkCheckBox(scroll_frame, text="Chỉ mở khi có video mới", variable=v_open_only).pack(pady=5)
-    
-    def save():
-        try: lm = int(e_limit.get().strip())
-        except: lm = 0
-        new_chrome_profile = e_chrome.get().strip()
-        old_chrome_profile = str(cfg.get('chrome_profile', ''))
-        duplicate = _find_profile_with_data_dir(new_chrome_profile, exclude_name=nm)
-        if duplicate:
-            messagebox.showerror("Lỗi", f"Chrome User Data đang được hồ sơ '{duplicate}' sử dụng.")
+    def open_file():
+        path = filedialog.askopenfilename(filetypes=[('Text files', '*.txt'), ('All files', '*.*')])
+        if not path:
             return
         try:
-            if new_chrome_profile and not Path(new_chrome_profile).exists():
-                create_owned_root(new_chrome_profile)
-        except Exception as error:
-            messagebox.showerror("Lỗi", f"Không tạo được Chrome User Data an toàn: {error}")
+            with open(path, 'r', encoding='utf-8') as f:
+                txt_input.delete('1.0', 'end')
+                txt_input.insert('1.0', f.read())
+        except Exception as exc:
+            messagebox.showerror("Lỗi", f"Không đọc được file:\n{exc}")
+
+    def run_import():
+        try:
+            _, records, errors = _parse_current()
+        except ValueError as exc:
+            messagebox.showerror("Format không hợp lệ", str(exc))
             return
+        if errors:
+            lines = '\n'.join(f"Dòng {ln}: {reason}" for ln, reason in errors[:20])
+            messagebox.showerror("Dữ liệu không hợp lệ", f"Có {len(errors)} dòng lỗi:\n{lines}")
+            return
+        if not records:
+            messagebox.showwarning("Import", "Không có dữ liệu hợp lệ để import.")
+            return
+        existing = set(profiles.keys())
+        policy = 'skip' if dup_policy_var.get() == 'Bỏ qua' else ('update' if dup_policy_var.get() == 'Cập nhật' else 'error')
+        plans = plan_import(records, existing, policy)
+        if any(plan['action'] == 'error' for plan in plans):
+            names = [plan['record']['name'] for plan in plans if plan['action'] == 'error']
+            messagebox.showerror("Trùng tên", "Chính sách 'Báo lỗi' được chọn nhưng có tên đã tồn tại:\n" + '\n'.join(names[:20]))
+            return
+        proxy_type = proxy_type_var.get()
+        result = _apply_import_plans(plans, proxy_type)
+        try:
+            save_configs()
+        except Exception as exc:
+            _rollback_import(result)
+            messagebox.showerror("Lỗi lưu", f"Không lưu được cấu hình, đã hoàn nguyên:\n{exc}")
+            return
+        skipped = sum(1 for plan in plans if plan['action'] == 'skip')
+        messagebox.showinfo(
+            "Hoàn tất",
+            f"Đã thêm: {len(result['added'])}\nĐã cập nhật: {len(result['updated'])}\nBỏ qua: {skipped}",
+        )
+        dlg.destroy()
+
+    btn_row = ctk.CTkFrame(dlg)
+    btn_row.pack(fill='x', padx=10, pady=(4, 10))
+    ctk.CTkButton(btn_row, text="Mở file TXT", command=open_file, fg_color="#64748b", hover_color="#475569").pack(side='left', padx=2)
+    ctk.CTkButton(btn_row, text="Xem trước", command=do_preview, fg_color="#2563eb", hover_color="#1d4ed8").pack(side='left', padx=2)
+    ctk.CTkButton(btn_row, text="Nhập dữ liệu", command=run_import, fg_color="#16a34a", hover_color="#15803d").pack(side='right', padx=2)
+
+    dlg.after(200, do_preview)
+# --------------------------------
+
+def export_profiles():
+    if not _license_guard(): return
+    sel = tree.selection()
+    selected_names = [tree.item(i)['values'][0] for i in sel] if sel else []
+
+    dlg = ctk.CTkToplevel(root)
+    dlg.title("Xuất tài khoản")
+    dlg.geometry("860x640")
+
+    top = ctk.CTkFrame(dlg)
+    top.pack(fill='x', padx=10, pady=(10, 4))
+    top.grid_columnconfigure(1, weight=1)
+
+    scope_var = StringVar(value='Tất cả')
+    ctk.CTkLabel(top, text="Phạm vi:").grid(row=0, column=0, sticky='w')
+    scope_row = ctk.CTkFrame(top, fg_color='transparent')
+    scope_row.grid(row=0, column=1, sticky='w', padx=4)
+    ctk.CTkRadioButton(scope_row, text="Tất cả", variable=scope_var, value='Tất cả').pack(side='left', padx=(0, 14))
+    ctk.CTkRadioButton(scope_row, text="Đã chọn", variable=scope_var, value='Đã chọn').pack(side='left')
+
+    ctk.CTkLabel(top, text="Format:").grid(row=1, column=0, sticky='w', pady=(6, 0))
+    format_var = StringVar(value=DEFAULT_FORMAT)
+    format_entry = ctk.CTkEntry(top, textvariable=format_var, width=480, height=30)
+    format_entry.grid(row=1, column=1, sticky='ew', padx=4, pady=(6, 0))
+
+    field_row = ctk.CTkScrollableFrame(dlg, width=400, height=64, label_text="Nhấn đôi để chèn trường")
+    field_row.pack(fill='x', padx=10, pady=4)
+    inner = ctk.CTkFrame(field_row, fg_color='transparent')
+    inner.pack(fill='x')
+    for field in DEFAULT_FIELDS:
+        ctk.CTkButton(
+            inner, text=field, height=24, fg_color='#e2e8f0', hover_color='#cbd5e1', text_color='#0f172a',
+            command=lambda f=field: format_var.set((format_var.get() + ('' if format_var.get().endswith('|') else '|') + f)),
+        ).pack(side='left', padx=2, pady=2)
+
+    prev_frame = ctk.CTkFrame(dlg)
+    prev_frame.pack(fill='both', expand=True, padx=10, pady=4)
+    prev_tree = ttk.Treeview(prev_frame, columns=('name', 'email', 'tiktok', 'proxy'), show='headings', height=14)
+    for col, text, width in (('name', 'Name', 180), ('email', 'Email', 200), ('tiktok', 'TikTok ID', 140), ('proxy', 'Proxy', 180)):
+        prev_tree.heading(col, text=text)
+        prev_tree.column(col, width=width, anchor='w')
+    prev_tree.pack(fill='both', expand=True)
+
+    def _collect():
+        if scope_var.get() == 'Đã chọn':
+            names = [n for n in selected_names if n in profiles]
+            if not names:
+                messagebox.showwarning("Xuất", "Không có profile nào được chọn.")
+                return None
+        else:
+            names = sorted(profiles.keys())
+        try:
+            fields = parse_format(format_var.get())
+        except ValueError as exc:
+            messagebox.showerror("Format không hợp lệ", str(exc))
+            return None
+        records = [record_from_config(n, profiles[n]['config']) for n in names]
+        return fields, records
+
+    def refresh_preview():
+        for item in prev_tree.get_children():
+            prev_tree.delete(item)
+        try:
+            fields, records = _collect()
+        except Exception:
+            return
+        if not records:
+            return
+        for record in records[:100]:
+            mask = masked_record(record)
+            prev_tree.insert('', 'end', values=(mask.get('name', ''), mask.get('email', ''), mask.get('tiktok_id', ''), mask.get('proxy_string', '')))
+
+    def _confirm_sensitive(fields):
+        sensitive = [f for f in fields if f in SENSITIVE_FIELDS]
+        if not sensitive:
+            return True
+        return messagebox.askyesno(
+            "Cảnh báo bảo mật",
+            "File xuất sẽ chứa dữ liệu nhạy cảm (không mã hóa):\n" + ', '.join(sensitive) +
+            "\n\nBạn có chắc muốn xuất không?",
+        )
+
+    def do_copy():
+        result = _collect()
+        if not result:
+            return
+        fields, records = result
+        if not _confirm_sensitive(fields):
+            return
+        text = serialize_records(fields, records)
+        root.clipboard_clear()
+        root.clipboard_append(text)
+        root.update()
+        messagebox.showinfo("Xuất", f"Đã sao chép {len(records)} profile vào clipboard.")
+
+    def do_save():
+        result = _collect()
+        if not result:
+            return
+        fields, records = result
+        if not _confirm_sensitive(fields):
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension='.txt',
+            filetypes=[('Text files', '*.txt'), ('All files', '*.*')],
+        )
+        if not path:
+            return
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(serialize_records(fields, records))
+        except Exception as exc:
+            messagebox.showerror("Lỗi", f"Không lưu được file:\n{exc}")
+            return
+        messagebox.showinfo("Xuất", f"Đã lưu {len(records)} profile vào:\n{path}")
+
+    btn_row = ctk.CTkFrame(dlg)
+    btn_row.pack(fill='x', padx=10, pady=(4, 10))
+    ctk.CTkButton(btn_row, text="Xem trước", command=refresh_preview, fg_color="#2563eb", hover_color="#1d4ed8").pack(side='left', padx=2)
+    ctk.CTkButton(btn_row, text="Sao chép", command=do_copy, fg_color="#64748b", hover_color="#475569").pack(side='right', padx=2)
+    ctk.CTkButton(btn_row, text="Lưu file TXT", command=do_save, fg_color="#16a34a", hover_color="#15803d").pack(side='right', padx=2)
+
+    dlg.after(200, refresh_preview)
+
+
+# =========================
+# Dialog UI helpers (shared)
+# =========================
+def _dialog_size(pref_w, pref_h, margin=48):
+    try:
+        work_w = root.winfo_screenwidth()
+        work_h = root.winfo_screenheight()
+    except Exception:
+        work_w, work_h = 1366, 768
+    width = min(pref_w, max(460, work_w - margin))
+    height = min(pref_h, max(520, work_h - margin))
+    return width, height
+
+
+def _ui_card(parent, title, subtitle=None):
+    card = ctk.CTkFrame(parent, corner_radius=12, fg_color='#ffffff', border_width=1, border_color='#e5e7eb')
+    card.pack(fill='x', padx=10, pady=(8, 2))
+    header = ctk.CTkFrame(card, fg_color='transparent')
+    header.pack(fill='x', padx=14, pady=(10, 2))
+    ctk.CTkLabel(header, text=title, font=('Segoe UI Semibold', 14), text_color='#0f172a').pack(anchor='w')
+    if subtitle:
+        ctk.CTkLabel(header, text=subtitle, font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w', pady=(2, 0))
+    body = ctk.CTkFrame(card, fg_color='transparent')
+    body.pack(fill='both', expand=True, padx=14, pady=(4, 12))
+    return card, body
+
+
+def _ui_footer(dialog, primary_text, primary_command, secondary_text='Đóng', secondary_command=None):
+    footer = ctk.CTkFrame(dialog, corner_radius=12, fg_color='#ffffff', border_width=1, border_color='#e5e7eb')
+    footer.pack(fill='x', padx=10, pady=10)
+    if secondary_command is None:
+        secondary_command = dialog.destroy
+    ctk.CTkButton(footer, text=secondary_text, fg_color='#f1f5f9', text_color='#334155',
+                  hover_color='#e2e8f0', command=secondary_command).pack(side='left', padx=8, pady=6)
+    ctk.CTkButton(footer, text=primary_text, fg_color='#2563eb', hover_color='#1d4ed8',
+                  text_color='#ffffff', command=primary_command).pack(side='right', padx=8, pady=6)
+    return footer
+
+
+def _ui_badge(parent, text, color):
+    ctk.CTkLabel(parent, text=text, fg_color=color, text_color='#ffffff',
+                 corner_radius=10, font=('Segoe UI Semibold', 10), padx=8).pack(side='left', padx=(0, 6))
+
+
+def _cell_copy(parent, value):
+    btn = ctk.CTkButton(parent, text='Copy', width=50, height=26, fg_color='#eef2ff',
+                        text_color='#2563eb', hover_color='#dbeafe', font=('Segoe UI', 10))
+    def do():
+        if not value:
+            return
+        try:
+            root.clipboard_clear()
+            root.clipboard_append(value)
+            root.update()
+        except Exception:
+            pass
+        btn.configure(text='Đã copy')
+        root.after(1200, lambda: btn.configure(text='Copy'))
+    btn.configure(command=do)
+    btn.pack(side='right', padx=(4, 0))
+    return btn
+
+
+def _edit_field(body, r, c, label, value=''):
+    frame = ctk.CTkFrame(body, fg_color='transparent')
+    frame.grid(row=r, column=c, sticky='nsew', padx=8, pady=4)
+    ctk.CTkLabel(frame, text=label, font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    entry = ctk.CTkEntry(frame, height=32, border_width=1, border_color='#cbd5e1')
+    entry.insert(0, value)
+    entry.pack(fill='x', pady=(3, 0))
+    return frame, entry
+
+
+def _edit_secret(body, r, c, label, value=''):
+    frame = ctk.CTkFrame(body, fg_color='transparent')
+    frame.grid(row=r, column=c, sticky='nsew', padx=8, pady=4)
+    ctk.CTkLabel(frame, text=label, font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    row = ctk.CTkFrame(frame, fg_color='transparent')
+    row.pack(fill='x', pady=(3, 0))
+    entry = ctk.CTkEntry(row, show='*', height=32, border_width=1, border_color='#cbd5e1')
+    entry.insert(0, value)
+    entry.pack(side='left', fill='x', expand=True)
+    btn = ctk.CTkButton(row, text='Hiện', width=48, height=32, fg_color='#eef2ff',
+                        text_color='#2563eb', hover_color='#dbeafe', font=('Segoe UI', 10))
+    def toggle(b=btn, e=entry):
+        if e.cget('show'):
+            e.configure(show='')
+            b.configure(text='Ẩn')
+        else:
+            e.configure(show='*')
+            b.configure(text='Hiện')
+    btn.configure(command=toggle)
+    btn.pack(side='left', padx=(4, 0))
+    return frame, entry
+
+
+def _edit_check(parent, r, c, text, value):
+    frame = ctk.CTkFrame(parent, fg_color='transparent')
+    frame.grid(row=r, column=c, sticky='w', padx=8, pady=4)
+    var = ctk.BooleanVar(frame, value=value)
+    ctk.CTkCheckBox(frame, text=text, variable=var, font=('Segoe UI', 12)).pack(anchor='w')
+    return frame, var
+
+
+# =========================
+# Dialog UI helpers (shared)
+# =========================
+def _dialog_size(pref_w, pref_h, margin=48):
+    try:
+        work_w = root.winfo_screenwidth()
+        work_h = root.winfo_screenheight()
+    except Exception:
+        work_w, work_h = 1366, 768
+    width = min(pref_w, max(460, work_w - margin))
+    height = min(pref_h, max(520, work_h - margin))
+    return width, height
+
+
+def _ui_card(parent, title, subtitle=None):
+    card = ctk.CTkFrame(parent, corner_radius=12, fg_color='#ffffff', border_width=1, border_color='#e5e7eb')
+    card.pack(fill='x', padx=10, pady=(8, 2))
+    header = ctk.CTkFrame(card, fg_color='transparent')
+    header.pack(fill='x', padx=14, pady=(10, 2))
+    ctk.CTkLabel(header, text=title, font=('Segoe UI Semibold', 14), text_color='#0f172a').pack(anchor='w')
+    if subtitle:
+        ctk.CTkLabel(header, text=subtitle, font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w', pady=(2, 0))
+    body = ctk.CTkFrame(card, fg_color='transparent')
+    body.pack(fill='both', expand=True, padx=14, pady=(4, 12))
+    return card, body
+
+
+def _ui_footer(dialog, primary_text, primary_command, secondary_text='Đóng', secondary_command=None):
+    footer = ctk.CTkFrame(dialog, corner_radius=12, fg_color='#ffffff', border_width=1, border_color='#e5e7eb')
+    footer.pack(fill='x', padx=10, pady=10)
+    if secondary_command is None:
+        secondary_command = dialog.destroy
+    ctk.CTkButton(footer, text=secondary_text, fg_color='#f1f5f9', text_color='#334155',
+                  hover_color='#e2e8f0', command=secondary_command).pack(side='left', padx=8, pady=6)
+    ctk.CTkButton(footer, text=primary_text, fg_color='#2563eb', hover_color='#1d4ed8',
+                  text_color='#ffffff', command=primary_command).pack(side='right', padx=8, pady=6)
+    return footer
+
+
+def _ui_badge(parent, text, color):
+    ctk.CTkLabel(parent, text=text, fg_color=color, text_color='#ffffff',
+                 corner_radius=10, font=('Segoe UI Semibold', 10), padx=8).pack(side='left', padx=(0, 6))
+
+
+def _cell_copy(parent, value):
+    btn = ctk.CTkButton(parent, text='Copy', width=50, height=26, fg_color='#eef2ff',
+                        text_color='#2563eb', hover_color='#dbeafe', font=('Segoe UI', 10))
+    def do():
+        if not value:
+            return
+        try:
+            root.clipboard_clear()
+            root.clipboard_append(value)
+            root.update()
+        except Exception:
+            pass
+        btn.configure(text='Đã copy')
+        root.after(1200, lambda: btn.configure(text='Copy'))
+    btn.configure(command=do)
+    btn.pack(side='right', padx=(4, 0))
+    return btn
+
+
+def _edit_field(body, r, c, label, value=''):
+    frame = ctk.CTkFrame(body, fg_color='transparent')
+    frame.grid(row=r, column=c, sticky='nsew', padx=8, pady=4)
+    ctk.CTkLabel(frame, text=label, font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    entry = ctk.CTkEntry(frame, height=32, border_width=1, border_color='#cbd5e1')
+    entry.insert(0, value)
+    entry.pack(fill='x', pady=(3, 0))
+    return frame, entry
+
+
+def _edit_secret(body, r, c, label, value=''):
+    frame = ctk.CTkFrame(body, fg_color='transparent')
+    frame.grid(row=r, column=c, sticky='nsew', padx=8, pady=4)
+    ctk.CTkLabel(frame, text=label, font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    row = ctk.CTkFrame(frame, fg_color='transparent')
+    row.pack(fill='x', pady=(3, 0))
+    entry = ctk.CTkEntry(row, show='*', height=32, border_width=1, border_color='#cbd5e1')
+    entry.insert(0, value)
+    entry.pack(side='left', fill='x', expand=True)
+    btn = ctk.CTkButton(row, text='Hiện', width=48, height=32, fg_color='#eef2ff',
+                        text_color='#2563eb', hover_color='#dbeafe', font=('Segoe UI', 10))
+    def toggle(b=btn, e=entry):
+        if e.cget('show'):
+            e.configure(show='')
+            b.configure(text='Ẩn')
+        else:
+            e.configure(show='*')
+            b.configure(text='Hiện')
+    btn.configure(command=toggle)
+    btn.pack(side='left', padx=(4, 0))
+    return frame, entry
+
+
+def _edit_check(parent, r, c, text, value):
+    frame = ctk.CTkFrame(parent, fg_color='transparent')
+    frame.grid(row=r, column=c, sticky='w', padx=8, pady=4)
+    var = ctk.BooleanVar(frame, value=value)
+    ctk.CTkCheckBox(frame, text=text, variable=var, font=('Segoe UI', 12)).pack(anchor='w')
+    return frame, var
+
+
+def _evaluate_proxy_environment_change(profile_name, cfg, proxy_data, proxy_string):
+    """Resolve a new proxy, compare continuity and record an audit entry.
+
+    Never raises; best-effort. Returns a dict with ``decision``, ``warnings``
+    and ``resolved`` so the caller can inform the user without blocking.
+    """
+    previous = proxy_environment_snapshot(cfg.get('fingerprint', {}))
+    try:
+        resolved = resolve_geoip(proxy_data, timeout=8)
+    except Exception as error:
+        current = dict(previous)
+        current['geo_exit_ip'] = str(proxy_data.get('ip', ''))
+        message = "Không xác minh được môi trường proxy mới: {}".format(error)
+        apply_proxy_environment_warning(cfg, PROXY_ENV_UNKNOWN, previous, current, message)
+        return {'decision': PROXY_ENV_UNKNOWN, 'warnings': [message], 'resolved': False}
+    comparison = compare_proxy_environment(previous, resolved)
+    warning = ' | '.join(comparison['warnings']) or comparison['decision']
+    apply_proxy_environment_warning(cfg, comparison['decision'], previous, resolved, warning)
+    return dict(comparison, resolved=True)
+
+
+def edit_profile(selected_name=None):
+    if not _license_guard(): return
+    if selected_name is None:
+        sel = tree.selection()
+        if not sel: return
+        selected_name = tree.item(sel[0])['values'][0]
+    nm = selected_name
+    if profiles[nm].get('running') or profiles[nm].get('session_busy') or _browser_session_valid(profiles[nm].get('manual_driver')):
+        messagebox.showwarning('Sửa tài khoản', 'Hãy Stop profile và đóng browser trước khi sửa.')
+        return
+    if _blocked_by_profile_conflict(nm):
+        messagebox.showerror('Sửa tài khoản', _profile_conflict_message(nm))
+        return
+    cfg = profiles[nm]['config']
+    ensure_account_uuid(cfg)
+    fingerprint_backup = copy.deepcopy(cfg.get('fingerprint', {}))
+
+    width, height = _dialog_size(940, 720)
+    dlg = ctk.CTkToplevel(root)
+    dlg.title(f"Sửa tài khoản: {nm}")
+    dlg.geometry(f"{width}x{height}")
+    dlg.minsize(460, 520)
+    dlg.transient(root)
+    try:
+        dlg.grab_set()
+    except Exception:
+        pass
+
+    scroll = ctk.CTkScrollableFrame(dlg, fg_color='#f3f4f6')
+    scroll.pack(fill='both', expand=True, padx=10, pady=(10, 0))
+
+    # --- Card: Tài khoản ---
+    card1, body1 = _ui_card(scroll, 'Tài khoản', 'Thông tin nhận diện tài khoản')
+    body1.grid_columnconfigure(0, weight=1)
+    body1.grid_columnconfigure(1, weight=1)
+    _, e_email = _edit_field(body1, 0, 0, 'Email', cfg.get('email', ''))
+    _, e_tiktok_id = _edit_field(body1, 0, 1, 'TikTok ID', cfg.get('tiktok_id', ''))
+    note_row = ctk.CTkFrame(body1, fg_color='transparent')
+    note_row.grid(row=1, column=0, columnspan=2, sticky='nsew', padx=8, pady=4)
+    ctk.CTkLabel(note_row, text='Ghi chú', font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    e_note = ctk.CTkTextbox(note_row, height=64, wrap='word', border_width=1, border_color='#cbd5e1')
+    e_note.insert('1.0', cfg.get('note', ''))
+    e_note.pack(fill='x', pady=(3, 0))
+
+    # --- Card: Bảo mật ---
+    card2, body2 = _ui_card(scroll, 'Bảo mật', 'Thông tin đăng nhập và mã xác thực')
+    body2.grid_columnconfigure(0, weight=1)
+    body2.grid_columnconfigure(1, weight=1)
+    _, e_password = _edit_secret(body2, 0, 0, 'Mật khẩu TikTok', cfg.get('password', ''))
+    _, e_auth2fa = _edit_secret(body2, 0, 1, 'Khóa 2FA', cfg.get('auth2fa', ''))
+    _, e_passmail = _edit_secret(body2, 1, 0, 'Mật khẩu email', cfg.get('passmail', ''))
+    _, e_mail_backup = _edit_field(body2, 1, 1, 'Email backup', cfg.get('mail_backup', ''))
+    _, e_pass_mail_backup = _edit_secret(body2, 2, 0, 'Mật khẩu email backup', cfg.get('pass_mail_backup', ''))
+    cookie_row = ctk.CTkFrame(body2, fg_color='transparent')
+    cookie_row.grid(row=3, column=0, columnspan=2, sticky='nsew', padx=8, pady=4)
+    ctk.CTkLabel(cookie_row, text='Cookie (tùy chọn, dùng khi chưa có session)', font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    e_cookie = ctk.CTkTextbox(cookie_row, height=88, wrap='word', border_width=1, border_color='#cbd5e1')
+    e_cookie.insert('1.0', cfg.get('cookie_str', ''))
+    e_cookie.pack(fill='x', pady=(3, 0))
+
+    # --- Card: Dữ liệu tài khoản ---
+    card3, body3 = _ui_card(scroll, 'Dữ liệu tài khoản', 'Thư mục video và browser profile riêng theo tài khoản')
+    body3.grid_columnconfigure(0, weight=1)
+    body3.grid_columnconfigure(1, weight=1)
+    uuid_frame = ctk.CTkFrame(body3, fg_color='transparent')
+    uuid_frame.grid(row=0, column=0, columnspan=2, sticky='nsew', padx=8, pady=4)
+    ctk.CTkLabel(uuid_frame, text='Mã tài khoản (bất biến)', font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    ctk.CTkLabel(uuid_frame, text=str(cfg.get('account_uuid', '')), font=('Segoe UI', 12),
+                 text_color='#0f172a', anchor='w').pack(anchor='w', pady=(3, 0))
+    folder_frame = ctk.CTkFrame(body3, fg_color='transparent')
+    folder_frame.grid(row=1, column=0, columnspan=2, sticky='nsew', padx=8, pady=4)
+    ctk.CTkLabel(folder_frame, text='Thư mục video', font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    folder_row = ctk.CTkFrame(folder_frame, fg_color='transparent')
+    folder_row.pack(fill='x', pady=(3, 0))
+    e_folder = ctk.CTkEntry(folder_row, height=32, border_width=1, border_color='#cbd5e1')
+    e_folder.insert(0, cfg['folder_path'])
+    e_folder.pack(side='left', fill='x', expand=True)
+    ctk.CTkButton(folder_row, text='Chọn...', width=70, height=32, fg_color='#eef2ff', text_color='#2563eb',
+                  hover_color='#dbeafe', command=lambda: _browse_dir(e_folder)).pack(side='left', padx=(4, 0))
+    ctk.CTkButton(folder_row, text='Mở', width=44, height=32, fg_color='#f1f5f9', text_color='#334155',
+                  hover_color='#e2e8f0', command=lambda: _open_dir(e_folder.get())).pack(side='left', padx=(4, 0))
+    chrome_frame = ctk.CTkFrame(body3, fg_color='transparent')
+    chrome_frame.grid(row=2, column=0, columnspan=2, sticky='nsew', padx=8, pady=4)
+    ctk.CTkLabel(chrome_frame, text='Chrome User Data (browser profile)', font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    chrome_row = ctk.CTkFrame(chrome_frame, fg_color='transparent')
+    chrome_row.pack(fill='x', pady=(3, 0))
+    e_chrome = ctk.CTkEntry(chrome_row, height=32, border_width=1, border_color='#cbd5e1')
+    e_chrome.insert(0, cfg.get('chrome_profile', ''))
+    e_chrome.pack(side='left', fill='x', expand=True)
+    ctk.CTkButton(chrome_row, text='Chọn...', width=70, height=32, fg_color='#eef2ff', text_color='#2563eb',
+                  hover_color='#dbeafe', command=lambda: _browse_dir(e_chrome)).pack(side='left', padx=(4, 0))
+    _, e_proj = _edit_field(body3, 3, 0, 'Project', profiles[nm].get('project', 'Mặc định'))
+    browser_path = cfg.get('browser_profile_path', '') or cfg.get('chrome_profile', '')
+    browser_frame = ctk.CTkFrame(body3, fg_color='transparent')
+    browser_frame.grid(row=3, column=1, sticky='nsew', padx=8, pady=4)
+    ctk.CTkLabel(browser_frame, text='Browser profile đang dùng', font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    browser_row = ctk.CTkFrame(browser_frame, fg_color='transparent')
+    browser_row.pack(fill='x', pady=(3, 0))
+    e_browser_ro = ctk.CTkEntry(browser_row, height=32, border_width=1, border_color='#cbd5e1')
+    e_browser_ro.insert(0, browser_path)
+    e_browser_ro.configure(state='readonly')
+    e_browser_ro.pack(side='left', fill='x', expand=True)
+    ctk.CTkButton(browser_row, text='Mở', width=44, height=32, fg_color='#f1f5f9', text_color='#334155',
+                  hover_color='#e2e8f0', command=lambda: _open_dir(browser_path)).pack(side='left', padx=(4, 0))
+
+    # --- Card: Proxy & vận hành ---
+    card4, body4 = _ui_card(scroll, 'Proxy & vận hành')
+    body4.grid_columnconfigure(0, weight=1)
+    body4.grid_columnconfigure(1, weight=1)
+    _, v_use_proxy = _edit_check(body4, 0, 0, 'Sử dụng Proxy', cfg.get('use_proxy', False))
+    proxy_type_frame = ctk.CTkFrame(body4, fg_color='transparent')
+    proxy_type_frame.grid(row=0, column=1, sticky='e', padx=8, pady=4)
+    ctk.CTkLabel(proxy_type_frame, text='Loại proxy', font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    v_proxy_type = ctk.StringVar(proxy_type_frame, value=cfg.get('proxy_type', 'http'))
+    ctk.CTkOptionMenu(proxy_type_frame, values=['http', 'socks5'], variable=v_proxy_type,
+                      width=110, height=32, fg_color='#f8fafc', button_color='#2563eb',
+                      button_hover_color='#1d4ed8', font=('Segoe UI', 12)).pack(anchor='w', pady=(3, 0))
+    _, e_proxy = _edit_field(body4, 1, 0, 'Proxy (IP:Port:User:Pass)', cfg.get('proxy_string', ''))
+    _, e_limit = _edit_field(body4, 1, 1, 'Limit/Ngày (0 = không giới hạn)', str(cfg.get('max_uploads_per_day', 0)))
+    _, v_head = _edit_check(body4, 2, 0, 'Headless', cfg.get('headless', True))
+    _, v_open_only = _edit_check(body4, 2, 1, 'Chỉ mở khi có video mới', cfg.get('open_only_when_video', False))
+    geo_frame = ctk.CTkFrame(body4, fg_color='transparent')
+    geo_frame.grid(row=3, column=0, columnspan=2, sticky='w', padx=8, pady=4)
+    geo_label = ctk.CTkLabel(geo_frame, text='GeoIP: chưa tra', font=('Segoe UI', 12), text_color='#0f172a')
+    geo_label.pack(side='left')
+
+    def _fmt_geo():
+        fp = cfg.get('fingerprint', {})
+        geo = fp.get('geolocation') or {}
+        tz = fp.get('timezone', 'chưa tra')
+        lat = geo.get('latitude', '-')
+        lon = geo.get('longitude', '-')
+        return f"GeoIP: {tz} | {lat} / {lon}"
+
+    def _apply_geo_label():
+        geo_label.configure(text=_fmt_geo())
+
+    def refresh_geo():
+        if not v_use_proxy.get():
+            geo_label.configure(text='GeoIP: cần bật và nhập proxy hợp lệ')
+            return
+        proxy_data = parse_proxy_string(e_proxy.get().strip())
+        if not proxy_data:
+            geo_label.configure(text='GeoIP: cần proxy hợp lệ')
+            return
+        try:
+            ok = _refresh_profile_geoip(nm, cfg, proxy_data, force=True)
+        except Exception as error:
+            geo_label.configure(text=f'GeoIP: lỗi {error}')
+            return
+        if ok:
+            _apply_geo_label()
+        else:
+            geo_label.configure(text='GeoIP: tra cứu thất bại')
+
+    _apply_geo_label()
+    ctk.CTkButton(geo_frame, text='Làm mới GeoIP', width=110, height=30, fg_color='#eef2ff', text_color='#2563eb',
+                  hover_color='#dbeafe', font=('Segoe UI', 11), command=refresh_geo).pack(side='left', padx=(8, 0))
+    ctk.CTkLabel(geo_frame, text='Lưu thay đổi mới ghi vào config', font=('Segoe UI', 10),
+                 text_color='#94a3b8').pack(side='left', padx=(8, 0))
+
+    def _snapshot():
+        return {
+            'folder': e_folder.get(), 'chrome': e_chrome.get(),
+            'cookie': e_cookie.get('1.0', 'end').rstrip('\n'),
+            'email': e_email.get(), 'password': e_password.get(),
+            'tiktok_id': e_tiktok_id.get(), 'auth2fa': e_auth2fa.get(),
+            'passmail': e_passmail.get(), 'mail_backup': e_mail_backup.get(),
+            'pass_mail_backup': e_pass_mail_backup.get(), 'note': e_note.get('1.0', 'end').rstrip('\n'),
+            'proxy': e_proxy.get(), 'use_proxy': v_use_proxy.get(),
+            'headless': v_head.get(), 'open_only': v_open_only.get(),
+            'limit': e_limit.get(), 'proxy_type': v_proxy_type.get(),
+            'project': e_proj.get(),
+        }
+    initial_snapshot = _snapshot()
+
+    def _is_dirty():
+        return _snapshot() != initial_snapshot
+
+    def _restore_fingerprint():
+        if fingerprint_backup:
+            cfg['fingerprint'] = copy.deepcopy(fingerprint_backup)
+
+    def _close(confirm=True):
+        if confirm and _is_dirty():
+            if not messagebox.askyesno('Chưa lưu', 'Bạn có thay đổi chưa lưu. Bỏ thay đổi?'):
+                return
+        _restore_fingerprint()
+        dlg.destroy()
+
+    dlg.protocol('WM_DELETE_WINDOW', _close)
+    dlg.bind('<Escape>', lambda e: _close())
+
+    def save():
+        errors = []
+        limit_raw = e_limit.get().strip()
+        try:
+            lm = int(limit_raw) if limit_raw else 0
+        except ValueError:
+            lm = -1
+        if lm < 0:
+            errors.append('Limit/Ngày phải là số nguyên >= 0.')
+        proxy_str = e_proxy.get().strip()
+        if v_use_proxy.get():
+            if not proxy_str:
+                errors.append('Chưa nhập proxy (đang bật Sử dụng Proxy).')
+            elif not parse_proxy_string(proxy_str):
+                errors.append('Proxy sai định dạng (IP:Port:User:Pass).')
+        if errors:
+            messagebox.showerror('Kiểm tra dữ liệu', '\n'.join(errors))
+            return
+        new_chrome_profile = e_chrome.get().strip()
+        old_chrome_profile = str(cfg.get('chrome_profile', ''))
+        if normalize_profile_path(new_chrome_profile) != normalize_profile_path(old_chrome_profile):
+            duplicate = _find_profile_with_data_dir(new_chrome_profile, exclude_name=nm)
+            if duplicate:
+                messagebox.showerror('Lỗi', f"Chrome User Data đang được hồ sơ '{duplicate}' sử dụng.")
+                return
+            try:
+                if new_chrome_profile and not Path(new_chrome_profile).exists():
+                    create_owned_root(new_chrome_profile)
+            except Exception as error:
+                messagebox.showerror('Lỗi', f"Không tạo được Chrome User Data an toàn: {error}")
+                return
+        new_cookie = e_cookie.get('1.0', 'end').rstrip('\n')
+        new_tiktok_id = _normalize_tiktok_id(e_tiktok_id.get())
+        new_email = e_email.get().strip()
+        invalidation = []
+        for key, new_val in (
+            ('cookie_str', new_cookie),
+            ('tiktok_id', new_tiktok_id),
+            ('email', new_email),
+            ('proxy_string', proxy_str),
+        ):
+            if str(new_val or '') != str(cfg.get(key, '') or ''):
+                invalidation.append(key)
+        proxy_changed = 'proxy_string' in invalidation
+        proxy_disabled = v_use_proxy.get() is False
+        env_comparison = None
+        if proxy_changed and v_use_proxy.get():
+            proxy_data = parse_proxy_string(proxy_str)
+            if proxy_data:
+                env_comparison = _evaluate_proxy_environment_change(nm, cfg, proxy_data, proxy_str)
+            else:
+                current = proxy_environment_snapshot(cfg.get('fingerprint', {}))
+                apply_proxy_environment_warning(
+                    cfg, PROXY_ENV_UNKNOWN, current, current,
+                    'Proxy mới không parse được; môi trường chưa được xác minh.',
+                )
+                env_comparison = {
+                    'decision': PROXY_ENV_UNKNOWN,
+                    'warnings': ['Proxy mới không parse được; môi trường chưa được xác minh.'],
+                    'resolved': False,
+                }
+        elif proxy_changed and proxy_disabled:
+            current = proxy_environment_snapshot(cfg.get('fingerprint', {}))
+            apply_proxy_environment_warning(
+                cfg, PROXY_ENV_UNKNOWN, current, current,
+                'Proxy đã bị tắt; môi trường proxy không còn được xác minh.',
+            )
+            env_comparison = {
+                'decision': PROXY_ENV_UNKNOWN,
+                'warnings': ['Proxy đã bị tắt; môi trường proxy không còn được xác minh.'],
+                'resolved': False,
+            }
         cfg.update({
             "folder_path": e_folder.get().strip(),
             "chrome_profile": new_chrome_profile,
-            "cookie_str": e_cookie.get(),
-            "tiktok_id": _normalize_tiktok_id(e_tiktok_id.get()),
-            "proxy_string": e_proxy.get().strip(),
+            "cookie_str": new_cookie,
+            "email": new_email,
+            "password": e_password.get(),
+            "tiktok_id": new_tiktok_id,
+            "auth2fa": e_auth2fa.get(),
+            "passmail": e_passmail.get(),
+            "mail_backup": e_mail_backup.get().strip(),
+            "pass_mail_backup": e_pass_mail_backup.get(),
+            "note": e_note.get('1.0', 'end').rstrip('\n'),
+            "proxy_string": proxy_str,
+            "proxy_type": v_proxy_type.get(),
             "use_proxy": v_use_proxy.get(),
             "headless": v_head.get(),
             "open_only_when_video": v_open_only.get(),
@@ -3316,14 +4324,62 @@ def edit_profile():
             cfg['legacy_chrome_profile'] = new_chrome_profile
             cfg['browser_profile_path'] = ''
             cfg['migration_state'] = MigrationState.PENDING.value
+        if invalidation:
+            invalidate_session_auth(cfg, 'Thay đổi khi sửa: ' + ', '.join(invalidation))
         cfg['fingerprint'] = ensure_fingerprint_defaults(
-            cfg.get('fingerprint', current_fp),
-            seed=nm + cfg.get('cookie_str', ''),
+            cfg.get('fingerprint', fingerprint_backup),
+            seed=nm + str(cfg.get('account_uuid', '')),
         )
         save_configs()
         dlg.destroy()
-    ctk.CTkButton(dlg, text="Lưu", command=save).pack(pady=10)
+        if env_comparison is not None:
+            decision = env_comparison.get('decision')
+            warnings = env_comparison.get('warnings') or []
+            if decision == PROXY_ENV_RISKY:
+                messagebox.showwarning(
+                    'Đổi môi trường proxy rủi ro',
+                    'Thay đổi proxy làm môi trường khác Country/ASN/Timezone:\n\n'
+                    + '\n'.join(warnings)
+                    + '\n\nBrowser profile và fingerprint hiện tại vẫn được giữ nguyên. '
+                    'Nếu bạn muốn đăng nhập trong môi trường mới, hãy dùng nút '
+                    '"Reset Browser" -> "Tạo môi trường login mới".',
+                )
+            elif decision == PROXY_ENV_UNKNOWN:
+                messagebox.showinfo(
+                    'Môi trường proxy chưa xác minh',
+                    '\n'.join(warnings)
+                    + '\n\nHãy mở lại "Sửa tài khoản" và bấm "Làm mới GeoIP" '
+                    'sau khi proxy hoạt động để xác minh môi trường.',
+                )
+            elif warnings:
+                messagebox.showinfo(
+                    'Thay đổi proxy tương thích',
+                    '\n'.join(warnings),
+                )
 
+    _ui_footer(dlg, 'Lưu thay đổi', save, secondary_text='Hủy', secondary_command=_close)
+
+
+def _browse_dir(entry):
+    chosen = filedialog.askdirectory()
+    if chosen:
+        entry.delete(0, 'end')
+        entry.insert(0, chosen)
+
+
+def _open_dir(path):
+    if not path:
+        return
+    p = Path(path)
+    if not p.exists():
+        try:
+            create_owned_root(str(p))
+        except Exception:
+            pass
+    try:
+        os.startfile(str(p))
+    except Exception:
+        pass
 def rename_profile():
     if not _license_guard(): return
     sel = tree.selection()
@@ -3351,6 +4407,10 @@ def rename_profile():
         profiles[new] = prof
         remove_lifecycle(old)
         profile_operation_locks.pop(old, None)
+        try:
+            youtube_monitor.rename_channel_profile(old, new)
+        except Exception as error:
+            update_status(f"[UI] Không đồng bộ channel khi đổi tên: {error}")
         save_configs()
         dlg.destroy()
     ctk.CTkButton(dlg, text="Lưu", command=save).pack(pady=10)
@@ -3368,6 +4428,18 @@ def delete_profile():
         "Thao tác này chỉ xoá hồ sơ khỏi danh sách app.\n"
         "Không xoá thư mục video, Chrome profile hoặc dữ liệu trên ổ đĩa.")
     if not ok: return
+    try:
+        channel_count = youtube_monitor.channel_count_for_profile(nm)
+        if channel_count > 0:
+            ok_channels = messagebox.askyesno(
+                "Cảnh báo channel",
+                f"Hồ sơ '{nm}' đang được {channel_count} channel YouTube sử dụng.\n\n"
+                "Các channel này sẽ trở thành orphan và cần chọn lại profile TikTok.\n"
+                "Bạn có chắc muốn xoá hồ sơ này?",
+            )
+            if not ok_channels: return
+    except Exception:
+        pass
     p = profiles[nm].get('project')
     if p in projects: projects[p].discard(nm)
     del profiles[nm]
@@ -3375,6 +4447,149 @@ def delete_profile():
     profile_operation_locks.pop(nm, None)
     save_configs()
     update_status(f"[UI] Đã xoá hồ sơ '{nm}'.")
+
+# =========================
+# Chi tiết tài khoản + Trợ giúp nhập/xuất
+# =========================
+def _detail_cell(body, r, c, label, value, sensitive=False, multiline=False):
+    frame = ctk.CTkFrame(body, fg_color='transparent')
+    frame.grid(row=r, column=c, sticky='nsew', padx=8, pady=4)
+    ctk.CTkLabel(frame, text=label, font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    val_row = ctk.CTkFrame(frame, fg_color='transparent')
+    val_row.pack(fill='x', pady=(3, 0))
+    real = str(value or '')
+    if multiline:
+        box = ctk.CTkTextbox(val_row, height=90, wrap='word', fg_color='#f8fafc',
+                             border_width=1, border_color='#e5e7eb')
+        box.insert('1.0', real)
+        box.configure(state='disabled')
+        box.pack(fill='x')
+        if real:
+            _cell_copy(val_row, real)
+    elif sensitive:
+        entry = ctk.CTkEntry(val_row, show='*', fg_color='#f8fafc', border_width=1, border_color='#e5e7eb')
+        entry.insert(0, real)
+        entry.configure(state='readonly')
+        entry.pack(side='left', fill='x', expand=True)
+        btn = ctk.CTkButton(val_row, text='Hiện', width=48, height=26, fg_color='#eef2ff',
+                            text_color='#2563eb', hover_color='#dbeafe', font=('Segoe UI', 10))
+        def toggle(b=btn, e=entry):
+            if e.cget('show'):
+                e.configure(show='')
+                b.configure(text='Ẩn')
+            else:
+                e.configure(show='*')
+                b.configure(text='Hiện')
+        btn.configure(command=toggle)
+        btn.pack(side='left', padx=(4, 0))
+        if real:
+            _cell_copy(val_row, real)
+    else:
+        if real:
+            ctk.CTkLabel(val_row, text=real, font=('Segoe UI', 12), text_color='#0f172a',
+                         anchor='w', justify='left', wraplength=300).pack(side='left', fill='x', expand=True)
+            _cell_copy(val_row, real)
+        else:
+            ctk.CTkLabel(val_row, text='Chưa thiết lập', font=('Segoe UI', 12), text_color='#94a3b8',
+                         anchor='w').pack(side='left', fill='x', expand=True)
+    return frame
+
+
+def view_profile_details(selected_name=None):
+    if not _license_guard(): return
+    if selected_name is None:
+        sel = tree.selection()
+        if not sel: return
+        selected_name = tree.item(sel[0])['values'][0]
+    if selected_name not in profiles: return
+    cfg = profiles[selected_name]['config']
+    ensure_account_uuid(cfg)
+
+    width, height = _dialog_size(900, 680)
+    dlg = ctk.CTkToplevel(root)
+    dlg.title(f"Chi tiết tài khoản: {selected_name}")
+    dlg.geometry(f"{width}x{height}")
+    dlg.minsize(460, 520)
+    dlg.transient(root)
+    try:
+        dlg.grab_set()
+    except Exception:
+        pass
+
+    scroll = ctk.CTkScrollableFrame(dlg, fg_color='#f3f4f6')
+    scroll.pack(fill='both', expand=True, padx=10, pady=(10, 0))
+
+    header = ctk.CTkFrame(scroll, corner_radius=12, fg_color='#ffffff', border_width=1, border_color='#e5e7eb')
+    header.pack(fill='x', pady=(0, 4))
+    initial = (selected_name[:1] or '?').upper()
+    avatar = ctk.CTkLabel(header, text=initial, width=46, height=46, corner_radius=23,
+                          fg_color='#2563eb', text_color='#ffffff', font=('Segoe UI Semibold', 18))
+    avatar.pack(side='left', padx=(14, 12), pady=12)
+    text_col = ctk.CTkFrame(header, fg_color='transparent')
+    text_col.pack(side='left', fill='x', expand=True, pady=12)
+    ctk.CTkLabel(text_col, text=selected_name, font=('Segoe UI Semibold', 18), text_color='#0f172a').pack(anchor='w')
+    subtitle_parts = []
+    tiktok_id = str(cfg.get('tiktok_id', '') or '').lstrip('@')
+    if tiktok_id:
+        subtitle_parts.append('@' + tiktok_id)
+    subtitle_parts.append('ID: ' + str(cfg.get('account_uuid', ''))[:8])
+    ctk.CTkLabel(text_col, text='   •   '.join(subtitle_parts), font=('Segoe UI', 12), text_color='#64748b').pack(anchor='w', pady=(2, 0))
+    badges = ctk.CTkFrame(header, fg_color='transparent')
+    badges.pack(side='right', padx=12, pady=12)
+    session_state = cfg.get('session_auth_state', 'unknown')
+    if session_state == 'verified':
+        source = cfg.get('session_source', '')
+        if source == 'manual_login':
+            _ui_badge(badges, 'Session đã lưu', '#16a34a')
+        elif source == 'cookie_fallback':
+            _ui_badge(badges, 'Cookie dự phòng', '#d97706')
+        else:
+            _ui_badge(badges, 'Session profile', '#16a34a')
+    elif session_state == 'expired':
+        _ui_badge(badges, 'Cần đăng nhập', '#dc2626')
+    else:
+        _ui_badge(badges, 'Chưa xác minh', '#64748b')
+    if cfg.get('use_proxy', False):
+        _ui_badge(badges, 'Proxy', '#2563eb')
+    else:
+        _ui_badge(badges, 'Proxy tắt', '#94a3b8')
+
+    card1, body1 = _ui_card(scroll, 'Tài khoản & bảo mật')
+    body1.grid_columnconfigure(0, weight=1)
+    body1.grid_columnconfigure(1, weight=1)
+    _detail_cell(body1, 0, 0, 'Email', cfg.get('email', ''))
+    _detail_cell(body1, 0, 1, 'TikTok ID', cfg.get('tiktok_id', ''))
+    _detail_cell(body1, 1, 0, 'Mật khẩu TikTok', cfg.get('password', ''), sensitive=True)
+    _detail_cell(body1, 1, 1, 'Khóa 2FA', cfg.get('auth2fa', ''), sensitive=True)
+    _detail_cell(body1, 2, 0, 'Email backup', cfg.get('mail_backup', ''))
+    _detail_cell(body1, 2, 1, 'Mật khẩu email backup', cfg.get('pass_mail_backup', ''), sensitive=True)
+    _detail_cell(body1, 3, 0, 'Mật khẩu email', cfg.get('passmail', ''), sensitive=True)
+
+    card2, body2 = _ui_card(scroll, 'Trình duyệt & vận hành')
+    body2.grid_columnconfigure(0, weight=1)
+    body2.grid_columnconfigure(1, weight=1)
+    _detail_cell(body2, 0, 0, 'Thư mục video', cfg.get('folder_path', ''))
+    _detail_cell(body2, 0, 1, 'Project', profiles[selected_name].get('project', 'Mặc định'))
+    _detail_cell(body2, 1, 0, 'Browser profile', cfg.get('browser_profile_path', '') or cfg.get('chrome_profile', ''))
+    _detail_cell(body2, 1, 1, 'Limit/Ngày', str(cfg.get('max_uploads_per_day', 0)))
+    _detail_cell(body2, 2, 0, 'Proxy', cfg.get('proxy_string', ''), sensitive=True)
+    _detail_cell(body2, 2, 1, 'Headless', 'Có' if cfg.get('headless', True) else 'Không')
+
+    card3, body3 = _ui_card(scroll, 'Cookie')
+    body3.grid_columnconfigure(0, weight=1)
+    _detail_cell(body3, 0, 0, 'Cookie', cfg.get('cookie_str', ''), sensitive=True)
+
+    if cfg.get('note'):
+        card4, body4 = _ui_card(scroll, 'Ghi chú')
+        body4.grid_columnconfigure(0, weight=1)
+        _detail_cell(body4, 0, 0, 'Ghi chú', cfg.get('note', ''), multiline=True)
+
+    def _edit():
+        dlg.destroy()
+        edit_profile(selected_name)
+
+    _ui_footer(dlg, 'Sửa thông tin', _edit, secondary_text='Đóng')
+
 
 def open_browser():
     if not _license_guard(): return
@@ -3387,6 +4602,9 @@ def open_browser():
         return
     if _browser_session_valid(profiles[nm].get('manual_driver')):
         messagebox.showwarning('Mở Chrome', 'Browser của profile này đang mở.')
+        return
+    if _blocked_by_profile_conflict(nm):
+        messagebox.showerror('Mở Chrome', _profile_conflict_message(nm))
         return
 
     lc = get_lifecycle(nm)
@@ -3432,10 +4650,6 @@ def open_browser():
                 generation=manual_gen,
             )
 
-            imported = browser_glue.import_cookies(token, parse_cookie(cfg.get('cookie_str', '')))
-            if imported:
-                _save_cookie_injection_metadata(nm, cfg.get('cookie_str', ''))
-            _advance_patchright_migration(cfg, MigrationState.CREATED.value, MigrationState.COOKIES_IMPORTED)
             if proxy_data:
                 matched, current_ip = browser_glue.verify_exit_ip(token, proxy_expected_ip)
                 if not matched and direct_ip and current_ip and current_ip != direct_ip:
@@ -3462,24 +4676,45 @@ def open_browser():
             closed_ok = True
             if token:
                 try:
-                    _export_live_cookies_to_config(token, nm)
+                    closed_ok = token.quit()
                 except Exception:
-                    pass
-                closed_ok = token.quit()
+                    closed_ok = False
             if profiles.get(nm, {}).get('manual_driver') is token:
                 profiles[nm]['manual_driver'] = None
             if token:
-                lc.release_manual(token)
+                try:
+                    lc.release_manual(token)
+                except Exception:
+                    pass
             profiles.get(nm, {})['session_busy'] = False
             if token:
                 if closed_ok:
-                    _set_profile_ui(nm, browser='Đã đóng', login='Chờ lấy cookie')
-                    update_status(f"[{nm}] Browser thủ công đã đóng. Bấm 'Lấy Cookie TikTok' để đồng bộ session.")
+                    _set_profile_ui(nm, browser='Đã đóng', login='Đang lưu session')
+                    update_status(f"[{nm}] Browser thủ công đã đóng. Đang lưu session...")
+                    threading.Thread(target=_capture_after_manual_close, args=(nm,), daemon=True).start()
                 else:
                     _set_profile_ui(nm, browser='Đóng lỗi', last_error='Browser chưa được đóng sạch; hãy thử lại')
                     update_status(f"[{nm}] Browser thủ công chưa được đóng sạch; profile có thể vẫn bị khóa.")
 
     threading.Thread(target=_worker, daemon=True).start()
+
+def _capture_after_manual_close(profile_name):
+    try:
+        if profile_name not in profiles:
+            return
+        with _profile_operation_lock(profile_name):
+            profile = profiles[profile_name]
+            if profile.get('running') or profile.get('uploading') or profile.get('session_busy'):
+                return
+            profile['session_busy'] = True
+            try:
+                _capture_tiktok_cookies_worker(
+                    profile_name, source_label='manual_login', auto_after_manual=True
+                )
+            finally:
+                profile['session_busy'] = False
+    except Exception as error:
+        update_status(f"[{profile_name}] [WARN] Không lưu được session sau khi đóng browser: {error}")
 
 def _wait_and_close_driver(driver, name):
     pass 
@@ -3945,6 +5180,8 @@ ui_handlers = {
     'add_profile': add_profile,
     'batch_add_profiles': batch_add_profiles,
     'edit_profile': edit_profile,
+    'view_profile_details': view_profile_details,
+    'export_profiles': export_profiles,
     'delete_profile': delete_profile,
     'rename_profile': rename_profile,
     'assign_to_project': assign_to_project,
@@ -4011,6 +5248,7 @@ def _on_tree_right_click(event):
     ctx_menu.post(event.x_root, event.y_root)
 
 tree.bind("<Button-3>", _on_tree_right_click)
+tree.bind("<Double-1>", lambda _event: view_profile_details())
 
 def _tick():
     # Cập nhật UI

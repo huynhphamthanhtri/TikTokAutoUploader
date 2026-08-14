@@ -17,7 +17,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 
 from browser_maintenance import create_owned_root
-from core_helpers import _extract_ip_address, parse_proxy_string
+from core_helpers import _extract_ip_address, parse_cookie, parse_proxy_string
 from patchright_browser import (
     BrowserServiceClosedError,
     BrowserSessionConfig,
@@ -33,7 +33,12 @@ from patchright_cookie_codec import (
     patchright_cookies_to_selenium,
     selenium_cookies_to_patchright,
 )
-from patchright_profile_migration import create_patchright_profile, migration_status
+from patchright_profile_migration import (
+    create_patchright_profile,
+    migration_status,
+    profile_owner_id,
+    set_profile_owner,
+)
 
 try:
     from patchright_upload import SELECTORS as _UPLOAD_SELECTORS
@@ -156,14 +161,28 @@ def ensure_patchright_profile(config):
     if legacy_dir.name.casefold() != "profile":
         raise ValueError("Legacy profile directory must be named Profile")
     target = legacy_dir.with_name("Profile-Patchright")
+    account_id = str(config.get("account_uuid", "") or "").strip() or None
     if target.exists():
         status = migration_status(target)
         if Path(status["legacy_profile"]).resolve() != legacy_dir.resolve():
             raise ValueError("Owned profile belongs to a different legacy profile")
+        try:
+            owner = profile_owner_id(target)
+        except Exception:
+            owner = None
+        if owner and account_id and owner != account_id:
+            raise ValueError(
+                "Browser profile thuộc tài khoản khác; không được tái sử dụng"
+            )
+        if account_id and owner is None:
+            try:
+                set_profile_owner(target, account_id)
+            except Exception:
+                pass
     else:
         if not legacy_dir.is_dir():
             create_owned_root(legacy_dir)
-        target = create_patchright_profile(str(legacy_dir), str(legacy_dir.parent))
+        target = create_patchright_profile(str(legacy_dir), str(legacy_dir.parent), account_id=account_id)
     profile_path = str(target)
     config["browser_profile_path"] = profile_path
     return profile_path
@@ -195,8 +214,12 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None):
         port = str(proxy_data.get("port", "")).strip()
         if not host or any(character.isspace() for character in host) or not port.isdigit() or not 1 <= int(port) <= 65535:
             raise SessionSetupError("Proxy sai định dạng; từ chối mở browser")
+        proxy_type = str(config.get("proxy_type", "http") or "http").strip().lower()
+        if proxy_type not in ("http", "socks5"):
+            raise SessionSetupError("Proxy type chỉ hỗ trợ http hoặc socks5")
+        scheme = "socks5" if proxy_type == "socks5" else "http"
         native = {
-            "server": "http://{}:{}".format(host, port)
+            "server": "{}://{}:{}".format(scheme, host, port)
         }
         if proxy_data.get("user"):
             native["username"] = proxy_data["user"]
@@ -328,6 +351,51 @@ def import_cookies(token, selenium_cookies, timeout=OP_DEFAULT_TIMEOUT):
             )
         )
     return report.accepted
+
+
+def authenticate_session(
+    token,
+    config,
+    profile_name,
+    upload_url,
+    allow_cookie_fallback=True,
+    status_callback=None,
+    timeout=30,
+):
+    """Verify the persistent profile session first, then saved cookie once.
+
+    Priority: an already-logged-in persistent profile is reused as-is; the
+    saved ``cookie_str`` is imported only when the profile session is not
+    authenticated, and only one fallback attempt is made.
+
+    Returns the auth source: ``profile_session`` or ``cookie_fallback``.
+    Raises :class:`LoginRequiredError` when neither path authenticates.
+    """
+    status = status_callback or (lambda message: None)
+    navigate(token, upload_url)
+    login_state = wait_page_login_state(token, timeout=timeout)
+    if login_state == "authenticated":
+        return "profile_session"
+    if not allow_cookie_fallback:
+        raise LoginRequiredError(
+            "Profile chưa đăng nhập; hãy dùng 'Mở Chrome' để đăng nhập thủ công"
+            if login_state == "login_required"
+            else "Không xác minh được trạng thái đăng nhập trên profile"
+        )
+    cookies = parse_cookie(config.get("cookie_str", ""))
+    if not cookies:
+        raise LoginRequiredError(
+            "Profile chưa đăng nhập và không có cookie dự phòng; hãy dùng 'Mở Chrome'"
+        )
+    status(f"[{profile_name}] Session profile chưa hợp lệ, thử cookie dự phòng...")
+    import_cookies(token, cookies)
+    navigate(token, upload_url)
+    login_state = wait_page_login_state(token, timeout=timeout)
+    if login_state == "authenticated":
+        return "cookie_fallback"
+    raise LoginRequiredError(
+        "Cookie dự phòng cũng bị TikTok từ chối; hãy dùng 'Mở Chrome' để đăng nhập thủ công"
+    )
 
 
 def _run(handle, operation, timeout=OP_DEFAULT_TIMEOUT, convert_timeout=True):

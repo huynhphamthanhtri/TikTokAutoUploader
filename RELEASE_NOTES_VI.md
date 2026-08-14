@@ -1,3 +1,26 @@
+# Phiên bản 1.0.12
+
+## Điểm mới
+- Bổ sung quản lý browser profile riêng theo từng tài khoản, hạn chế dùng nhầm hoặc chia sẻ dữ liệu đăng nhập giữa các tài khoản.
+- Bổ sung Reset Browser an toàn: browser/profile cũ được đưa vào quarantine và cho phép khôi phục trong 7 ngày.
+- Bổ sung theo dõi môi trường proxy/GEO và cảnh báo khi quốc gia, ASN hoặc múi giờ thay đổi so với lần chạy trước.
+- Bổ sung import/export tài khoản với xem trước, kiểm tra hợp lệ và che dữ liệu nhạy cảm.
+- Bổ sung công cụ chẩn đoán proxy, môi trường login và anti-detect dành cho hỗ trợ kỹ thuật.
+
+## Cải thiện
+- Tối ưu quy trình login thủ công một lần và tái sử dụng session/profile ổn định.
+- Cải thiện xác minh trạng thái đăng nhập trước khi upload.
+- Làm gọn giao diện quản lý profile, chuyển các thao tác phụ vào menu và ưu tiên không gian cho danh sách tài khoản.
+- Bổ sung TikTok ID, khu vực và trạng thái sức khỏe tổng hợp vào bảng profile.
+- Cải thiện dừng browser và lưu trạng thái YouTube Monitor khi thoát ứng dụng.
+- Bảo vệ browser profile bằng ownership marker và kiểm tra đường dẫn an toàn.
+
+## Sửa lỗi
+- Khắc phục nguy cơ nhiều tài khoản dùng chung browser profile.
+- Khắc phục trạng thái session cũ còn được xem là hợp lệ sau khi reset hoặc đổi môi trường.
+- Khắc phục một số trường hợp browser/profile không được đóng hoặc dọn sạch hoàn toàn.
+- Hạn chế lỗi cấu hình proxy và thay đổi IP không được cảnh báo.
+
 # Phiên bản 1.0.11
 
 ## Điểm mới

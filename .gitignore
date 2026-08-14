@@ -13,6 +13,8 @@ dist/
 
 # Runtime data
 configs.json
+configs.json.*-backup-*.json
+anti_detect_report.json
 youtube_config.json
 channels.json
 channel_cache.json

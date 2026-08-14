@@ -15,10 +15,69 @@ PRESERVED_ENVIRONMENT_KEYS = {
     "timezone",
     "geolocation",
     "geo_exit_ip",
+    "geo_country_code",
+    "geo_country",
+    "geo_region",
+    "geo_city",
+    "geo_asn",
+    "geo_isp",
     "geo_proxy_hash",
     "geo_resolved_at",
     "geo_source",
 }
+
+# Keys describing the proxy-resolved environment. They are recomputed when the
+# proxy identity changes and cleared when proxy is disabled.
+GEO_ENVIRONMENT_KEYS = (
+    "timezone",
+    "geolocation",
+    "geo_exit_ip",
+    "geo_country_code",
+    "geo_country",
+    "geo_region",
+    "geo_city",
+    "geo_asn",
+    "geo_isp",
+    "geo_proxy_hash",
+    "geo_resolved_at",
+    "geo_source",
+)
+
+# Country code -> browser/accept-language locale. Used to keep the browser
+# locale consistent with the proxy exit region. Fallback is en-US.
+COUNTRY_LOCALES = {
+    "JP": "ja-JP",
+    "VN": "vi-VN",
+    "US": "en-US",
+    "CA": "en-CA",
+    "GB": "en-GB",
+    "KR": "ko-KR",
+    "DE": "de-DE",
+    "FR": "fr-FR",
+    "ES": "es-ES",
+    "IT": "it-IT",
+    "TW": "zh-TW",
+    "HK": "zh-HK",
+    "SG": "en-SG",
+    "MY": "ms-MY",
+    "TH": "th-TH",
+    "ID": "id-ID",
+    "PH": "en-PH",
+    "IN": "en-IN",
+    "BR": "pt-BR",
+    "MX": "es-MX",
+    "AR": "es-AR",
+    "CO": "es-CO",
+    "AU": "en-AU",
+    "NZ": "en-NZ",
+    "RU": "ru-RU",
+}
+
+
+def locale_for_country(country_code, fallback="en-US"):
+    """Map a two-letter country code to a browser locale."""
+    code = str(country_code or "").strip().upper()
+    return COUNTRY_LOCALES.get(code, fallback)
 
 
 def ensure_fingerprint_defaults(fingerprint=None, seed=""):
@@ -86,6 +145,10 @@ def normalize_geoip_payload(payload, proxy_data):
         raise ValueError("GeoIP không trả timezone IANA hợp lệ")
     if not _valid_coordinates(latitude, longitude):
         raise ValueError("GeoIP không trả tọa độ hợp lệ")
+    connection = payload.get("connection") or {}
+    if not isinstance(connection, dict):
+        connection = {}
+    country_code = str(payload.get("country_code") or "").strip().upper()
     return {
         "timezone": str(timezone_id),
         "geolocation": {
@@ -94,6 +157,12 @@ def normalize_geoip_payload(payload, proxy_data):
             "accuracy": 50,
         },
         "geo_exit_ip": str(payload.get("ip") or ""),
+        "geo_country_code": country_code,
+        "geo_country": str(payload.get("country") or "").strip(),
+        "geo_region": str(payload.get("region") or "").strip(),
+        "geo_city": str(payload.get("city") or "").strip(),
+        "geo_asn": str(connection.get("asn") or "").strip(),
+        "geo_isp": str(connection.get("isp") or connection.get("org") or "").strip(),
         "geo_proxy_hash": proxy_cache_key(proxy_data),
         "geo_resolved_at": datetime.now(timezone.utc).isoformat(),
         "geo_source": "ipwho.is",

@@ -555,6 +555,22 @@ class ChannelsStore:
                 self._dirty = True
                 self._revision += 1
 
+    def rename_profile(self, old_name, new_name):
+        with _store_lock:
+            renamed = 0
+            for meta in self._channels.values():
+                if meta.get("profile_name") == old_name:
+                    meta["profile_name"] = new_name
+                    renamed += 1
+            if renamed:
+                self._dirty = True
+                self._revision += 1
+            return renamed
+
+    def count_by_profile(self, profile_name):
+        with _store_lock:
+            return sum(1 for meta in self._channels.values() if meta.get("profile_name") == profile_name)
+
     def toggle_active(self, cid):
         with _store_lock:
             if cid not in self._channels:
@@ -2257,6 +2273,18 @@ def toggle_channel_short(channel_id):
     value = channels_store.toggle_process_short(channel_id)
     channels_store.save_now()
     return True, f"Short={value}"
+
+
+def rename_channel_profile(old_name, new_name):
+    renamed = channels_store.rename_profile(old_name, new_name)
+    if renamed:
+        channels_store.save_now()
+        log(f"[Channels] Đổi profile tham chiếu: {old_name} -> {new_name} ({renamed} channel)")
+    return True, f"Đã đồng bộ {renamed} channel sang profile mới."
+
+
+def channel_count_for_profile(profile_name):
+    return channels_store.count_by_profile(profile_name)
 
 
 def get_status():

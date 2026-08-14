@@ -95,12 +95,15 @@ def _write_json_atomic(path, payload):
         raise
 
 
-def _marker_payload(legacy, target):
-    return {
+def _marker_payload(legacy, target, account_id=None):
+    payload = {
         "format": _MARKER_VERSION,
         "legacy_profile": str(legacy),
         "patchright_profile": str(target),
     }
+    if account_id:
+        payload["account_id"] = str(account_id)
+    return payload
 
 
 def _load_owned(target):
@@ -129,7 +132,7 @@ def _load_owned(target):
     return target, marker_data, state_data
 
 
-def create_patchright_profile(legacy_profile, managed_root):
+def create_patchright_profile(legacy_profile, managed_root, account_id=None):
     """Create an empty owned sibling and initialize migration state.
 
     Existing owned profiles are returned for safe resume. Existing unowned
@@ -140,6 +143,8 @@ def create_patchright_profile(legacy_profile, managed_root):
         loaded_target, marker, _state = _load_owned(target)
         if marker.get("legacy_profile") != str(legacy):
             raise ValueError("Owned profile belongs to a different legacy profile")
+        if account_id and marker.get("account_id") and marker.get("account_id") != str(account_id):
+            raise ValueError("Owned profile belongs to a different account")
         return loaded_target
 
     target.mkdir()
@@ -147,7 +152,7 @@ def create_patchright_profile(legacy_profile, managed_root):
     state_file = target / STATE_FILE
     try:
         with marker.open("x", encoding="ascii", newline="\n") as stream:
-            json.dump(_marker_payload(legacy, target), stream, ensure_ascii=True, sort_keys=True)
+            json.dump(_marker_payload(legacy, target, account_id=account_id), stream, ensure_ascii=True, sort_keys=True)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
@@ -170,6 +175,20 @@ def create_patchright_profile(legacy_profile, managed_root):
     return target
 
 
+def profile_owner_id(patchright_profile):
+    """Return the account_id bound to the owned profile, or None."""
+    _target, marker, _state = _load_owned(patchright_profile)
+    return marker.get("account_id") or None
+
+
+def set_profile_owner(patchright_profile, account_id):
+    """Bind (or re-bind) an account_id to an owned profile marker."""
+    target, marker, _state = _load_owned(patchright_profile)
+    marker["account_id"] = str(account_id or "")
+    _write_json_atomic(target / OWNERSHIP_MARKER, marker)
+    return dict(marker)
+
+
 def migration_status(patchright_profile):
     """Return a detached copy of the persisted migration record."""
     _target, _marker, state = _load_owned(patchright_profile)
@@ -189,6 +208,34 @@ def advance_migration(patchright_profile, new_state):
         raise ValueError("Invalid migration transition: {} -> {}".format(current, requested))
     record["state"] = requested
     record["history"].append(requested)
+    _write_json_atomic(target / STATE_FILE, record)
+    return migration_status(target)
+
+
+def mark_profile_login_verified(patchright_profile, note=""):
+    """Mark a clean profile as login_verified without a cookie import step.
+
+    The automated login environment flow logs in through a real browser
+    session (no cookie import), so the ``cookies_imported`` transition is
+    skipped. The persisted history is rewritten to a valid chain ending at
+    ``login_verified`` so the record always validates against :data:`STATES`.
+    """
+    target, _marker, record = _load_owned(patchright_profile)
+    current = record["state"]
+    if current == MigrationState.LOGIN_VERIFIED.value:
+        return migration_status(target)
+    if current != MigrationState.CREATED.value:
+        raise ValueError(
+            "Only a created profile can be marked login_verified, got {}".format(current)
+        )
+    record["state"] = MigrationState.LOGIN_VERIFIED.value
+    record["history"] = [
+        MigrationState.PENDING.value,
+        MigrationState.CREATED.value,
+        MigrationState.LOGIN_VERIFIED.value,
+    ]
+    if note:
+        record["note"] = str(note)
     _write_json_atomic(target / STATE_FILE, record)
     return migration_status(target)
 

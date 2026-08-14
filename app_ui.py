@@ -94,6 +94,23 @@ def classify_log_message(message: str):
     return base_tag, important_tag
 
 
+def _open_overflow_menu(btn, actions):
+    menu = None
+    try:
+        menu = Menu(btn.master, tearoff=0)
+        for label, command in actions:
+            menu.add_command(label=label, command=command)
+        x = btn.winfo_rootx()
+        y = btn.winfo_rooty() + btn.winfo_height()
+        menu.tk_popup(x, y)
+    finally:
+        if menu is not None:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+
+
 def build_dashboard(root, state, handlers):
     widgets = {}
 
@@ -131,7 +148,7 @@ def build_dashboard(root, state, handlers):
 
     f_search = ctk.CTkFrame(topbar_row1, corner_radius=10, fg_color="#f8fafc", border_width=1, border_color="#e5e7eb")
     f_search.pack(side='left', fill='x', expand=True, padx=(0, 10), pady=2)
-    ctk.CTkEntry(f_search, textvariable=state['filter_var'], height=30, placeholder_text="Tìm hồ sơ, trạng thái, folder...").pack(fill='x', padx=8, pady=5)
+    ctk.CTkEntry(f_search, textvariable=state['filter_var'], height=30, placeholder_text="Tìm hồ sơ, TikTok ID, proxy, trạng thái, khu vực...").pack(fill='x', padx=8, pady=5)
 
     f_view = ctk.CTkFrame(topbar_row1, corner_radius=10, fg_color="#f8fafc", border_width=1, border_color="#e5e7eb")
     f_view.pack(side='right', padx=5)
@@ -146,20 +163,25 @@ def build_dashboard(root, state, handlers):
     neutral = ("#64748b", "#475569")
     danger = ("#ef4444", "#dc2626")
     success = ("#16a34a", "#15803d")
-    manage_buttons = [
-        ("Thêm", 82, handlers['add_profile'], *neutral),
-        ("Sửa", 82, handlers['edit_profile'], *neutral),
-        ("Xóa", 82, handlers['delete_profile'], *danger),
-        ("Đổi tên", 88, handlers['rename_profile'], *neutral),
-        ("Gán DA", 82, handlers['assign_to_project'], *neutral),
-        ("Thêm Batch", 104, handlers['batch_add_profiles'], *neutral),
-        ("Thống kê", 92, handlers['show_statistics_board'], *neutral),
-        ("Mở Chrome", 104, handlers['open_browser'], *neutral),
-        ("License", 82, handlers['change_license_key'], *neutral),
-        ("Cập nhật", 92, handlers['check_update'], *neutral),
+
+    ctk.CTkButton(manage_left, text="Thêm", width=72, height=32, command=handlers['add_profile'], fg_color=neutral[0], hover_color=neutral[1]).pack(side='left', padx=3, pady=2)
+    ctk.CTkButton(manage_left, text="Mở Chrome", width=96, height=32, command=handlers['open_browser'], fg_color=neutral[0], hover_color=neutral[1]).pack(side='left', padx=3, pady=2)
+
+    overflow_actions = [
+        ("Sửa", handlers['edit_profile']),
+        ("Chi tiết", handlers['view_profile_details']),
+        ("Đổi tên", handlers['rename_profile']),
+        ("Xóa", handlers['delete_profile']),
+        ("Gán DA", handlers['assign_to_project']),
+        ("Import", handlers['batch_add_profiles']),
+        ("Export", handlers['export_profiles']),
+        ("Thống kê", handlers['show_statistics_board']),
+        ("Reset Browser", handlers['clean_browser']),
+        ("License", handlers['change_license_key']),
+        ("Cập nhật", handlers['check_update']),
     ]
-    for text, width, command, fg, hover in manage_buttons:
-        ctk.CTkButton(manage_left, text=text, width=width, height=32, command=command, fg_color=fg, hover_color=hover).pack(side='left', padx=3, pady=2)
+    more_btn = ctk.CTkButton(manage_left, text="⋯", width=40, height=32, command=lambda: _open_overflow_menu(more_btn, overflow_actions), fg_color="#475569", hover_color="#334155")
+    more_btn.pack(side='left', padx=3, pady=2)
 
     control_frame = ctk.CTkFrame(manage_frame, fg_color='transparent')
     control_frame.pack(side='right')
@@ -180,8 +202,8 @@ def build_dashboard(root, state, handlers):
     content_row = ctk.CTkFrame(profile_tab, fg_color='transparent')
     content_row.pack(fill='both', expand=True)
     content_row.grid_columnconfigure(0, weight=1)
-    content_row.grid_rowconfigure(0, weight=58)
-    content_row.grid_rowconfigure(1, weight=42)
+    content_row.grid_rowconfigure(0, weight=78)
+    content_row.grid_rowconfigure(1, weight=22)
 
     table_card = build_card(content_row, "Danh sách hồ sơ")
     table_card.grid(row=0, column=0, sticky='nsew', pady=(0, 6))
@@ -192,15 +214,15 @@ def build_dashboard(root, state, handlers):
     tree = ttk.Treeview(
         table_frame,
         style='Modern.Treeview',
-        columns=('name', 'status', 'login', 'proxy', 'browser', 'upload', 'last_error', 'folder', 'chrome', 'headless', 'limit'),
+        columns=('name', 'status', 'tiktok', 'proxy', 'region', 'upload', 'last_error', 'folder', 'chrome', 'headless', 'limit'),
         show='headings',
         selectmode='extended'
     )
     tree.heading('name', text='Tên', command=lambda: handlers['sort_tree'](tree, 'name', False))
-    tree.heading('status', text='Trạng thái', command=lambda: handlers['sort_tree'](tree, 'status', False))
-    tree.heading('login', text='Đăng nhập', command=lambda: handlers['sort_tree'](tree, 'login', False))
+    tree.heading('status', text='Sức khỏe', command=lambda: handlers['sort_tree'](tree, 'status', False))
+    tree.heading('tiktok', text='TikTok ID', command=lambda: handlers['sort_tree'](tree, 'tiktok', False))
     tree.heading('proxy', text='Proxy', command=lambda: handlers['sort_tree'](tree, 'proxy', False))
-    tree.heading('browser', text='Trình duyệt', command=lambda: handlers['sort_tree'](tree, 'browser', False))
+    tree.heading('region', text='Khu vực', command=lambda: handlers['sort_tree'](tree, 'region', False))
     tree.heading('upload', text='Đăng video', command=lambda: handlers['sort_tree'](tree, 'upload', False))
     tree.heading('last_error', text='Lỗi gần nhất', command=lambda: handlers['sort_tree'](tree, 'last_error', False))
     tree.heading('folder', text='Folder', command=lambda: handlers['sort_tree'](tree, 'folder', False))
@@ -208,16 +230,16 @@ def build_dashboard(root, state, handlers):
     tree.heading('headless', text='Headless', command=lambda: handlers['sort_tree'](tree, 'headless', False))
     tree.heading('limit', text='Limit', command=lambda: handlers['sort_tree'](tree, 'limit', False))
     tree.column('name', width=140, minwidth=100, stretch=False)
-    tree.column('status', width=105, minwidth=95, anchor='center', stretch=False)
-    tree.column('login', width=105, minwidth=95, anchor='center', stretch=False)
+    tree.column('status', width=130, minwidth=110, anchor='center', stretch=False)
+    tree.column('tiktok', width=110, minwidth=90, anchor='center', stretch=False)
     tree.column('proxy', width=100, minwidth=85, anchor='center', stretch=False)
-    tree.column('browser', width=100, minwidth=90, anchor='center', stretch=False)
+    tree.column('region', width=80, minwidth=60, anchor='center', stretch=False)
     tree.column('upload', width=115, minwidth=100, anchor='center', stretch=False)
     tree.column('last_error', width=160, minwidth=120, stretch=False)
-    tree.column('folder', width=150, minwidth=120, stretch=False)
-    tree.column('chrome', width=150, minwidth=120, stretch=False)
-    tree.column('headless', width=70, minwidth=60, anchor='center', stretch=False)
-    tree.column('limit', width=60, minwidth=55, anchor='center', stretch=False)
+    tree.column('folder', width=0, minwidth=0, stretch=False)
+    tree.column('chrome', width=0, minwidth=0, stretch=False)
+    tree.column('headless', width=0, minwidth=0, stretch=False)
+    tree.column('limit', width=0, minwidth=0, stretch=False)
     tree.grid(row=0, column=0, sticky='nsew')
     vsb = ttk.Scrollbar(table_frame, style='Vertical.TScrollbar', orient='vertical', command=tree.yview)
     vsb.grid(row=0, column=1, sticky='ns')
@@ -306,8 +328,10 @@ def build_dashboard(root, state, handlers):
     ctx_menu.add_command(label="Copy Link Kênh", command=handlers['copy_channel_link'])
     ctx_menu.add_command(label="Mở trình duyệt", command=handlers['open_browser'])
     ctx_menu.add_command(label="Lấy Cookie TikTok", command=handlers['get_tiktok_cookies'])
-    ctx_menu.add_command(label="Làm sạch Browser", command=handlers['clean_browser'])
+    ctx_menu.add_command(label="Reset Browser", command=handlers['clean_browser'])
+    ctx_menu.add_command(label="Xem chi tiết", command=handlers['view_profile_details'])
     ctx_menu.add_command(label="Sửa", command=handlers['edit_profile'])
+    ctx_menu.add_command(label="Export tài khoản", command=handlers['export_profiles'])
     ctx_menu.add_command(label="Xoá", command=handlers['delete_profile'])
     widgets['ctx_menu'] = ctx_menu
 

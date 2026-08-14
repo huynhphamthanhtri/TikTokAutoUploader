@@ -11,6 +11,7 @@ from patchright_profile_migration import (
     cleanup_legacy_profile,
     create_patchright_profile,
     derive_patchright_profile_path,
+    mark_profile_login_verified,
     migration_status,
 )
 
@@ -83,6 +84,21 @@ class PatchrightProfileMigrationTests(unittest.TestCase):
         self.assertTrue(target.exists())
         self.assertEqual(result["state"], "completed")
         self.assertEqual(result["history"][-2:], ["legacy_cleanup_pending", "completed"])
+
+    def test_mark_login_verified_skips_cookie_step(self):
+        target = create_patchright_profile(self.legacy, self.managed)
+        status = mark_profile_login_verified(target, note="auto-login")
+        self.assertEqual(status["state"], "login_verified")
+        self.assertEqual(status["history"], ["pending", "created", "login_verified"])
+        persisted = json.loads((target / STATE_FILE).read_text(encoding="ascii"))
+        self.assertEqual(persisted["note"], "auto-login")
+        self.assertEqual(mark_profile_login_verified(target)["state"], "login_verified")
+
+    def test_mark_login_verified_rejects_non_created_state(self):
+        target = create_patchright_profile(self.legacy, self.managed)
+        advance_migration(target, MigrationState.COOKIES_IMPORTED)
+        with self.assertRaises(ValueError):
+            mark_profile_login_verified(target)
 
     def test_cleanup_rejects_wrong_managed_root_and_tampered_marker(self):
         target = create_patchright_profile(self.legacy, self.managed)

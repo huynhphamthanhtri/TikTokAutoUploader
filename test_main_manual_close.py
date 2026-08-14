@@ -73,6 +73,56 @@ class ManualCloseMainFlowTests(unittest.TestCase):
         self.assertIn("token.quit()", glue_source)
         self.assertIn("cancel_session(token.handle, timeout=10)", glue_source)
 
+    def test_open_browser_does_not_inject_cookies(self):
+        manual_flow = self.source[
+            self.source.index("def open_browser()"):
+            self.source.index("def _capture_after_manual_close")
+        ]
+        self.assertNotIn("import_cookies", manual_flow)
+
+    def test_open_browser_captures_session_after_close(self):
+        manual_flow = self.source[
+            self.source.index("def open_browser()"):
+            self.source.index("def _capture_after_manual_close")
+        ]
+        self.assertIn("_capture_after_manual_close", manual_flow)
+
+    def test_capture_worker_does_not_inject_cookies(self):
+        capture_flow = self.source[
+            self.source.index("def _capture_tiktok_cookies_worker"):
+            self.source.index("def get_tiktok_cookies")
+        ]
+        self.assertNotIn("import_cookies", capture_flow)
+
+    def test_ensure_driver_uses_profile_first_authenticate(self):
+        automation_flow = self.source[
+            self.source.index("def ensure_driver"):
+            self.source.index("def upload_video")
+        ]
+        self.assertIn("authenticate_session", automation_flow)
+        self.assertNotIn("import_cookies", automation_flow)
+
+    def test_capture_worker_saves_session_metadata(self):
+        capture_flow = self.source[
+            self.source.index("def _capture_tiktok_cookies_worker"):
+            self.source.index("def get_tiktok_cookies")
+        ]
+        self.assertIn("_save_session_auth_metadata", capture_flow)
+        self.assertIn("_mark_session_failure", capture_flow)
+
+    def test_session_metadata_helpers_exist(self):
+        main_source = self.source
+        for helper in ("_session_proxy_key", "_save_session_auth_metadata", "_mark_session_failure", "_wait_profile_lock_release"):
+            self.assertIn("def " + helper, main_source)
+
+    def test_verified_session_clears_manual_login_pending(self):
+        meta_flow = self.source[
+            self.source.index("def _save_session_auth_metadata"):
+            self.source.index("def _mark_session_failure")
+        ]
+        self.assertIn("state == 'verified'", meta_flow)
+        self.assertIn("'manual_login_pending'] = False", meta_flow)
+
 
 if __name__ == "__main__":
     unittest.main()
