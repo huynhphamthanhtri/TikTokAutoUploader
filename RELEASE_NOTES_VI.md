@@ -1,3 +1,18 @@
+# Phiên bản 1.0.11
+
+## Điểm mới
+- Chuyển hệ thống tự động hóa TikTok sang nền tảng Patchright, thay thế toàn bộ trình điều khiển cũ.
+- Tự động di trú dữ liệu profile khi mở lần đầu, giữ phiên đăng nhập và cấu hình hiện có.
+
+## Cải thiện
+- Nhập cookie đăng nhập tin cậy hơn, nhận diện đúng trạng thái "đã đăng nhập" trước khi đăng video.
+- Tối ưu tốc độ chờ và kiểm tra trang để đăng video nhanh hơn; bổ sung số liệu đo thời gian từng bước để dễ theo dõi.
+- Cải thiện khả năng đóng browser và profile khi dừng hoặc tắt ứng dụng.
+
+## Sửa lỗi
+- Khắc phục cửa sổ hướng dẫn của TikTok che nút Đăng khiến video không lên được.
+- Phân biệt rõ lỗi xảy ra trước hay sau khi gửi bài đăng, tránh đăng trùng khi kết quả không chắc chắn.
+
 # Phiên bản 1.0.10
 
 ## Điểm mới

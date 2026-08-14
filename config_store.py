@@ -10,14 +10,24 @@ from browser_environment import ensure_fingerprint_defaults
 _CONFIG_SAVE_LOCK = threading.RLock()
 
 
+def _normalize_browser_config(config):
+    normalized = dict(config)
+    normalized.setdefault('legacy_chrome_profile', normalized.get('chrome_profile', ''))
+    normalized.setdefault('browser_profile_path', '')
+    normalized.setdefault('browser_engine', 'patchright')
+    normalized.setdefault('migration_state', 'pending')
+    return normalized
+
+
 def build_configs_payload(profiles, projects):
     export_profiles = {}
     for name, prof in profiles.items():
-        prof['config']['stats_today'] = prof['uploads_today_count']
-        prof['config']['stats_yesterday'] = prof.get('uploads_yesterday_count', 0)
-        prof['config']['stats_date'] = prof['uploads_today_date']
-        prof['config']['project'] = prof.get('project', 'Mặc định')
-        export_profiles[name] = prof['config']
+        config = _normalize_browser_config(prof['config'])
+        config['stats_today'] = prof['uploads_today_count']
+        config['stats_yesterday'] = prof.get('uploads_yesterday_count', 0)
+        config['stats_date'] = prof['uploads_today_date']
+        config['project'] = prof.get('project', 'Mặc định')
+        export_profiles[name] = config
 
     return {
         'profiles': export_profiles,
@@ -59,7 +69,7 @@ def build_runtime_profiles(loaded_profiles):
     current_date_str = current_date_obj.strftime('%Y-%m-%d')
 
     for name, prof_config in loaded_profiles.items():
-        prof_config = dict(prof_config)
+        prof_config = _normalize_browser_config(prof_config)
         prof_config['fingerprint'] = ensure_fingerprint_defaults(
             prof_config.get('fingerprint', {}),
             seed=name + str(prof_config.get('cookie_str', '')),
@@ -111,6 +121,10 @@ def build_runtime_profiles(loaded_profiles):
             'queue': None,
             'observer': None,
             'driver': None,
+            'manual_driver': None,
+            'automation_session': None,
+            'manual_session': None,
+            'session_busy': False,
             'running': False,
             'processed_files': set(),
             'last_event_time': {},

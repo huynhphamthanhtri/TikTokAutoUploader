@@ -1,9 +1,9 @@
 import threading
 import time
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-from browser_lifecycle import ProfileLifecycle, get_lifecycle, remove_lifecycle, _kill_pid
+from browser_lifecycle import ProfileLifecycle, get_lifecycle, remove_lifecycle
 
 
 class TestProfileLifecycle(unittest.TestCase):
@@ -42,13 +42,13 @@ class TestProfileLifecycle(unittest.TestCase):
         self.lc.cancel()
         self.assertFalse(self.lc.is_current(gen))
 
-    def test_begin_resets_drivers(self):
+    def test_begin_rejects_live_drivers(self):
         self.lc.set_automation_driver("old_driver")
         self.lc.set_manual_driver("old_manual")
-        gen = self.lc.begin()
-        self.assertIsNone(self.lc.get_automation_driver())
-        self.assertIsNone(self.lc.get_manual_driver())
-        self.assertTrue(self.lc.is_current(gen))
+        with self.assertRaises(RuntimeError):
+            self.lc.begin()
+        self.assertEqual(self.lc.get_automation_driver(), "old_driver")
+        self.assertEqual(self.lc.get_manual_driver(), "old_manual")
 
     def test_automation_driver_get_set(self):
         d = object()
@@ -66,6 +66,13 @@ class TestProfileLifecycle(unittest.TestCase):
         self.lc.set_manual_driver(d)
         self.assertIs(self.lc.get_manual_driver(), d)
 
+    def test_release_manual_requires_same_driver(self):
+        driver = object()
+        self.lc.set_manual_driver(driver)
+        self.assertFalse(self.lc.release_manual(object()))
+        self.assertTrue(self.lc.release_manual(driver))
+        self.assertIsNone(self.lc.get_manual_driver())
+
     def test_startup_future(self):
         f = object()
         self.lc.set_startup_future(f)
@@ -75,6 +82,12 @@ class TestProfileLifecycle(unittest.TestCase):
         o = object()
         self.lc.set_observer(o)
         self.assertIs(self.lc.get_observer(), o)
+
+    def test_register_observer_rejects_cancelled_generation(self):
+        gen = self.lc.begin()
+        self.lc.cancel()
+        self.assertFalse(self.lc.register_observer(gen, object()))
+        self.assertIsNone(self.lc.get_observer())
 
     def test_add_pid_none(self):
         self.lc.add_pid(None)
@@ -88,10 +101,11 @@ class TestProfileLifecycle(unittest.TestCase):
         self.lc.add_pid("5678")
         self.assertIn(5678, self.lc.owned_pids())
 
-    def test_begin_clears_pids(self):
+    def test_begin_rejects_owned_pids(self):
         self.lc.add_pid(9999)
-        self.lc.begin()
-        self.assertEqual(len(self.lc.owned_pids()), 0)
+        with self.assertRaises(RuntimeError):
+            self.lc.begin()
+        self.assertEqual(self.lc.owned_pids(), {9999})
 
     def test_has_active_driver_false_initial(self):
         self.assertFalse(self.lc.has_active_driver())
@@ -108,6 +122,20 @@ class TestProfileLifecycle(unittest.TestCase):
         self.lc.set_automation_driver("a")
         self.lc.set_manual_driver("m")
         self.assertTrue(self.lc.has_active_driver())
+
+    def test_detach_automation_preserves_manual_and_observer(self):
+        auto = object()
+        manual = object()
+        service = object()
+        observer = object()
+        self.lc.set_automation_driver(auto, service)
+        self.lc.set_manual_driver(manual)
+        self.lc.set_observer(observer)
+        detached_driver, detached_service, _pids = self.lc.detach_automation()
+        self.assertIs(detached_driver, auto)
+        self.assertIs(detached_service, service)
+        self.assertIs(self.lc.get_manual_driver(), manual)
+        self.assertIs(self.lc.get_observer(), observer)
 
     def test_cleanup_fast_clears_drivers(self):
         self.lc.set_automation_driver("d")
@@ -154,24 +182,6 @@ class TestGlobalLifecycleRegistry(unittest.TestCase):
         self.assertIsNot(lc_a, lc_b)
         lc_a.begin()
         self.assertNotEqual(lc_a.generation, lc_b.generation)
-
-
-class TestKillPid(unittest.TestCase):
-    @patch("browser_lifecycle.psutil", None)
-    def test_no_psutil(self):
-        ok, action = _kill_pid(99999)
-        self.assertFalse(ok)
-        self.assertIsNone(action)
-
-    def test_nonexistent_pid(self):
-        ok, action = _kill_pid(99999999)
-        self.assertTrue(ok)
-        self.assertIn(action, ("gone",))
-
-    def test_invalid_pid_zero(self):
-        ok, _ = _kill_pid(0)
-        # PID 0 is the System Idle Process on Windows – AccessDenied is acceptable
-        self.assertTrue(ok)
 
 
 class TestLifecycleCleanupReport(unittest.TestCase):

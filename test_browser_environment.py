@@ -1,30 +1,20 @@
 import unittest
 
 from browser_environment import (
-    apply_device_preset,
-    build_fingerprint_script,
-    chrome_environment_arguments,
-    chrome_environment_preferences,
-    configure_driver_environment,
-    device_override,
+    ensure_fingerprint_defaults,
     geo_cache_is_current,
     normalize_geoip_payload,
     proxy_cache_key,
     resolve_geoip,
+    verify_direct_endpoint,
+    verify_proxy_endpoint,
 )
 from config_store import build_runtime_profiles
 
 
-class FakeDriver:
-    def __init__(self):
-        self.commands = []
-
-    def execute_cdp_cmd(self, command, params):
-        self.commands.append((command, params))
-        return {}
-
-
 class FakeResponse:
+    text = "198.51.100.12"
+
     def raise_for_status(self):
         return None
 
@@ -39,13 +29,38 @@ class FakeResponse:
 
 
 class BrowserEnvironmentTests(unittest.TestCase):
-    def test_device_preset_is_coherent(self):
-        fingerprint = apply_device_preset({}, "pixel")
-        device = device_override(fingerprint)
-        self.assertEqual(device["platform"], "Android")
-        self.assertTrue(device["mobile"])
-        self.assertIn("Android", device["user_agent"])
-        self.assertEqual(fingerprint["webrtc_policy"], "controlled")
+    def test_legacy_mobile_and_custom_profiles_migrate_to_native_desktop(self):
+        for preset in ("pixel", "iphone_x", "custom"):
+            fingerprint = ensure_fingerprint_defaults({
+                "device_preset": preset,
+                "user_agent": "fabricated",
+                "user_agent_metadata": {"mobile": True},
+                "platform": "Android",
+                "mobile": True,
+                "touch_points": 5,
+                "hardware_concurrency": 8,
+                "canvas_noise": 0.001,
+                "window_width": 412,
+                "window_height": 915,
+                "webrtc_policy": "block",
+            })
+            self.assertEqual(fingerprint, {"device_preset": "desktop", "lang": "en-US"})
+
+    def test_native_migration_preserves_only_locale_and_geo_cache(self):
+        original = {
+            "lang": "en-GB",
+            "timezone": "Europe/London",
+            "geolocation": {"latitude": 51.5, "longitude": -0.12, "accuracy": 50},
+            "geo_exit_ip": "198.51.100.12",
+            "geo_proxy_hash": "cache-key",
+            "geo_resolved_at": "2026-08-13T00:00:00+00:00",
+            "geo_source": "ipwho.is",
+        }
+        fingerprint = ensure_fingerprint_defaults(original)
+        self.assertEqual(fingerprint["device_preset"], "desktop")
+        for key, value in original.items():
+            self.assertEqual(fingerprint[key], value)
+        self.assertNotIn("profile_note", ensure_fingerprint_defaults({"profile_note": "drop"}))
 
     def test_proxy_cache_key_does_not_expose_proxy_value(self):
         proxy = {"ip": "203.0.113.8", "port": "8080", "user": "u", "pass": "p"}
@@ -82,44 +97,50 @@ class BrowserEnvironmentTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["timeout"], 3)
         self.assertIn("a%40b:p%3Aq@203.0.113.8:8080", calls[0][1]["proxies"]["https"])
 
-    def test_webrtc_policy_has_distinct_options(self):
-        controlled = {"webrtc_policy": "controlled"}
-        blocked = {"webrtc_policy": "block"}
-        self.assertIn("--force-webrtc-ip-handling-policy=disable_non_proxied_udp", chrome_environment_arguments(controlled))
-        self.assertNotIn("profile.default_content_setting_values.media_stream_mic", chrome_environment_preferences(controlled))
-        self.assertIn("--disable-webrtc", chrome_environment_arguments(blocked))
-        self.assertEqual(chrome_environment_preferences(blocked)["profile.default_content_setting_values.media_stream_mic"], 2)
+    def test_proxy_endpoint_preflight_uses_encoded_credentials(self):
+        calls = []
 
-    def test_fingerprint_script_contains_required_hooks_once(self):
-        script = build_fingerprint_script({"device_preset": "iphone_x"})
-        self.assertIn("HTMLCanvasElement.prototype.toDataURL", script)
-        self.assertIn("prototype.readPixels", script)
-        self.assertIn("AnalyserNode", script)
-        self.assertIn("__privacyFingerprintInstalled", script)
-        self.assertNotIn("__CANVAS_SEED__", script)
+        def request_get(url, **kwargs):
+            calls.append((url, kwargs))
+            return FakeResponse()
 
-    def test_driver_environment_applies_ua_timezone_geo_and_script(self):
-        driver = FakeDriver()
-        fingerprint = apply_device_preset({}, "pixel")
-        fingerprint.update({
-            "timezone": "Asia/Ho_Chi_Minh",
-            "geolocation": {"latitude": 10.75, "longitude": 106.67, "accuracy": 25},
-        })
-        configure_driver_environment(driver, fingerprint)
-        commands = [command for command, _params in driver.commands]
-        self.assertIn("Network.setUserAgentOverride", commands)
-        self.assertIn("Emulation.setDeviceMetricsOverride", commands)
-        self.assertIn("Emulation.setTimezoneOverride", commands)
-        self.assertIn("Emulation.setGeolocationOverride", commands)
-        self.assertIn("Browser.grantPermissions", commands)
-        self.assertIn("Page.addScriptToEvaluateOnNewDocument", commands)
+        proxy = {"ip": "203.0.113.8", "port": "8080", "user": "a@b", "pass": "p:q"}
+        current_ip = verify_proxy_endpoint(proxy, timeout=4, request_get=request_get)
+        self.assertEqual(current_ip, "198.51.100.12")
+        self.assertEqual(calls[0][1]["timeout"], 4)
+        self.assertIn("a%40b:p%3Aq@203.0.113.8:8080", calls[0][1]["proxies"]["https"])
+
+    def test_direct_endpoint_explicitly_bypasses_environment_proxy(self):
+        calls = []
+
+        def request_get(url, **kwargs):
+            calls.append((url, kwargs))
+            return FakeResponse()
+
+        self.assertEqual(verify_direct_endpoint(request_get=request_get), "198.51.100.12")
+        self.assertEqual(calls[0][1]["proxies"], {"http": "", "https": ""})
+
+    def test_old_spoof_keys_are_tolerated_but_removed(self):
+        obsolete = {
+            "fingerprint_protection": True,
+            "hardware_concurrency": 8,
+            "canvas_noise_seed": 1,
+            "webgl_noise_seed": 2,
+            "audio_noise_seed": 3,
+            "audio_noise": 0.1,
+            "webgl_vendor": "old vendor",
+            "webgl_renderer": "old renderer",
+        }
+        fingerprint = ensure_fingerprint_defaults(obsolete)
+        self.assertTrue(obsolete.keys().isdisjoint(fingerprint))
 
     def test_runtime_profile_migration_adds_environment_defaults(self):
         loaded = {"one": {"cookie_str": "cookie", "fingerprint": {"lang": "en-US"}}}
         runtime = build_runtime_profiles(loaded)
         fingerprint = runtime["one"]["config"]["fingerprint"]
-        self.assertEqual(fingerprint["webrtc_policy"], "controlled")
-        self.assertIn("canvas_noise_seed", fingerprint)
+        self.assertEqual(fingerprint["device_preset"], "desktop")
+        self.assertEqual(fingerprint["lang"], "en-US")
+        self.assertNotIn("canvas_noise_seed", fingerprint)
         self.assertIn("fingerprint", loaded["one"])
 
 

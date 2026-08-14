@@ -48,14 +48,23 @@ class ProfileLifecycle:
 
     def begin(self):
         with self._lock:
+            if (
+                self._automation_driver is not None
+                or self._automation_service is not None
+                or self._manual_driver is not None
+                or self._observer is not None
+                or self._owned_pids
+                or (
+                    self._startup_future is not None
+                    and hasattr(self._startup_future, "done")
+                    and not self._startup_future.done()
+                )
+            ):
+                raise RuntimeError("Cannot begin a new lifecycle while resources are still owned")
             self._generation += 1
             gen = self._generation
             self._cancel_event = threading.Event()
-            self._automation_driver = None
-            self._automation_service = None
-            self._manual_driver = None
             self._startup_future = None
-            self._owned_pids.clear()
             return gen
 
     def cancel(self):
@@ -121,6 +130,14 @@ class ProfileLifecycle:
         with self._lock:
             return self._manual_driver
 
+    def release_manual(self, driver):
+        """Release a manual driver only when it is still the registered instance."""
+        with self._lock:
+            if self._manual_driver is not driver:
+                return False
+            self._manual_driver = None
+            return True
+
     def set_startup_future(self, future):
         with self._lock:
             self._startup_future = future
@@ -132,6 +149,13 @@ class ProfileLifecycle:
     def set_observer(self, observer):
         with self._lock:
             self._observer = observer
+
+    def register_observer(self, gen, observer):
+        with self._lock:
+            if gen != self._generation or self._cancel_event.is_set():
+                return False
+            self._observer = observer
+            return True
 
     def get_observer(self):
         with self._lock:
@@ -166,13 +190,16 @@ class ProfileLifecycle:
                 or self._manual_driver is not None
             )
 
-    def clear_driver_refs(self):
-        """Clear driver/service refs without touching PIDs (for close/retry)."""
+    def detach_automation(self):
+        """Detach automation resources while preserving manual browser and observer."""
         with self._lock:
+            driver = self._automation_driver
+            service = self._automation_service
+            pids = set(self._owned_pids)
             self._automation_driver = None
             self._automation_service = None
-            self._manual_driver = None
-            self._observer = None
+            self._owned_pids.clear()
+        return driver, service, pids
 
     # -- gen-scoped cleanup (safe against races) --
 
@@ -235,15 +262,8 @@ class ProfileLifecycle:
         if svc is not None:
             _kill_service_process(svc)
 
-        for pid in pids:
-            ok, action = _kill_pid_with_validation(pid, kill_timeout)
-            if ok:
-                if action == "kill":
-                    report["pids_killed"] += 1
-                else:
-                    report["pids_terminated"] += 1
-            else:
-                report["errors"].append(f"pid {pid}: could not terminate")
+        # PID-only ownership is not strong enough to terminate safely after reuse.
+        # Driver/service shutdown above is authoritative; profile-aware fallback is handled by the caller.
 
         return report
 
@@ -288,15 +308,7 @@ class ProfileLifecycle:
         if svc is not None:
             _kill_service_process(svc)
 
-        for pid in pids:
-            ok, action = _kill_pid_with_validation(pid, kill_timeout)
-            if ok:
-                if action == "kill":
-                    report["pids_killed"] += 1
-                else:
-                    report["pids_terminated"] += 1
-            else:
-                report["errors"].append(f"pid {pid}: could not terminate")
+        # Never terminate from a bare PID; it may have been reused by an unrelated process.
 
         return report
 
@@ -316,53 +328,6 @@ class ProfileLifecycle:
                 pass
         if svc is not None:
             _kill_service_process(svc)
-        for pid in pids:
-            _force_kill_any(pid)
-
-
-def _kill_pid_with_validation(pid, kill_timeout=2):
-    """Kill PID after validating it belongs to the expected executable.
-    Avoids killing a reused PID that now belongs to a different process."""
-    if psutil is None:
-        return False, None
-    try:
-        proc = psutil.Process(pid)
-        if not proc.is_running():
-            return True, "gone"
-        proc.terminate()
-        try:
-            proc.wait(timeout=kill_timeout)
-            return True, "terminate"
-        except psutil.TimeoutExpired:
-            proc.kill()
-            try:
-                proc.wait(timeout=1)
-                return True, "kill"
-            except psutil.TimeoutExpired:
-                return False, None
-            except psutil.NoSuchProcess:
-                return True, "kill"
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-        return True, "gone"
-
-
-_kill_pid = _kill_pid_with_validation
-
-
-def _force_kill_any(pid):
-    if psutil is None:
-        return
-    try:
-        proc = psutil.Process(pid)
-        if proc.is_running():
-            proc.terminate()
-            try:
-                proc.wait(timeout=1)
-            except psutil.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=0.5)
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        pass
 
 
 def _kill_service_process(service):

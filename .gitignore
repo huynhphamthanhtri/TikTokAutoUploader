@@ -25,6 +25,7 @@ upload.log
 log_backup.txt
 updater_config.json
 upload_benchmarks.jsonl
+patchright_diagnostics/
 
 # User data
 Auto_Data/

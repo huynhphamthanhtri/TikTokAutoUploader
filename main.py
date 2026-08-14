@@ -4,10 +4,8 @@ import queue
 import json
 import shutil
 import requests
-import random
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 def app_base_dir():
     if getattr(sys, "frozen", False):
@@ -23,16 +21,6 @@ def bundled_base_dir():
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
-# Selenium Wire chỉ dùng khi bật debug request trace; runtime thường dùng Selenium chuẩn.
-from selenium import webdriver
-
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.keys import Keys
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import customtkinter as ctk
@@ -42,16 +30,26 @@ from app_ui import configure_ttk_styles, build_dashboard, classify_log_message
 from core_helpers import (
     parse_cookie,
     parse_proxy_string,
-    verify_proxy_ip,
-    is_driver_valid,
     is_file_stable,
-    clean_chrome_lock_files,
     normalize_profile_path,
     process_uses_profile,
-    classify_webdriver_error,
-    profile_driver_path,
-    clear_profile_directory,
     copy_video_atomically,
+)
+from browser_maintenance import (
+    FULL as BROWSER_MAINTENANCE_FULL,
+    QUICK as BROWSER_MAINTENANCE_QUICK,
+    SESSION as BROWSER_MAINTENANCE_SESSION,
+    adopt_legacy_owned_root,
+    create_owned_root,
+    maintain_browser,
+)
+import browser_patchright_glue as browser_glue
+from browser_patchright_glue import ProfileBusyError, SessionSetupError, SessionToken
+from patchright_profile_migration import (
+    MigrationState,
+    advance_migration,
+    cleanup_legacy_profile,
+    migration_status,
 )
 from config_store import (
     build_configs_payload,
@@ -61,14 +59,12 @@ from config_store import (
     build_runtime_profiles,
 )
 from browser_environment import (
-    apply_device_preset,
-    chrome_environment_arguments,
-    chrome_environment_preferences,
-    configure_driver_environment,
     ensure_fingerprint_defaults,
     geo_cache_is_current,
     proxy_cache_key,
     resolve_geoip,
+    verify_direct_endpoint,
+    verify_proxy_endpoint,
 )
 import youtube_monitor
 from youtube_monitor.activity import append_activity, clear_activity_log, get_activity_logs, get_activity_mtime, get_activity_stats, lookup_download
@@ -79,17 +75,9 @@ import logging
 import zipfile
 import time
 import threading
-from selenium.common.exceptions import (
-    InvalidSessionIdException,
-    SessionNotCreatedException,
-    TimeoutException,
-    NoSuchElementException,
-    WebDriverException
-)
 import signal
 import warnings
 import psutil
-from webdriver_manager.chrome import ChromeDriverManager
 
 # --- LICENSE IMPORTS ---
 import platform
@@ -120,169 +108,25 @@ CONFIGS_FILE = app_base_dir() / "configs.json"
 FAST_MODE = True
 FILE_STABLE_CHECKS = 2
 FILE_STABLE_INTERVAL = 0.15
-UPLOAD_READY_TIMEOUT = 180
 SMALL_WAIT = 0.5 
-PAGELOAD_TIMEOUT = 120 
-SCRIPT_TIMEOUT = 120
-UPLOAD_PROGRESS_WARN_AFTER = 12
-UPLOAD_STALL_TIMEOUT = 45
-UPLOAD_PHASE_STALL_TIMEOUT = 360
-UPLOAD_HARD_TIMEOUT = 540
-UPLOAD_STALL_POLL_INTERVAL = 0.05
-UPLOAD_POST_SENDKEYS_SETTLE_SECONDS = 0.15
-UPLOAD_SIGNAL_POLL_INTERVAL = 0.6
-NETWORK_READY_POLL_INTERVAL = 0.4
 ALL_OPTION = "Default"
 START_PROFILE_TIMEOUT = 180 
 DRIVER_INIT_RETRIES = 2 
 DRIVER_INIT_RETRY_DELAY = 1.0
-DRIVER_INIT_TIMEOUT = 60
-UPLOAD_CONTAINER_QUICK_WAIT = 1.2
 IDLE_SHUTDOWN_TIMEOUT = 0
 LIMIT_REACHED_SHUTDOWN_DELAY = 5
 MAX_STATUS_LOG_LINES = 1000
 MAX_IMPORTANT_LOG_LINES = 300
 TIKTOK_BASE_URL = "https://www.tiktok.com"
-TIKTOK_PRIME_URL = "https://www.tiktok.com/robots.txt"
 TIKTOK_UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center"
 FAILED_UPLOADS_LOG = app_base_dir() / "failed_uploads.log"
 UPLOAD_BENCHMARK_LOG = app_base_dir() / "upload_benchmarks.jsonl"
-BLOCK_AUX_RESOURCES = os.environ.get("TIKTOK_BLOCK_AUX_RESOURCES", "").strip().lower() in ("1", "true", "yes", "on")
-PROXY_OK_CACHE_TTL_SECONDS = 60 * 60
-BLOCKED_AUX_RESOURCE_PATTERNS = [
-    "*doubleclick.net/*",
-    "*googleadservices.com/*",
-    "*googlesyndication.com/*",
-    "*googletagmanager.com/*",
-    "*google-analytics.com/*",
-    "*facebook.com/tr/*",
-    "*bat.bing.com/*",
-    "*ads.linkedin.com/*",
-    "*scorecardresearch.com/*",
-    "*criteo.*",
-    "*criteo.com/*",
-    "*hotjar.com/*",
-    "*newrelic.com/*",
-    "*sentry.io/*",
-    "*cdn.segment.com/*",
-    "*segment.io/*",
-    "*amplitude.com/*",
-    "*mixpanel.com/*",
-]
 
 # =========================
 # FINGERPRINT CONFIG
 # =========================
-USER_AGENT_POOL = [
-    # Orbita bundled with the application is Chromium 123.
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-]
-
-WINDOW_SIZES = [
-    (1366, 768), (1440, 900), (1536, 864), (1920, 1080), (1280, 720),
-    (1600, 900), (1280, 800), (1440, 960), (1680, 1050),
-]
-
-WEBGL_VENDORS = [
-    ("Google Inc. (Intel)", "Intel Iris OpenGL Engine"),
-    ("Google Inc. (NVIDIA)", "NVIDIA GeForce RTX 4060 OpenGL Engine"),
-    ("Google Inc. (NVIDIA)", "NVIDIA GeForce RTX 3050 OpenGL Engine"),
-    ("Google Inc. (AMD)", "AMD Radeon RX 6600 OpenGL Engine"),
-    ("Google Inc. (Intel)", "Intel(R) UHD Graphics 620 OpenGL Engine"),
-    ("Google Inc. (NVIDIA)", "NVIDIA GeForce GTX 1660 Ti OpenGL Engine"),
-    ("Google Inc. (Intel)", "Intel(R) Iris(R) Xe Graphics OpenGL Engine"),
-    ("Google Inc. (NVIDIA)", "NVIDIA GeForce RTX 3060 OpenGL Engine"),
-]
-
-LANG_POOL = ["en-US", "en-GB", "en-AU", "en-CA", "en-IN", "en-NZ", "en-ZA", "en-SG"]
-
 def _generate_fingerprint(seed=None):
-    rng = random.Random()
-    rng.seed(seed or (str(time.time_ns()) + str(uuid.uuid4())))
-    w, h = rng.choice(WINDOW_SIZES)
-    ua = rng.choice(USER_AGENT_POOL)
-    lang = rng.choice(LANG_POOL)
-    cores = rng.choice([2, 4, 6, 8])
-    webgl_vendor, webgl_renderer = rng.choice(WEBGL_VENDORS)
-    canvas_noise = round(rng.uniform(0.0001, 0.002), 6)
-    return ensure_fingerprint_defaults({
-        "user_agent": ua,
-        "window_width": w,
-        "window_height": h,
-        "lang": lang,
-        "hardware_concurrency": cores,
-        "webgl_vendor": webgl_vendor,
-        "webgl_renderer": webgl_renderer,
-        "canvas_noise": canvas_noise,
-    }, seed=seed)
-
-def _apply_fingerprint_to_options(chrome_options, fp):
-    normalized = ensure_fingerprint_defaults(fp)
-    user_agent = normalized.get("user_agent") or USER_AGENT_POOL[0]
-    chrome_options.add_argument(f"--user-agent={user_agent}")
-    w = normalized.get("window_width", 1920)
-    h = normalized.get("window_height", 1080)
-    chrome_options.add_argument(f"--window-size={w},{h}")
-    lang = normalized.get("lang", "en-US")
-    chrome_options.add_argument(f"--lang={lang}")
-    chrome_options.add_argument(f"--accept-lang={lang}")
-
-FINGERPRINT_JS = r"""
-// Canvas noise
-(function() {
-    const originalGetContext = HTMLCanvasElement.prototype.getContext;
-    const canvasNoise = {CANVAS_NOISE};
-    HTMLCanvasElement.prototype.getContext = function(...args) {
-        const ctx = originalGetContext.apply(this, args);
-        if (ctx) {
-            const originalFillRect = ctx.fillRect;
-            ctx.fillRect = function(x, y, w, h) {
-                originalFillRect.call(this, x + canvasNoise, y + canvasNoise, w, h);
-            };
-            const originalGetImageData = ctx.getImageData;
-            ctx.getImageData = function(...args) {
-                const imgData = originalGetImageData.apply(this, args);
-                for (let i = 0; i < imgData.data.length; i += 4) {
-                    imgData.data[i] = Math.min(255, imgData.data[i] + (canvasNoise * 255));
-                }
-                return imgData;
-            };
-        }
-        return ctx;
-    };
-})();
-
-// WebGL spoof
-(function() {
-    const vendor = '{WEBGL_VENDOR}';
-    const renderer = '{WEBGL_RENDERER}';
-    const getExt = HTMLCanvasElement.prototype.getContext;
-    const origGetParameter = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function(param) {
-        if (param === 37445) return vendor;
-        if (param === 37446) return renderer;
-        return origGetParameter.call(this, param);
-    };
-})();
-
-// Navigator overrides
-Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => {HARDWARE_CONCURRENCY} });
-
-// Languages
-Object.defineProperty(navigator, 'languages', { get: () => ['{LANG}'] });
-Object.defineProperty(navigator, 'language', { get: () => '{LANG}' });
-"""
-
-def _inject_fingerprint_js(driver, profile_name):
-    fp = profiles.get(profile_name, {}).get('config', {}).get('fingerprint', {})
-    if not fp:
-        return
-    try:
-        configure_driver_environment(driver, fp)
-        update_status(f"[{profile_name}] [DEBUG] Đã inject fingerprint JS")
-    except Exception as e:
-        update_status(f"[{profile_name}] [WARN] Lỗi inject fingerprint: {e}")
-
+    return ensure_fingerprint_defaults({"lang": "en-US"}, seed=seed)
 
 def _refresh_profile_geoip(profile_name, config, proxy_data, force=False):
     """Resolve proxy location only when its identity changed or cache is missing."""
@@ -318,28 +162,6 @@ def _refresh_profile_geoip(profile_name, config, proxy_data, force=False):
         update_status(f"[{profile_name}] [WARN] Không lấy được GeoIP qua proxy: {error}")
         return False
 
-def _enable_aux_resource_blocking(driver, profile_name):
-    if not BLOCK_AUX_RESOURCES:
-        return False
-    try:
-        driver.execute_cdp_cmd("Network.enable", {})
-        driver.execute_cdp_cmd("Network.setBlockedURLs", {"urls": BLOCKED_AUX_RESOURCE_PATTERNS})
-        update_status(f"[{profile_name}] [DEBUG] Đã bật block resource phụ: {len(BLOCKED_AUX_RESOURCE_PATTERNS)} patterns")
-        return True
-    except Exception as e:
-        update_status(f"[{profile_name}] [WARN] Không bật được block resource phụ: {e}")
-        return False
-
-def _is_proxy_init_error(error):
-    text = str(error).lower()
-    return any(token in text for token in (
-        "proxy mismatch",
-        "proxy sai ip",
-        "proxy lỗi",
-        "proxy error",
-        "proxy",
-    ))
-
 # =========================
 # CẤU HÌNH LICENSE
 # =========================
@@ -363,7 +185,51 @@ projects = {}
 running_profiles = set()
 profile_operation_locks = {}
 
-from browser_lifecycle import get_lifecycle, _kill_service_process
+from browser_lifecycle import get_lifecycle, remove_lifecycle
+
+
+def _browser_session_valid(session):
+    if isinstance(session, SessionToken):
+        try:
+            return session.is_alive()
+        except Exception:
+            return False
+    return False
+
+
+def _sync_patchright_migration(config):
+    profile_path = config.get('browser_profile_path')
+    if not profile_path:
+        return None
+    status = migration_status(profile_path)
+    config['migration_state'] = status['state']
+    return status
+
+
+def _advance_patchright_migration(config, expected_state, new_state):
+    status = _sync_patchright_migration(config)
+    if status and status['state'] == expected_state:
+        status = advance_migration(config['browser_profile_path'], new_state)
+        config['migration_state'] = status['state']
+    return status
+
+
+def _cleanup_legacy_profile_after_verified_upload(profile_name, config):
+    status = _sync_patchright_migration(config)
+    if not status or status['state'] not in {
+        MigrationState.UPLOAD_VERIFIED.value,
+        MigrationState.LEGACY_CLEANUP_PENDING.value,
+    }:
+        return status
+    profile_path = Path(config['browser_profile_path'])
+    status = cleanup_legacy_profile(
+        profile_path,
+        profile_path.parent,
+        explicit_confirmation=True,
+    )
+    config['migration_state'] = status['state']
+    update_status(f"[{profile_name}] Đã xóa profile Orbita cũ sau khi xác minh upload Patchright.")
+    return status
 
 
 def _profile_operation_lock(profile_name):
@@ -373,29 +239,17 @@ def _profile_operation_lock(profile_name):
         profile_operation_locks[profile_name] = lock
     return lock
 
-# --- KHÓA AN TOÀN CHO DRIVER (FIX LỖI ACCESS DENIED) ---
-driver_install_lock = threading.Lock()
-GLOBAL_DRIVER_PATH = None  # Biến lưu đường dẫn driver để tránh cài đặt lại nhiều lần
-GLOBAL_CHROME_PATH = None
-GLOBAL_BROWSER_MODE = None
-GLOBAL_IS_ORBITA = None
-PROXY_OK_CACHE = {}
 UPLOAD_EVENT_TIMINGS = {}
 UPLOAD_TERMINAL_RESULTS = {}
 PENDING_VIDEO_PATHS = set()
 upload_benchmark_lock = threading.Lock()
 video_event_lock = threading.Lock()
-LOCAL_DRIVER_CACHE_DIR = app_base_dir() / "temp_dl" / "driver_cache"
-LOCAL_CHROMEDRIVER_PATH = LOCAL_DRIVER_CACHE_DIR / "chromedriver.exe"
-LOCAL_DRIVER_METADATA_PATH = LOCAL_DRIVER_CACHE_DIR / "metadata.json"
 
 
 class TikTokLoginRequiredError(Exception):
     """Raised when TikTok explicitly redirects the browser to its login page."""
 
 
-class PostRejectedError(Exception):
-    """Raised when TikTok explicitly rejects a publish request."""
 # -------------------------------------------------------
 
 # Cấu hình logging
@@ -407,33 +261,6 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
-
-def _wait_document_ready(driver, timeout=6.0, poll_interval=0.1):
-    deadline = time.perf_counter() + timeout
-    while time.perf_counter() < deadline:
-        try:
-            state = driver.execute_script("return document.readyState")
-            if state in ('interactive', 'complete'):
-                return True
-        except Exception:
-            pass
-        time.sleep(poll_interval)
-    return False
-
-def _is_executable_file_ready(path):
-    try:
-        return bool(path) and os.path.isfile(path) and os.path.getsize(path) > 0
-    except Exception:
-        return False
-
-def _safe_status(message):
-    try:
-        update_status(message)
-    except Exception:
-        try:
-            logging.warning(message)
-        except Exception:
-            pass
 
 def _timing_log(profile_name, label, start_ts):
     update_status(f"[{profile_name}] [TIMING] {label}: {time.perf_counter() - start_ts:.2f}s")
@@ -500,50 +327,6 @@ def _write_upload_benchmark(profile_name, video_path, success, reason, phases, m
         UPLOAD_TERMINAL_RESULTS[key] = dict(row)
         return row
 
-def _proxy_cache_key(profile_name, proxy_data):
-    if not proxy_data:
-        return None
-    return (
-        profile_name,
-        str(proxy_data.get('ip') or ''),
-        str(proxy_data.get('port') or ''),
-        str(proxy_data.get('user') or ''),
-    )
-
-def _get_cached_proxy_ok(profile_name, proxy_data):
-    key = _proxy_cache_key(profile_name, proxy_data)
-    if not key:
-        return None
-    cached = PROXY_OK_CACHE.get(key)
-    if not cached:
-        return None
-    age = time.time() - cached.get('checked_at', 0)
-    if age > PROXY_OK_CACHE_TTL_SECONDS:
-        PROXY_OK_CACHE.pop(key, None)
-        return None
-    return cached
-
-def _remember_proxy_ok(profile_name, proxy_data, current_ip):
-    key = _proxy_cache_key(profile_name, proxy_data)
-    if key:
-        PROXY_OK_CACHE[key] = {'ip': current_ip, 'checked_at': time.time()}
-
-def _forget_proxy_ok(profile_name, proxy_data):
-    key = _proxy_cache_key(profile_name, proxy_data)
-    if key:
-        PROXY_OK_CACHE.pop(key, None)
-
-def _parse_major_version(version_text):
-    if not version_text:
-        return None
-    match = re.search(r"(\d+)\.", str(version_text))
-    if not match:
-        return None
-    try:
-        return int(match.group(1))
-    except Exception:
-        return None
-
 def _bundled_browser_dir():
     root_dir = app_base_dir() / "Browser"
     if root_dir.exists():
@@ -553,466 +336,19 @@ def _bundled_browser_dir():
         return internal_dir
     return root_dir
 
-def _find_bundled_chrome_executable():
-    global GLOBAL_CHROME_PATH, GLOBAL_BROWSER_MODE, GLOBAL_IS_ORBITA
-    if GLOBAL_CHROME_PATH and _is_executable_file_ready(GLOBAL_CHROME_PATH):
-        return GLOBAL_CHROME_PATH
-    browser_dir = _bundled_browser_dir()
-    candidates = [
-        (browser_dir / "orbita-browser-123" / "chrome.exe", "bundled Orbita", True),
-        (browser_dir / "chrome.exe", "bundled Chrome", False),
-        (browser_dir / "chrome-win64" / "chrome.exe", "bundled Chrome for Testing", False),
-        (browser_dir / "chrome" / "chrome.exe", "bundled Chrome", False),
-    ]
-    for path, mode, is_orbita in candidates:
-        if _is_executable_file_ready(path):
-            GLOBAL_CHROME_PATH = str(path)
-            GLOBAL_BROWSER_MODE = mode
-            GLOBAL_IS_ORBITA = is_orbita
-            return GLOBAL_CHROME_PATH
-    return None
-
-def _find_bundled_chromedriver_executable():
-    browser_dir = _bundled_browser_dir()
-    candidates = [
-        browser_dir / "chromedriver.exe",
-        browser_dir / "chromedriver-win64" / "chromedriver.exe",
-        browser_dir / "chromedriver" / "chromedriver.exe",
-    ]
-    for path in candidates:
-        if _is_executable_file_ready(path):
-            return str(path)
-    return None
-
-
-def _profile_driver_path(profile_name):
-    config = profiles[profile_name]['config']
-    path = profile_driver_path(config.get('chrome_profile', ''), config.get('chromedriver_path', ''))
-    config['chromedriver_path'] = str(path)
-    return path
-
-
-def _ensure_profile_driver(profile_name):
-    target = _profile_driver_path(profile_name)
-    chrome_path, chrome_version, chrome_major = _get_chrome_version()
-    if _is_executable_file_ready(target) and _is_chromedriver_compatible(target, chrome_major):
-        return str(target)
-
-    source = _find_bundled_chromedriver_executable()
-    if not source or not _is_chromedriver_compatible(source, chrome_major):
-        source = None
-        if GLOBAL_DRIVER_PATH and _is_chromedriver_compatible(GLOBAL_DRIVER_PATH, chrome_major):
-            source = GLOBAL_DRIVER_PATH
-    if not source:
-        with driver_install_lock:
-            source = resolve_chromedriver_path()
-    if not source or not _is_chromedriver_compatible(source, chrome_major):
-        raise FileNotFoundError(
-            f"Không tìm thấy ChromeDriver tương thích cho profile {profile_name} "
-            f"(Chrome={chrome_version or chrome_path or 'unknown'})"
-        )
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temp_target = target.with_suffix('.tmp.exe')
+def _proxy_endpoint_preflight(profile_name, proxy_data):
+    result = {'proxy_exit_ip': None, 'direct_ip': None}
     try:
-        shutil.copy2(source, temp_target)
-        os.replace(temp_target, target)
-    finally:
-        try:
-            if temp_target.exists():
-                temp_target.unlink()
-        except Exception:
-            pass
-    update_status(f"[{profile_name}] [DEBUG] ChromeDriver riêng: {target}")
-    return str(target)
-
-def _find_preferred_chrome_executable():
-    return _find_bundled_chrome_executable() or _find_chrome_executable()
-
-def _using_bundled_chrome():
-    return bool(_find_bundled_chrome_executable())
-
-def _using_orbita_browser():
-    _find_bundled_chrome_executable()
-    if GLOBAL_IS_ORBITA is not None:
-        return GLOBAL_IS_ORBITA
-    return "orbita-browser" in (GLOBAL_CHROME_PATH or "").lower()
-
-def _browser_mode_label():
-    if _find_bundled_chrome_executable():
-        return GLOBAL_BROWSER_MODE or "bundled Chrome"
-    return "system Google Chrome"
-
-def _find_chrome_executable():
-    candidates = []
+        result['proxy_exit_ip'] = verify_proxy_endpoint(proxy_data)
+        update_status(f"[{profile_name}] [DEBUG] Proxy endpoint preflight OK: {result['proxy_exit_ip']}")
+    except Exception as error:
+        update_status(f"[{profile_name}] [WARN] Proxy endpoint preflight lỗi: {type(error).__name__}")
     try:
-        import winreg
-        for root_key in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
-            try:
-                with winreg.OpenKey(root_key, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe") as key:
-                    value, _ = winreg.QueryValueEx(key, None)
-                    if value:
-                        candidates.append(value)
-            except Exception:
-                pass
-    except Exception:
-        pass
+        result['direct_ip'] = verify_direct_endpoint()
+    except Exception as error:
+        update_status(f"[{profile_name}] [WARN] Direct IP baseline lỗi: {type(error).__name__}")
+    return result
 
-    for env_name in ("ProgramFiles", "ProgramFiles(x86)", "LocalAppData"):
-        base = os.environ.get(env_name)
-        if base:
-            candidates.append(os.path.join(base, "Google", "Chrome", "Application", "chrome.exe"))
-
-    for path in candidates:
-        try:
-            if path and os.path.isfile(path):
-                return path
-        except Exception:
-            pass
-    return None
-
-def _get_chrome_version():
-    chrome_path = _find_preferred_chrome_executable()
-    if not chrome_path:
-        return None, None, None
-    version_file = Path(chrome_path).parent / 'version'
-    if version_file.is_file():
-        try:
-            chrome_version = version_file.read_text(encoding='utf-8', errors='ignore').strip()
-            if chrome_version:
-                return chrome_path, chrome_version, _parse_major_version(chrome_version)
-        except Exception:
-            pass
-    try:
-        result = subprocess.run(
-            [chrome_path, "--version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=8,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        output = (result.stdout or result.stderr or "").strip()
-        match = re.search(r"(\d+\.\d+\.\d+\.\d+)", output)
-        chrome_version = match.group(1) if match else output
-        return chrome_path, chrome_version, _parse_major_version(chrome_version)
-    except Exception:
-        return chrome_path, None, None
-
-def _get_chromedriver_version(driver_path):
-    if not _is_executable_file_ready(driver_path):
-        return None, None
-    try:
-        result = subprocess.run(
-            [str(driver_path), "--version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=8,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        output = (result.stdout or result.stderr or "").strip()
-        match = re.search(r"ChromeDriver\s+(\d+\.\d+\.\d+\.\d+)", output, re.IGNORECASE)
-        driver_version = match.group(1) if match else output
-        return driver_version, _parse_major_version(driver_version)
-    except Exception:
-        return None, None
-
-def _is_chromedriver_compatible(driver_path, chrome_major=None):
-    if not _is_executable_file_ready(driver_path):
-        return False
-    if chrome_major is None:
-        return True
-    _driver_version, driver_major = _get_chromedriver_version(driver_path)
-    return driver_major == chrome_major
-
-def _write_driver_metadata(driver_path, chrome_path=None, chrome_version=None, chrome_major=None):
-    try:
-        driver_version, driver_major = _get_chromedriver_version(driver_path)
-        metadata = {
-            "chrome_path": chrome_path,
-            "chrome_version": chrome_version,
-            "chrome_major": chrome_major,
-            "driver_version": driver_version,
-            "driver_major": driver_major,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        os.makedirs(LOCAL_DRIVER_CACHE_DIR, exist_ok=True)
-        with open(LOCAL_DRIVER_METADATA_PATH, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-def _copy_driver_to_local_cache(src_path, chrome_path=None, chrome_version=None, chrome_major=None):
-    os.makedirs(LOCAL_DRIVER_CACHE_DIR, exist_ok=True)
-    if os.path.abspath(str(src_path)) != os.path.abspath(str(LOCAL_CHROMEDRIVER_PATH)):
-        shutil.copy2(src_path, LOCAL_CHROMEDRIVER_PATH)
-    _write_driver_metadata(LOCAL_CHROMEDRIVER_PATH, chrome_path, chrome_version, chrome_major)
-    return LOCAL_CHROMEDRIVER_PATH
-
-def _invalidate_chromedriver_cache(reason=""):
-    global GLOBAL_DRIVER_PATH
-    GLOBAL_DRIVER_PATH = None
-    if reason:
-        _safe_status(f"[Driver] Làm mới ChromeDriver cache: {reason}")
-    for path in (LOCAL_CHROMEDRIVER_PATH, LOCAL_DRIVER_METADATA_PATH):
-        try:
-            if os.path.isfile(path):
-                os.remove(path)
-        except Exception:
-            pass
-
-def _is_driver_version_mismatch_error(exc):
-    text = str(exc).lower()
-    mismatch_markers = (
-        "this version of chromedriver",
-        "only supports chrome version",
-        "current browser version is",
-        "chromedriver only supports chrome version",
-    )
-    return any(marker in text for marker in mismatch_markers)
-
-def _scan_existing_wdm_chromedriver(chrome_major=None):
-    base_dir = Path.home() / ".wdm" / "drivers" / "chromedriver"
-    if not os.path.isdir(base_dir):
-        return None
-
-    candidates = []
-    try:
-        for root_dir, _dirs, files in os.walk(base_dir):
-            for file_name in files:
-                if file_name.lower() == "chromedriver.exe":
-                    full_path = os.path.join(root_dir, file_name)
-                    try:
-                        mtime = os.path.getmtime(full_path)
-                    except Exception:
-                        mtime = 0
-                    if chrome_major is not None and not _is_chromedriver_compatible(full_path, chrome_major):
-                        continue
-                    candidates.append((mtime, full_path))
-    except Exception:
-        return None
-
-    if not candidates:
-        return None
-    candidates.sort(reverse=True)
-    return candidates[0][1]
-
-def resolve_chromedriver_path():
-    global GLOBAL_DRIVER_PATH
-
-    bundled_driver = _find_bundled_chromedriver_executable()
-    if bundled_driver:
-        GLOBAL_DRIVER_PATH = bundled_driver
-        return GLOBAL_DRIVER_PATH
-
-    chrome_path, chrome_version, chrome_major = _get_chrome_version()
-
-    if _is_chromedriver_compatible(GLOBAL_DRIVER_PATH, chrome_major):
-        return GLOBAL_DRIVER_PATH
-    if _is_executable_file_ready(GLOBAL_DRIVER_PATH):
-        GLOBAL_DRIVER_PATH = None
-
-    if _is_chromedriver_compatible(LOCAL_CHROMEDRIVER_PATH, chrome_major):
-        GLOBAL_DRIVER_PATH = LOCAL_CHROMEDRIVER_PATH
-        return GLOBAL_DRIVER_PATH
-    if _is_executable_file_ready(LOCAL_CHROMEDRIVER_PATH):
-        _invalidate_chromedriver_cache(f"ChromeDriver local không khớp Chrome major {chrome_major}")
-
-    os.makedirs(LOCAL_DRIVER_CACHE_DIR, exist_ok=True)
-
-    try:
-        if os.path.isdir(LOCAL_DRIVER_CACHE_DIR):
-            for f in os.listdir(LOCAL_DRIVER_CACHE_DIR):
-                fp = os.path.join(LOCAL_DRIVER_CACHE_DIR, f)
-                try:
-                    if os.path.isfile(fp):
-                        os.remove(fp)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    installed_path = None
-    install_error = None
-    try:
-        installed_path = _scan_existing_wdm_chromedriver(chrome_major)
-        if not installed_path:
-            installed_path = ChromeDriverManager().install()
-    except Exception as e:
-        install_error = e
-        installed_path = _scan_existing_wdm_chromedriver(chrome_major)
-
-    if _is_chromedriver_compatible(installed_path, chrome_major):
-        try:
-            GLOBAL_DRIVER_PATH = _copy_driver_to_local_cache(installed_path, chrome_path, chrome_version, chrome_major)
-            return GLOBAL_DRIVER_PATH
-        except Exception:
-            GLOBAL_DRIVER_PATH = installed_path
-            _write_driver_metadata(GLOBAL_DRIVER_PATH, chrome_path, chrome_version, chrome_major)
-            return GLOBAL_DRIVER_PATH
-    if _is_executable_file_ready(installed_path):
-        driver_version, driver_major = _get_chromedriver_version(installed_path)
-        raise RuntimeError(
-            f"ChromeDriver không khớp Chrome. Chrome major={chrome_major}, "
-            f"driver={driver_version or installed_path}, driver major={driver_major}"
-        )
-
-    if install_error:
-        raise install_error
-    raise FileNotFoundError("Không tìm thấy chromedriver khả dụng")
-
-def _prime_tiktok_domain(driver, profile_name):
-    driver.get(TIKTOK_PRIME_URL)
-    _wait_document_ready(driver, timeout=4.0)
-
-def _build_requests_proxy_config(config):
-    if not config.get('use_proxy', False):
-        return None
-    proxy_data = parse_proxy_string(config.get('proxy_string', ''))
-    if not proxy_data:
-        return None
-    proxy_url = f"http://{proxy_data['user']}:{proxy_data['pass']}@{proxy_data['ip']}:{proxy_data['port']}"
-    return {'http': proxy_url, 'https': proxy_url}
-
-def _proxy_extension_dir(config, proxy_data):
-    profile_path = Path(config['chrome_profile'])
-    ext_key = f"{proxy_data['ip']}_{proxy_data['port']}"
-    safe_key = re.sub(r'[^A-Za-z0-9_.-]+', '_', ext_key)
-    return profile_path.parent / f"ProxyExtension_{safe_key}"
-
-def _write_proxy_auth_extension(config, proxy_data):
-    ext_dir = _proxy_extension_dir(config, proxy_data)
-    os.makedirs(ext_dir, exist_ok=True)
-
-    manifest = {
-        "name": "TikTok Auto Proxy Auth",
-        "version": "1.0",
-        "manifest_version": 3,
-        "permissions": ["proxy", "webRequest", "webRequestAuthProvider", "storage"],
-        "host_permissions": ["<all_urls>"],
-        "background": {"service_worker": "background.js"}
-    }
-    background = f'''const proxyConfig = {{
-    mode: "fixed_servers",
-    rules: {{
-        singleProxy: {{
-            scheme: "http",
-            host: "{proxy_data['ip']}",
-            port: parseInt({proxy_data['port']})
-        }},
-        bypassList: ["localhost", "127.0.0.1"]
-    }}
-}};
-
-function recordState(update) {{
-    chrome.storage.local.set(Object.assign({{ updatedAt: Date.now() }}, update));
-}}
-
-chrome.proxy.settings.set({{value: proxyConfig, scope: "regular"}}, function() {{
-    recordState({{
-        proxySet: true,
-        proxyHost: "{proxy_data['ip']}",
-        proxyPort: "{proxy_data['port']}",
-        lastError: chrome.runtime.lastError ? chrome.runtime.lastError.message : ""
-    }});
-}});
-
-chrome.webRequest.onAuthRequired.addListener(
-    function(details) {{
-        recordState({{
-            lastAuthAt: Date.now(),
-            lastAuthUrl: details.url || "",
-            isProxy: !!details.isProxy
-        }});
-        return {{
-            authCredentials: {{username: "{proxy_data['user']}", password: "{proxy_data['pass']}"}}
-        }};
-    }},
-    {{urls: ["<all_urls>"]}},
-    ["blocking"]
-);
-'''
-    with open(ext_dir / "manifest.json", "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False)
-    with open(ext_dir / "background.js", "w", encoding="utf-8") as f:
-        f.write(background)
-    return ext_dir
-
-def _apply_chrome_proxy_options(chrome_options, config, proxy_data):
-    if not proxy_data:
-        return None
-    if proxy_data.get('user') and proxy_data.get('pass'):
-        if _using_orbita_browser():
-            chrome_options.add_argument(f"--proxy-server=http://{proxy_data['ip']}:{proxy_data['port']}")
-            chrome_options.add_argument(f"--host-resolver-rules=MAP * 0.0.0.0 , EXCLUDE {proxy_data['ip']}")
-            chrome_options.add_argument(f"--gologing_proxy_server_username={proxy_data['user']}")
-            chrome_options.add_argument(f"--gologing_proxy_server_password={proxy_data['pass']}")
-            return "orbita-proxy-auth"
-        ext_dir = _write_proxy_auth_extension(config, proxy_data)
-        chrome_options.add_argument(f"--disable-extensions-except={ext_dir}")
-        chrome_options.add_argument(f"--load-extension={ext_dir}")
-        return str(ext_dir)
-    chrome_options.add_argument(f"--proxy-server=http://{proxy_data['ip']}:{proxy_data['port']}")
-    return None
-
-def _is_google_chrome_driver(driver):
-    try:
-        product = driver.execute_cdp_cmd('Browser.getVersion', {}).get('product', '')
-        return str(product).startswith('Chrome/')
-    except Exception:
-        return False
-
-def _has_extension_target(driver):
-    try:
-        targets = driver.execute_cdp_cmd('Target.getTargets', {}).get('targetInfos', [])
-        return any(str(t.get('url', '')).startswith('chrome-extension://') for t in targets)
-    except Exception:
-        return False
-
-def _warn_if_auth_extension_blocked(profile_name, driver, proxy_data):
-    if not proxy_data or not proxy_data.get('user') or not proxy_data.get('pass'):
-        return
-    if _using_orbita_browser():
-        update_status(f"[{profile_name}] [DEBUG] Orbita proxy auth flags đang được sử dụng.")
-        return
-    if _has_extension_target(driver):
-        update_status(f"[{profile_name}] [DEBUG] Proxy auth extension đã được Chrome load.")
-        return
-    if not _using_bundled_chrome() and _is_google_chrome_driver(driver):
-        update_status(
-            f"[{profile_name}] [WARN] Google Chrome hiện tại có thể chặn --load-extension; "
-            "proxy auth extension có thể không hoạt động. Nên dùng proxy whitelist/no-auth."
-        )
-    elif _using_bundled_chrome():
-        update_status(f"[{profile_name}] [WARN] Chưa phát hiện proxy auth extension trong Chrome target list; sẽ xác nhận bằng bước check IP.")
-
-def _build_requests_session_from_driver(driver, config):
-    session = requests.Session()
-    proxies = _build_requests_proxy_config(config)
-    if proxies:
-        session.proxies.update(proxies)
-
-    user_agent = None
-    try:
-        user_agent = driver.execute_script("return navigator.userAgent")
-        if user_agent:
-            session.headers['User-Agent'] = user_agent
-    except Exception:
-        pass
-
-    try:
-        for cookie in driver.get_cookies():
-            session.cookies.set(
-                cookie.get('name'),
-                cookie.get('value'),
-                domain=cookie.get('domain'),
-                path=cookie.get('path', '/'),
-            )
-    except Exception:
-        pass
-
-    return session, user_agent, proxies
 
 def _append_failed_upload_log(profile_name, file_name, reason, outcome='failed'):
     try:
@@ -1054,76 +390,43 @@ def _get_cookie_hash(cookie_str):
         return None
     return hashlib.sha256(normalized.encode("utf-8", errors="ignore")).hexdigest()
 
-def _cookie_metadata_matches(config):
-    cookie_hash = _get_cookie_hash(config.get("cookie_str", ""))
-    if not cookie_hash:
-        return False
-    return (
-        config.get('cookie_hash') == cookie_hash and
-        os.path.abspath(str(config.get('cookies_last_injected_profile_path', ''))) == os.path.abspath(str(config.get('chrome_profile', '')))
-    )
-
 def _save_cookie_injection_metadata(profile_name, cookie_str):
     try:
         config = profiles[profile_name]['config']
         config['cookie_hash'] = _get_cookie_hash(cookie_str)
         config['cookies_last_injected_at'] = datetime.now(timezone.utc).isoformat()
-        config['cookies_last_injected_profile_path'] = config.get('chrome_profile', '')
+        config['cookies_last_injected_profile_path'] = browser_glue.active_profile_path(config)
         save_configs()
     except Exception:
         pass
 
-def _has_tiktok_auth_cookie(driver):
-    try:
-        names = {str(cookie.get('name', '')).lower() for cookie in driver.get_cookies()}
-        auth_names = {'sessionid', 'sessionid_ss', 'sid_tt', 'sid_guard', 'uid_tt', 'uid_tt_ss'}
-        return bool(names & auth_names)
-    except Exception:
-        return False
-
-def _has_upload_page_signal(driver):
-    selectors = (
-        "div[data-e2e='select_video_container']",
-        "input[type='file']",
-        "div[data-e2e='upload-card']",
-        "div[data-e2e='video-caption-editor']",
-        "button[data-e2e='post_video_button']",
-    )
-    for selector in selectors:
-        try:
-            for elem in driver.find_elements(By.CSS_SELECTOR, selector):
-                try:
-                    if elem.is_displayed():
-                        return True
-                except Exception:
-                    return True
-        except Exception:
-            continue
-    return False
-
-
-def _find_running_profile_with_same_data_dir(profile_name):
-    profile = profiles.get(profile_name, {})
-    target = normalize_profile_path(profile.get('config', {}).get('chrome_profile', ''))
+def _find_profile_with_data_dir(profile_path, exclude_name=None):
+    target = normalize_profile_path(profile_path)
     if not target:
         return None
     for other_name, other in profiles.items():
-        if other_name == profile_name or not other.get('running', False):
+        if other_name == exclude_name:
             continue
-        other_path = normalize_profile_path(other.get('config', {}).get('chrome_profile', ''))
+        other_path = normalize_profile_path(browser_glue.active_profile_path(other.get('config', {})))
         if other_path == target:
             return other_name
     return None
 
 
+def _find_profile_with_same_data_dir(profile_name):
+    profile = profiles.get(profile_name, {})
+    profile_path = browser_glue.active_profile_path(profile.get('config', {}))
+    return _find_profile_with_data_dir(profile_path, exclude_name=profile_name)
+
+
 def _profile_browser_process_count(profile_name):
-    profile_path = profiles.get(profile_name, {}).get('config', {}).get('chrome_profile', '')
+    profile_path = browser_glue.active_profile_path(profiles.get(profile_name, {}).get('config', {}))
     count = 0
     try:
         for proc in psutil.process_iter(['name', 'cmdline']):
             try:
                 name = str(proc.info.get('name') or '').lower()
-                if name in ('chrome.exe', 'chromedriver.exe', 'chrome', 'chromedriver') and process_uses_profile(
+                if name in ('chrome.exe', 'chrome') and process_uses_profile(
                     proc.info.get('cmdline'), profile_path
                 ):
                     count += 1
@@ -1134,208 +437,88 @@ def _profile_browser_process_count(profile_name):
     return count
 
 
-def _log_webdriver_failure(profile_name, driver, error, stage, video_name=''):
-    error_kind = classify_webdriver_error(error)
-    current_url = '<unavailable>'
-    browser_version = ''
-    driver_pid = None
-    try:
-        current_url = driver.current_url or '<empty>'
-    except Exception:
-        pass
-    try:
-        browser_version = str((driver.capabilities or {}).get('browserVersion', ''))
-    except Exception:
-        pass
-    try:
-        driver_pid = driver.service.process.pid
-    except Exception:
-        pass
-    try:
-        memory_percent = psutil.virtual_memory().percent
-        cpu_percent = psutil.cpu_percent(interval=None)
-    except Exception:
-        memory_percent = cpu_percent = 'unknown'
-    process_count = _profile_browser_process_count(profile_name)
-    detail = (
-        f"[{profile_name}] [ERROR] WebDriver stage={stage}; kind={error_kind}; "
-        f"exception={type(error).__name__}; message={error}; video={video_name or '-'}; "
-        f"url={current_url}; browser={browser_version or 'unknown'}; driver_pid={driver_pid or 'unknown'}; "
-        f"profile_processes={process_count}; ram={memory_percent}%; cpu={cpu_percent}%"
-    )
-    logging.warning(detail)
-    update_status(detail)
-    return error_kind
-
-def _wait_for_upload_page_signal(driver, timeout=5.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if _has_upload_page_signal(driver):
-            return True
-        time.sleep(0.25)
-    return False
-
-def _inject_cookies(driver, cookies):
-    success = 0
-    for cookie in cookies:
-        try:
-            driver.add_cookie(cookie)
-            success += 1
-        except Exception:
-            pass
-    return success
-
-def _prepare_tiktok_cookies(driver, profile_name, config, require_upload_ready=False):
-    cookie_str = config.get("cookie_str", "")
-    cookies = parse_cookie(cookie_str)
-    if not cookies:
-        _set_profile_ui(profile_name, login='Chưa có cookie')
-        return False
-
-    metadata_matches = _cookie_metadata_matches(config)
-    if require_upload_ready and metadata_matches:
-        try:
-            driver.get(TIKTOK_UPLOAD_URL)
-            _wait_document_ready(driver, timeout=3.0)
-            if metadata_matches and _wait_for_upload_page_signal(driver, timeout=3.0):
-                _set_profile_ui(profile_name, login='Đã đăng nhập')
-                update_status(f"[{profile_name}] Đã đăng nhập TikTok, bỏ qua nạp cookie.")
-                return True
-            if "/login" in (driver.current_url or "").lower():
-                _set_profile_ui(profile_name, login='Đang nạp lại')
-                update_status(f"[{profile_name}] TikTok yêu cầu đăng nhập lại, đang nạp lại cookie.")
-            else:
-                _set_profile_ui(profile_name, login='Đã có cookie')
-                update_status(f"[{profile_name}] Upload page chưa sẵn sàng nhanh, giữ cookie hiện tại và tiếp tục mở trang upload.")
-                return False
-        except Exception:
-            _set_profile_ui(profile_name, login='Đã có cookie')
-            update_status(f"[{profile_name}] Chưa xác nhận được upload page nhanh, giữ cookie hiện tại và thử mở lại trang upload.")
-            return False
-    else:
-        try:
-            driver.get(TIKTOK_BASE_URL)
-            _wait_document_ready(driver, timeout=3.0)
-            if metadata_matches and _has_tiktok_auth_cookie(driver):
-                _set_profile_ui(profile_name, login='Đã có cookie')
-                update_status(f"[{profile_name}] Đã có cookie TikTok trong Chrome profile, bỏ qua nạp cookie.")
-                return False
-        except Exception:
-            pass
-
-    if metadata_matches:
-        _set_profile_ui(profile_name, login='Đang nạp lại')
-        update_status(f"[{profile_name}] Không xác nhận được đăng nhập TikTok, đang nạp lại cookie.")
-    else:
-        _set_profile_ui(profile_name, login='Đang nạp cookie')
-        update_status(f"[{profile_name}] Phát hiện cookie mới hoặc profile đổi, đang nạp cookie.")
-
-    driver.get(TIKTOK_BASE_URL)
-    _wait_document_ready(driver, timeout=3.0)
-    success = _inject_cookies(driver, cookies)
-    if success:
-        _save_cookie_injection_metadata(profile_name, cookie_str)
-        _set_profile_ui(profile_name, login='Đã nạp cookie')
-        update_status(f"[{profile_name}] Đã nạp {success}/{len(cookies)} cookie và lưu trạng thái.")
-        if require_upload_ready:
-            try:
-                driver.get(TIKTOK_UPLOAD_URL)
-                _wait_document_ready(driver, timeout=3.0)
-                if "/login" in (driver.current_url or "").lower():
-                    _set_profile_ui(profile_name, login='Cần đăng nhập lại', last_error='TikTok yêu cầu đăng nhập lại')
-                    update_status(f"[{profile_name}] Cookie đã nạp vào Chrome nhưng bị TikTok từ chối.")
-                    return False
-                return _wait_for_upload_page_signal(driver, timeout=3.0)
-            except Exception:
-                return False
-    else:
-        _set_profile_ui(profile_name, login='Cookie lỗi', last_error='Không nạp được cookie')
-        update_status(f"[{profile_name}] [WARN] Không nạp được cookie nào vào Chrome profile.")
-    return success > 0
-
 def _export_live_cookies_to_config(driver, profile_name):
-    if not is_driver_valid(driver):
+    if not _browser_session_valid(driver):
         return False
     try:
-        live_cookies = driver.get_cookies()
-        if live_cookies:
-            cookie_json = json.dumps(live_cookies, ensure_ascii=False)
-            profiles[profile_name]['config']['cookie_str'] = cookie_json
-            _save_cookie_injection_metadata(profile_name, cookie_json)
-            save_configs()
-            return True
+        live_cookies = browser_glue.export_cookies(driver)
+        if not browser_glue.has_primary_tiktok_auth_cookie(live_cookies):
+            update_status(
+                f"[{profile_name}] [WARN] Không lưu cookie live: thiếu cookie đăng nhập TikTok."
+            )
+            return False
+        try:
+            login_state = browser_glue.page_login_state(driver, timeout=15)
+        except Exception:
+            login_state = 'indeterminate'
+        if login_state == 'login_required':
+            update_status(
+                f"[{profile_name}] [WARN] Không lưu cookie live: browser đang ở trang đăng nhập."
+            )
+            return False
+        cookie_json = json.dumps(live_cookies, ensure_ascii=False)
+        profiles[profile_name]['config']['cookie_str'] = cookie_json
+        _save_cookie_injection_metadata(profile_name, cookie_json)
+        save_configs()
+        return True
     except Exception:
         pass
-    return False
-
-
-def _snapshot_live_cookies_before_post(driver, profile_name):
-    if _export_live_cookies_to_config(driver, profile_name):
-        update_status(f"[{profile_name}] [DEBUG] Đã lưu cookie live trước khi bấm Đăng.")
-        return True
-    update_status(f"[{profile_name}] [WARN] Không lưu được cookie live trước khi bấm Đăng.")
     return False
 
 
 def _capture_tiktok_cookies_worker(profile_name):
     cfg = profiles[profile_name]['config']
-    lc = get_lifecycle(profile_name)
-    aux_gen = lc.generation
-    driver = None
-    svc = None
+    token = None
     try:
-        probe_config = dict(cfg)
-        probe_config['headless'] = True
         proxy_data = parse_proxy_string(cfg.get('proxy_string', '')) if cfg.get('use_proxy', False) else None
+        if cfg.get('use_proxy', False) and not proxy_data:
+            raise ValueError("Proxy sai định dạng; từ chối mở browser trực tiếp")
+        proxy_expected_ip = proxy_data['ip'] if proxy_data else None
+        direct_ip = None
         geo_changed = _refresh_profile_geoip(profile_name, cfg, proxy_data)
         if geo_changed:
             save_configs()
-        probe_config['fingerprint'] = cfg.get('fingerprint', {})
-        options = _build_fast_chrome_options(probe_config, block_images=False)
-        _apply_chrome_proxy_options(options, cfg, proxy_data)
-        driver_path = _ensure_profile_driver(profile_name)
-        for launch_attempt in range(2):
-            try:
-                service = Service(driver_path)
-                svc = service
-                lc.add_pid(getattr(getattr(service, 'process', None), 'pid', None))
-                driver = webdriver.Chrome(service=service, options=options)
-                break
-            except Exception as error:
-                if launch_attempt == 0 and _is_driver_version_mismatch_error(error):
-                    _invalidate_chromedriver_cache("cookie capture driver/browser version mismatch")
-                    if svc:
-                        _kill_service_process(svc)
-                        lc.pop_pid(getattr(getattr(svc, 'process', None), 'pid', None))
-                        svc = None
-                    try:
-                        _profile_driver_path(profile_name).unlink(missing_ok=True)
-                    except Exception:
-                        pass
-                    driver_path = _ensure_profile_driver(profile_name)
-                    continue
-                raise
-        driver.implicitly_wait(0)
-        driver.set_page_load_timeout(PAGELOAD_TIMEOUT)
-        driver.set_script_timeout(SCRIPT_TIMEOUT)
-        _inject_fingerprint_js(driver, profile_name)
         if proxy_data:
-            is_match, current_ip = verify_proxy_ip(driver, proxy_data['ip'])
+            preflight = _proxy_endpoint_preflight(profile_name, proxy_data)
+            if not preflight['proxy_exit_ip']:
+                raise RuntimeError("Không xác minh được proxy endpoint khi lấy cookie")
+            proxy_expected_ip = preflight['proxy_exit_ip']
+            direct_ip = preflight['direct_ip']
+        browser_glue.ensure_patchright_profile(cfg)
+        _sync_patchright_migration(cfg)
+        save_configs()
+        token = browser_glue.open_session(cfg, profile_name)
+        imported = browser_glue.import_cookies(token, parse_cookie(cfg.get('cookie_str', '')))
+        if imported:
+            _save_cookie_injection_metadata(profile_name, cfg.get('cookie_str', ''))
+        _advance_patchright_migration(cfg, MigrationState.CREATED.value, MigrationState.COOKIES_IMPORTED)
+        if proxy_data:
+            is_match, current_ip = browser_glue.verify_exit_ip(token, proxy_expected_ip)
+            if not is_match and direct_ip and current_ip and current_ip != direct_ip:
+                is_match = True
             if not is_match:
-                raise RuntimeError(f"Proxy mismatch khi lấy cookie: {current_ip} != {proxy_data['ip']}")
-        _open_upload_page(driver, profile_name)
-        if not _has_tiktok_auth_cookie(driver):
-            raise TikTokLoginRequiredError('TikTok chưa có auth cookie hợp lệ trong User Data.')
-        live_cookies = driver.get_cookies()
-        if not live_cookies:
-            raise TikTokLoginRequiredError('TikTok không trả về cookie nào sau khi xác minh đăng nhập.')
+                if not current_ip:
+                    raise RuntimeError("Không xác minh được proxy trong browser khi lấy cookie")
+                raise RuntimeError(f"Proxy mismatch khi lấy cookie: {current_ip} != {proxy_expected_ip}")
+        current_url = browser_glue.navigate(token, TIKTOK_UPLOAD_URL)
+        login_state = browser_glue.wait_page_login_state(token, timeout=30)
+        if login_state != 'authenticated':
+            raise TikTokLoginRequiredError(
+                'TikTok yêu cầu đăng nhập lại.'
+                if login_state == 'login_required'
+                else 'Không xác minh được trạng thái đăng nhập TikTok.'
+            )
+        _advance_patchright_migration(cfg, MigrationState.COOKIES_IMPORTED.value, MigrationState.LOGIN_VERIFIED)
+        live_cookies = browser_glue.export_cookies(token)
+        if not browser_glue.has_primary_tiktok_auth_cookie(live_cookies):
+            raise TikTokLoginRequiredError('TikTok không trả về cookie đăng nhập nào sau khi xác minh.')
         cookie_json = json.dumps(live_cookies, ensure_ascii=False)
         cfg['cookie_str'] = cookie_json
         _save_cookie_injection_metadata(profile_name, cookie_json)
         cfg['cookies_last_captured_at'] = datetime.now(timezone.utc).isoformat()
         save_configs()
         _set_profile_ui(profile_name, login='Đã đăng nhập', browser='Đã đóng', last_error='')
-        update_status(f"[{profile_name}] Đã lấy và lưu {len(live_cookies)} cookie TikTok từ session Chrome.")
+        update_status(f"[{profile_name}] Đã lấy và lưu {len(live_cookies)} cookie TikTok từ session Patchright.")
         return True
     except TikTokLoginRequiredError as e:
         _set_profile_ui(profile_name, login='Cần đăng nhập lại', last_error=str(e))
@@ -1346,13 +529,8 @@ def _capture_tiktok_cookies_worker(profile_name):
         update_status(f"[{profile_name}] Lỗi lấy cookie TikTok: {e}")
         return False
     finally:
-        if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
-        if svc:
-            _kill_service_process(svc)
+        if token:
+            token.quit()
         if profile_name in profiles:
             _set_profile_ui(profile_name, browser='Đã đóng')
 
@@ -1371,7 +549,7 @@ def get_tiktok_cookies():
     if profile.get('running') or profile.get('uploading'):
         messagebox.showwarning('Lấy Cookie', 'Hãy Stop profile và đóng browser trước khi lấy cookie.')
         return
-    if is_driver_valid(profile.get('manual_driver')):
+    if _browser_session_valid(profile.get('manual_driver')):
         messagebox.showwarning('Lấy Cookie', 'Hãy đóng cửa sổ browser thủ công trước khi lấy cookie.')
         return
     if _profile_browser_process_count(profile_name) > 0:
@@ -1391,56 +569,133 @@ def get_tiktok_cookies():
     threading.Thread(target=worker, daemon=True).start()
 
 
-def reset_fingerprint():
-    if not _license_guard():
-        return
-    sel = tree.selection()
-    if not sel:
-        messagebox.showwarning('Reset Fingerprint', 'Hãy chọn một profile.')
-        return
-    profile_name = tree.item(sel[0])['values'][0]
-    profile = profiles.get(profile_name)
-    if not profile or profile.get('running') or profile.get('session_busy') or is_driver_valid(profile.get('manual_driver')):
-        messagebox.showwarning('Reset Fingerprint', 'Hãy Stop profile và đóng browser trước khi reset fingerprint.')
-        return
-    if not messagebox.askyesno(
-        'Reset Fingerprint',
-        f"Tạo fingerprint mới cho '{profile_name}'?\n\nSession và cookie hiện tại sẽ được giữ lại.",
-    ):
-        return
-    cfg = profile['config']
-    seed = profile_name + str(cfg.get('cookie_str', '')) + str(time.time_ns())
-    cfg['fingerprint'] = _generate_fingerprint(seed=seed)
-    cfg['fingerprint_reset_at'] = datetime.now(timezone.utc).isoformat()
-    save_configs()
-    _set_profile_ui(profile_name, last_error='')
-    update_status(f'[{profile_name}] Đã reset fingerprint; session/cookie được giữ lại.')
+def _choose_browser_maintenance_mode(profile_name):
+    result = {'mode': None}
+    dialog = ctk.CTkToplevel(root)
+    dialog.title('Làm sạch browser')
+    dialog.geometry('520x420')
+    dialog.resizable(False, False)
+    dialog.transient(root)
+    dialog.grab_set()
+
+    ctk.CTkLabel(
+        dialog,
+        text=f"Làm sạch browser: {profile_name}",
+        font=("", 18, "bold"),
+    ).pack(pady=(18, 8))
+    ctk.CTkLabel(
+        dialog,
+        text="Chọn mức làm sạch. Browser phải được đóng trước khi thực hiện.",
+        text_color="#475569",
+    ).pack(pady=(0, 12))
+
+    def add_choice(title, description, mode, color):
+        frame = ctk.CTkFrame(dialog, fg_color="#f8fafc", border_width=1, border_color="#dbe3ee")
+        frame.pack(fill='x', padx=18, pady=5)
+        ctk.CTkLabel(frame, text=title, font=("", 14, "bold"), anchor='w').pack(
+            fill='x', padx=12, pady=(9, 1)
+        )
+        ctk.CTkLabel(frame, text=description, text_color="#475569", anchor='w').pack(
+            fill='x', padx=12, pady=(0, 7)
+        )
+
+        def choose():
+            result['mode'] = mode
+            dialog.destroy()
+
+        ctk.CTkButton(frame, text='Chọn', width=90, fg_color=color, command=choose).pack(
+            anchor='e', padx=12, pady=(0, 9)
+        )
+
+    add_choice(
+        'Làm sạch nhanh (khuyên dùng)',
+        'Xóa cache và file tạm; giữ đăng nhập, cookie và fingerprint.',
+        BROWSER_MAINTENANCE_QUICK,
+        '#2563eb',
+    )
+    add_choice(
+        'Xóa phiên đăng nhập',
+        'Xóa cache, cookie và dữ liệu đăng nhập của các website trong profile.',
+        BROWSER_MAINTENANCE_SESSION,
+        '#d97706',
+    )
+    add_choice(
+        'Khôi phục browser mới',
+        'Xóa toàn bộ User Data do tool quản lý và tạo fingerprint mới.',
+        BROWSER_MAINTENANCE_FULL,
+        '#dc2626',
+    )
+    dialog.protocol('WM_DELETE_WINDOW', dialog.destroy)
+    root.wait_window(dialog)
+    return result['mode']
 
 
-def _clean_browser_worker(profile_name):
+def _clean_browser_worker(profile_name, mode):
     profile = profiles[profile_name]
     cfg = profile['config']
-    driver = profile.get('driver')
-    if driver:
-        try:
-            driver.quit()
-        except Exception:
-            pass
-        profile['driver'] = None
-    manual_driver = profile.get('manual_driver')
-    if manual_driver:
-        try:
-            manual_driver.quit()
-        except Exception:
-            pass
-        profile['manual_driver'] = None
-    kill_stale_chrome_processes(profile_name)
-    clear_profile_directory(cfg['chrome_profile'])
-    for key in ('cookie_str', 'cookie_hash', 'cookies_last_injected_at', 'cookies_last_captured_at', 'cookies_last_injected_profile_path'):
-        cfg.pop(key, None)
+    lifecycle_report = get_lifecycle(profile_name).cleanup(quit_timeout=3, kill_timeout=2)
+    profile['driver'] = None
+    profile['manual_driver'] = None
+    profile['observer'] = None
+    if lifecycle_report.get('errors'):
+        raise RuntimeError('; '.join(lifecycle_report['errors']))
+    if _profile_browser_process_count(profile_name):
+        raise RuntimeError('User Data vẫn đang được một tiến trình Chrome sử dụng.')
+
+    other_profile_roots = [
+        browser_glue.active_profile_path(other.get('config', {}))
+        for name, other in profiles.items()
+        if name != profile_name and other.get('config', {}).get('chrome_profile')
+    ]
+    forbidden_roots = [
+        other.get('config', {}).get('folder_path', '')
+        for other in profiles.values()
+        if other.get('config', {}).get('folder_path')
+    ]
+    browser_dir = _bundled_browser_dir()
+    if browser_dir:
+        forbidden_roots.append(browser_dir)
+
+    if mode == BROWSER_MAINTENANCE_FULL:
+        managed_data_root = app_base_dir() / 'Auto_Data'
+        if managed_data_root.is_dir():
+            try:
+                adopt_legacy_owned_root(cfg['chrome_profile'], managed_data_root)
+            except ValueError:
+                pass
+
+    report = maintain_browser(
+        browser_glue.active_profile_path(cfg),
+        mode,
+        forbidden_roots=forbidden_roots,
+        configured_profile_roots=other_profile_roots,
+        stale_lock_age_seconds=0,
+    )
+    if not report['success']:
+        if mode == BROWSER_MAINTENANCE_FULL and any(
+            'ownership marker' in item['error'].lower() for item in report['errors']
+        ):
+            raise RuntimeError(
+                'Không thể khôi phục toàn bộ vì User Data này không được tool tạo. '
+                'Hãy dùng Làm sạch nhanh hoặc Xóa phiên đăng nhập.'
+            )
+        details = '; '.join(item['error'] for item in report['errors']) or 'Không xác định'
+        raise RuntimeError(details)
+
+    if mode in (BROWSER_MAINTENANCE_SESSION, BROWSER_MAINTENANCE_FULL):
+        for key in ('cookie_str', 'cookie_hash', 'cookies_last_injected_at', 'cookies_last_captured_at', 'cookies_last_injected_profile_path'):
+            cfg.pop(key, None)
+    if mode == BROWSER_MAINTENANCE_FULL:
+        seed = profile_name + str(time.time_ns())
+        cfg['fingerprint'] = _generate_fingerprint(seed=seed)
+        cfg['fingerprint_reset_at'] = datetime.now(timezone.utc).isoformat()
     save_configs()
-    _set_profile_ui(profile_name, login='Chưa có cookie', browser='Đã làm sạch', upload='Chờ video', last_error='')
-    update_status(f'[{profile_name}] Đã làm sạch User Data và cookie; giữ nguyên video, proxy, fingerprint và driver.')
+    login_state = 'Chưa có cookie' if mode != BROWSER_MAINTENANCE_QUICK else None
+    _set_profile_ui(profile_name, login=login_state, browser='Đã làm sạch', upload='Chờ video', last_error='')
+    update_status(
+        f"[{profile_name}] Đã làm sạch browser ({mode}): "
+        f"{len(report['removed'])} mục."
+    )
 
 
 def clean_browser():
@@ -1452,12 +707,28 @@ def clean_browser():
         return
     profile_name = tree.item(sel[0])['values'][0]
     profile = profiles.get(profile_name)
-    if not profile or profile.get('running') or profile.get('uploading') or profile.get('session_busy') or is_driver_valid(profile.get('manual_driver')):
+    if (
+        not profile
+        or profile.get('running')
+        or profile.get('uploading')
+        or profile.get('session_busy')
+        or _browser_session_valid(profile.get('manual_driver'))
+        or get_lifecycle(profile_name).has_active_driver()
+        or _profile_browser_process_count(profile_name)
+    ):
         messagebox.showwarning('Làm sạch Browser', 'Hãy Stop profile và đóng browser trước khi làm sạch browser.')
         return
-    if not messagebox.askyesno(
-        'Làm sạch Browser',
-        f"Xóa toàn bộ User Data và cookie của '{profile_name}'?\n\nVideo, proxy, fingerprint và driver sẽ được giữ lại.",
+    mode = _choose_browser_maintenance_mode(profile_name)
+    if not mode:
+        return
+    if mode == BROWSER_MAINTENANCE_SESSION and not messagebox.askyesno(
+        'Xóa phiên đăng nhập',
+        'Thao tác này sẽ đăng xuất các website trong browser. Tiếp tục?',
+    ):
+        return
+    if mode == BROWSER_MAINTENANCE_FULL and not messagebox.askyesno(
+        'Khôi phục browser mới',
+        'Toàn bộ User Data và đăng nhập sẽ bị xóa. Chỉ dữ liệu browser do tool quản lý mới được phép xóa. Tiếp tục?',
     ):
         return
 
@@ -1466,7 +737,7 @@ def clean_browser():
             profile['session_busy'] = True
             try:
                 _set_profile_ui(profile_name, browser='Đang làm sạch')
-                _clean_browser_worker(profile_name)
+                _clean_browser_worker(profile_name, mode)
             except Exception as e:
                 _set_profile_ui(profile_name, browser='Bị lỗi', last_error=str(e))
                 update_status(f'[{profile_name}] Lỗi làm sạch browser: {e}')
@@ -1910,13 +1181,16 @@ def load_configs():
 def _migrate_profile_drivers():
     changed = False
     for profile_name, profile in profiles.items():
-        before = profile['config'].get('chromedriver_path')
+        config = profile['config']
+        before = (config.get('browser_profile_path'), config.get('migration_state'))
         try:
-            _ensure_profile_driver(profile_name)
-            if profile['config'].get('chromedriver_path') != before:
+            browser_glue.ensure_patchright_profile(config)
+            _sync_patchright_migration(config)
+            after = (config.get('browser_profile_path'), config.get('migration_state'))
+            if after != before:
                 changed = True
         except Exception as e:
-            update_status(f"[{profile_name}] [WARN] Không thể tạo ChromeDriver riêng khi migration: {e}")
+            update_status(f"[{profile_name}] [WARN] Không thể tạo/resume Profile-Patchright: {e}")
     if changed:
         save_configs()
 
@@ -2029,64 +1303,6 @@ class VideoFolderHandler(FileSystemEventHandler):
         _mark_upload_timing(file_path, 'enqueued_at')
         profiles[self.profile_name]['queue'].put(file_path)
 
-# =========================
-# Selenium Driver (Optimized with Selenium Wire)
-# =========================
-# ------------------------------
-
-def _build_fast_chrome_options(config, block_images=True, force_visible=False):
-    chrome_options = Options()
-    if os.environ.get('UPLOAD_CAPTURE_NETWORK') == '1' or os.environ.get('UPLOAD_TEST_MODE') == '1':
-        chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
-    chrome_binary = _find_bundled_chrome_executable()
-    if chrome_binary:
-        chrome_options.binary_location = chrome_binary
-    chrome_options.add_argument(f"--user-data-dir={config['chrome_profile']}")
-    
-    fp = ensure_fingerprint_defaults(
-        config.get('fingerprint', _generate_fingerprint(config.get('cookie_str', ''))),
-        seed=config.get('cookie_str', ''),
-    )
-    config['fingerprint'] = fp
-    _apply_fingerprint_to_options(chrome_options, fp)
-    for argument in chrome_environment_arguments(fp):
-        chrome_options.add_argument(argument)
-    
-    if force_visible or not config.get('headless', True):
-        chrome_options.add_argument("--start-maximized")
-    else:
-        chrome_options.add_argument("--headless=new")
-    
-    # Giữ Chrome gần hành vi thật nhất; tránh flag can thiệp mạng/rendering làm TikTok load bất thường.
-    chrome_options.add_argument("--remote-debugging-port=0")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage") 
-    chrome_options.add_argument("--disable-popup-blocking")
-    chrome_options.add_argument("--disable-notifications")
-    chrome_options.add_argument("--mute-audio")
-    chrome_options.add_argument("--log-level=3")
-    chrome_options.add_argument("--no-first-run")
-    chrome_options.add_argument("--force-color-profile=srgb")
-    chrome_options.add_argument("--disable-features=TranslateUI,ChromeWhatsNewUI,MediaRouter")
-    
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
-    chrome_options.add_experimental_option("useAutomationExtension", False)
-    
-    prefs = {
-        "profile.default_content_setting_values.notifications": 2,
-        "credentials_enable_service": False,
-        "profile.password_manager_enabled": False
-    }
-    prefs.update(chrome_environment_preferences(fp))
-    if block_images:
-        prefs["profile.managed_default_content_settings.images"] = 2
-    else:
-        prefs["profile.managed_default_content_settings.images"] = 1
-    chrome_options.add_experimental_option("prefs", prefs)
-    chrome_options.page_load_strategy = 'none'
-    return chrome_options
-
 def check_system_resources(profile_name):
     try:
         # Kiểm tra tài nguyên, nếu cao thì chờ 5s rồi kiểm tra lại
@@ -2114,8 +1330,7 @@ def after_kill_cleanup_running_profiles():
 
 
 def kill_stale_chrome_processes(profile_name):
-    target_dir = profiles[profile_name]['config']['chrome_profile']
-    expected_driver = str(profile_driver_path(target_dir))
+    target_dir = browser_glue.active_profile_path(profiles[profile_name]['config'])
     killed_count = 0
 
     def _force_kill(proc):
@@ -2126,288 +1341,142 @@ def kill_stale_chrome_processes(profile_name):
         except psutil.TimeoutExpired:
             proc.kill()
         except Exception:
-            pass
+            return False
         killed_count += 1
+        return True
 
     try:
-        # Kill tracked PIDs first (more precise)
+        # Only terminate Chrome processes whose command line proves ownership of this User Data.
         lc = get_lifecycle(profile_name)
-        tracked_pids = lc.owned_pids()
-        for pid in tracked_pids:
-            try:
-                proc = psutil.Process(pid)
-                if proc.is_running():
-                    _force_kill(proc)
-                    killed_count += 1
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-
-        # Fallback: scan by path/command line
         for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'exe']):
-            proc_pid = None
             try:
                 if not proc.is_running():
                     continue
-                proc_pid = proc.info['pid']
-                if proc_pid in tracked_pids:
-                    continue
                 raw_name = proc.info.get('name') or ''
                 name_str = raw_name.lower() if raw_name else ''
-                if name_str not in ('chrome.exe', 'chromedriver.exe', 'chrome', 'chromedriver'):
+                if name_str not in ('chrome.exe', 'chrome'):
                     continue
                 cmdline = proc.info['cmdline'] or []
                 if process_uses_profile(cmdline, target_dir):
                     _force_kill(proc)
-                    killed_count += 1
-                    continue
-                if name_str in ('chromedriver.exe', 'chromedriver'):
-                    exe_path = proc.info.get('exe') or ''
-                    if exe_path and normalize_profile_path(exe_path) == normalize_profile_path(expected_driver):
-                        _force_kill(proc)
-                        killed_count += 1
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
+        lc.clear_owned_pids()
 
         if killed_count > 0:
             time.sleep(0.5)
     except Exception as e:
         logging.warning(f"[{profile_name}] Lỗi khi kill process: {e}")
 
-def _init_driver_inner(profile_name, service, chrome_options):
-    update_status(f"[{profile_name}] [DEBUG] Đang gọi webdriver.Chrome()...")
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    update_status(f"[{profile_name}] [DEBUG] webdriver.Chrome() đã trả về driver object")
-    return driver
-
-def _init_driver_with_timeout(profile_name, service, chrome_options, timeout=DRIVER_INIT_TIMEOUT):
-    lc = get_lifecycle(profile_name)
-    executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(_init_driver_inner, profile_name, service, chrome_options)
-    lc.set_startup_future(future)
-    try:
-        driver = future.result(timeout=timeout)
-        return driver
-    except FuturesTimeout:
-        update_status(f"[{profile_name}] [ERROR] Khởi tạo driver quá {timeout}s, hủy tiến trình và thử lại...")
-        executor.shutdown(wait=False, cancel_futures=True)
-
-        def _cleanup_late_driver(fut):
-            if fut.done() and not fut.cancelled():
-                try:
-                    late = fut.result(timeout=0)
-                    if late is not None:
-                        try:
-                            late.quit()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-            _kill_service_process(service)
-
-        future.add_done_callback(_cleanup_late_driver)
-        raise TimeoutError(f"Khởi tạo driver quá {timeout}s")
-    except Exception as e:
-        executor.shutdown(wait=False)
-        raise e
-    finally:
-        executor.shutdown(wait=False)
-
-
 def ensure_driver(profile_name, lifecycle_gen=None):
-    global GLOBAL_DRIVER_PATH
     total_start = time.perf_counter()
-    driver = profiles[profile_name]['driver']
-    if is_driver_valid(driver):
-        return driver
-    
+    token = profiles[profile_name]['driver']
+    if _browser_session_valid(token):
+        return token
+
     config = profiles[profile_name]['config']
-    
-    if driver:
-        try: driver.quit()
-        except Exception: pass
+    if isinstance(token, SessionToken):
+        token.set_cancelled()
+        token.quit()
     profiles[profile_name]['driver'] = None
-    
+
     lc = get_lifecycle(profile_name)
     if lifecycle_gen is None:
         lifecycle_gen = lc.generation
 
-    step_start = time.perf_counter()
-    kill_stale_chrome_processes(profile_name)
-    clean_chrome_lock_files(config['chrome_profile'])
-    _timing_log(profile_name, "cleanup", step_start)
-    
-    max_attempts = DRIVER_INIT_RETRIES 
-    driver_refreshed_for_mismatch = False
-    
-    for attempt in range(max_attempts):
+    for attempt in range(DRIVER_INIT_RETRIES):
         if lc.is_cancelled or not lc.is_current(lifecycle_gen):
-            update_status(f"[{profile_name}] Lifecycle đã bị hủy, không retry driver.")
+            update_status(f"[{profile_name}] Lifecycle đã bị hủy, không mở session.")
             raise RuntimeError("Lifecycle cancelled")
-        driver = None
+        token = None
         try:
             attempt_start = time.perf_counter()
-            step_start = time.perf_counter()
             if not check_system_resources(profile_name):
                 update_status(f"[{profile_name}] Tài nguyên thấp. Tạm nghỉ 5s.")
                 time.sleep(5)
-                if attempt == max_attempts - 1: raise Exception("System Resource Low")
+                if attempt == DRIVER_INIT_RETRIES - 1:
+                    raise SessionSetupError("System Resource Low")
                 continue
-            _timing_log(profile_name, "resource_check", step_start)
 
-            update_status(f"[{profile_name}] Khởi tạo Driver (Lần {attempt+1})...")
+            update_status(f"[{profile_name}] Mở Patchright (Lần {attempt + 1})...")
             _set_profile_ui(profile_name, status='Đang khởi động', browser='Đang mở', upload='Chờ video', last_error='')
-            
-            # --- SETUP PROXY ---
+
             proxy_data = None
+            proxy_expected_ip = None
+            direct_ip = None
             if config.get('use_proxy', False):
-                step_start = time.perf_counter()
                 _set_profile_ui(profile_name, proxy='Đang kiểm tra')
-                proxy_str = config.get('proxy_string', '')
-                proxy_data = parse_proxy_string(proxy_str)
-                if proxy_data:
-                    if proxy_data.get('user') and proxy_data.get('pass') and _using_orbita_browser():
-                        mode = "Orbita proxy auth"
-                    elif proxy_data.get('user') and proxy_data.get('pass'):
-                        mode = "Chrome proxy extension"
-                    else:
-                        mode = "Chrome native proxy"
-                    update_status(f"[{profile_name}] [DEBUG] Config Proxy ({mode}): {proxy_data['ip']}")
-                else:
+                proxy_data = parse_proxy_string(config.get('proxy_string', ''))
+                if not proxy_data:
                     _set_profile_ui(profile_name, proxy='Sai định dạng', last_error='Proxy sai định dạng')
-                    update_status(f"[{profile_name}] Cảnh báo: Proxy sai định dạng.")
+                    raise SessionSetupError("Proxy sai định dạng; từ chối mở browser trực tiếp")
+                proxy_expected_ip = proxy_data['ip']
+                update_status(f"[{profile_name}] [DEBUG] Đã nhận cấu hình proxy: {proxy_data['ip']}")
             else:
                 _set_profile_ui(profile_name, proxy='Tắt')
-            if config.get('use_proxy', False):
-                _timing_log(profile_name, "proxy_config", step_start)
 
             geo_changed = _refresh_profile_geoip(profile_name, config, proxy_data)
             if geo_changed:
                 save_configs()
-
-            # --- DRIVER RIÊNG THEO PROFILE ---
-            step_start = time.perf_counter()
-            driver_path = _ensure_profile_driver(profile_name)
-            update_status(f"[{profile_name}] [DEBUG] ChromeDriver path: {driver_path}")
-            chrome_path = _find_preferred_chrome_executable()
-            update_status(f"[{profile_name}] [DEBUG] Browser ({_browser_mode_label()}): {chrome_path or 'không tìm thấy'}")
-            _timing_log(profile_name, "driver_browser_resolve", step_start)
-            
-            service = Service(driver_path)
-            
-            # Setup standard Chrome Options
-            step_start = time.perf_counter()
-            chrome_options = _build_fast_chrome_options(config, block_images=False)
-            proxy_ext_dir = _apply_chrome_proxy_options(chrome_options, config, proxy_data)
-            if proxy_ext_dir:
-                if proxy_ext_dir == "orbita-proxy-auth":
-                    update_status(f"[{profile_name}] [DEBUG] Đã cấu hình Orbita proxy auth")
-                else:
-                    update_status(f"[{profile_name}] [DEBUG] Đã nạp proxy extension: {proxy_ext_dir}")
-            update_status(f"[{profile_name}] [DEBUG] Đã tạo Chrome options, headless={config.get('headless', True)}")
-            _timing_log(profile_name, "build_chrome_options", step_start)
-            
-            # INIT DRIVER WITH TIMEOUT
-            update_status(f"[{profile_name}] [DEBUG] Đang khởi tạo Chrome (timeout {DRIVER_INIT_TIMEOUT}s)...")
-            step_start = time.perf_counter()
-            driver = _init_driver_with_timeout(
-                profile_name,
-                service,
-                chrome_options,
-                timeout=DRIVER_INIT_TIMEOUT
-            )
-            _timing_log(profile_name, "webdriver_chrome", step_start)
-            update_status(f"[{profile_name}] [DEBUG] Chrome đã khởi tạo xong, đang cấu hình...")
-            _set_profile_ui(profile_name, browser='Đang cấu hình')
-            
-            step_start = time.perf_counter()
-            driver.implicitly_wait(0)
-            driver.set_page_load_timeout(PAGELOAD_TIMEOUT)
-            driver.set_script_timeout(SCRIPT_TIMEOUT)
-            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-                "source": """
-                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                    Object.defineProperty(Navigator.prototype, 'webdriver', {get: () => undefined});
-                """
-            })
-            _warn_if_auth_extension_blocked(profile_name, driver, proxy_data)
-            update_status(f"[{profile_name}] [DEBUG] Đã cấu hình driver xong")
-
-            _inject_fingerprint_js(driver, profile_name)
-            _enable_aux_resource_blocking(driver, profile_name)
-            _timing_log(profile_name, "driver_configure", step_start)
-
-            # --- VERIFY PROXY IP ---
             if proxy_data:
-                step_start = time.perf_counter()
-                cached_proxy = _get_cached_proxy_ok(profile_name, proxy_data)
-                if cached_proxy:
-                    remaining = max(0, int((PROXY_OK_CACHE_TTL_SECONDS - (time.time() - cached_proxy.get('checked_at', 0))) / 60))
-                    current_ip = cached_proxy.get('ip') or proxy_data['ip']
-                    _set_profile_ui(profile_name, proxy=f"OK: {current_ip}")
-                    update_status(f"[{profile_name}] Proxy OK cache: {current_ip} (bỏ qua check IP, còn hiệu lực ~{remaining} phút)")
-                    _timing_log(profile_name, "proxy_check_cached", step_start)
-                else:
-                    update_status(f"[{profile_name}] [DEBUG] Đang check IP...")
-                try:
-                    if not cached_proxy:
-                        is_match, current_ip = verify_proxy_ip(driver, proxy_data['ip'])
-                        if not is_match:
-                            _forget_proxy_ok(profile_name, proxy_data)
-                            _set_profile_ui(profile_name, proxy='Sai IP', last_error=f"Proxy sai IP: {current_ip}")
-                            update_status(f"[{profile_name}] LỖI PROXY: IP THỰC TẾ ({current_ip}) != PROXY ({proxy_data['ip']}).")
-                            driver.quit()
-                            raise Exception(f"Proxy Mismatch: {current_ip} != {proxy_data['ip']}")
-                        else:
-                            _remember_proxy_ok(profile_name, proxy_data, current_ip)
-                            _set_profile_ui(profile_name, proxy=f"OK: {current_ip}")
-                            update_status(f"[{profile_name}] Proxy OK: {current_ip}")
-                        _timing_log(profile_name, "proxy_check", step_start)
-                except Exception as e:
-                     _forget_proxy_ok(profile_name, proxy_data)
-                     _set_profile_ui(profile_name, proxy='Proxy lỗi', last_error=str(e))
-                     update_status(f"[{profile_name}] Lỗi check Proxy: {e}")
-                     if driver: driver.quit()
-                     raise
+                preflight = _proxy_endpoint_preflight(profile_name, proxy_data)
+                if not preflight['proxy_exit_ip']:
+                    raise SessionSetupError("Không xác minh được proxy endpoint; từ chối mở browser")
+                proxy_expected_ip = preflight['proxy_exit_ip']
+                direct_ip = preflight['direct_ip']
 
-            update_status(f"[{profile_name}] [DEBUG] Thiết lập session TikTok...")
-            step_start = time.perf_counter()
-            upload_page_ready = _prepare_tiktok_cookies(driver, profile_name, config, require_upload_ready=True)
-            if not upload_page_ready:
-                _open_upload_page(driver, profile_name)
-            _timing_log(profile_name, "tiktok_prepare", step_start)
+            profile_path = browser_glue.ensure_patchright_profile(config)
+            _sync_patchright_migration(config)
+            save_configs()
+            token = browser_glue.open_session(config, profile_name)
+            token.generation = lifecycle_gen
 
-            svc_pid = None
-            try:
-                sp = getattr(service, 'process', None)
-                if sp is not None:
-                    svc_pid = sp.pid
-            except Exception:
-                pass
+            cookies = parse_cookie(config.get('cookie_str', ''))
+            imported = browser_glue.import_cookies(token, cookies)
+            if imported:
+                _save_cookie_injection_metadata(profile_name, config.get('cookie_str', ''))
+            _advance_patchright_migration(config, MigrationState.CREATED.value, MigrationState.COOKIES_IMPORTED)
 
-            if lifecycle_gen is None or not lc.register_automation(lifecycle_gen, driver, service, svc_pid):
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
-                raise RuntimeError("Lifecycle changed before driver publish")
+            if proxy_data:
+                update_status(f"[{profile_name}] [DEBUG] Đang check IP trên browser mới...")
+                is_match, current_ip = browser_glue.verify_exit_ip(token, proxy_expected_ip)
+                if not is_match and direct_ip and current_ip and current_ip != direct_ip:
+                    update_status(f"[{profile_name}] [DEBUG] Proxy exit IP thay đổi sau preflight: {current_ip}")
+                    is_match = True
+                if not is_match:
+                    message = "Proxy Verification Indeterminate: browser không xác minh được proxy" if not current_ip else f"Proxy sai IP: {current_ip}"
+                    _set_profile_ui(profile_name, proxy='Không xác minh được' if not current_ip else 'Sai IP', last_error=message)
+                    raise SessionSetupError(message)
+                _set_profile_ui(profile_name, proxy=f"OK: {current_ip}")
+                update_status(f"[{profile_name}] Proxy OK: {current_ip}")
 
-            profiles[profile_name]['driver'] = driver
+            current_url = browser_glue.navigate(token, TIKTOK_UPLOAD_URL)
+            login_state = browser_glue.wait_page_login_state(token, timeout=30)
+            if login_state != 'authenticated':
+                raise TikTokLoginRequiredError(
+                    "TikTok chuyển về trang đăng nhập. Cookie/session không hợp lệ hoặc đã hết hạn."
+                    if login_state == 'login_required'
+                    else "Không xác minh được trạng thái đăng nhập TikTok trên trang upload."
+                )
+            _advance_patchright_migration(config, MigrationState.COOKIES_IMPORTED.value, MigrationState.LOGIN_VERIFIED)
+            save_configs()
+
+            if not lc.register_automation(lifecycle_gen, token):
+                token.set_cancelled()
+                token.quit()
+                raise RuntimeError("Lifecycle changed before session publish")
+            profiles[profile_name]['driver'] = token
             _set_profile_ui(profile_name, status='Đang chạy', browser='Sẵn sàng', upload='Chờ video')
-            update_status(f"[{profile_name}] [DEBUG] Driver sẵn sàng!")
+            update_status(f"[{profile_name}] [DEBUG] Patchright sẵn sàng: {profile_path}")
             _timing_log(profile_name, "driver_attempt_total", attempt_start)
             _timing_log(profile_name, "driver_ready_total", total_start)
-            
-            return driver
+            return token
 
-        except Exception as e:
-            if driver: 
-                try: driver.quit()
-                except: pass
-
-            kill_stale_chrome_processes(profile_name)
-            clean_chrome_lock_files(config['chrome_profile'])
-
-            if isinstance(e, TikTokLoginRequiredError):
+        except Exception as error:
+            if token:
+                token.set_cancelled()
+                token.quit()
+            if isinstance(error, TikTokLoginRequiredError):
                 _set_profile_ui(
                     profile_name,
                     status='Lỗi',
@@ -2415,964 +1484,139 @@ def ensure_driver(profile_name, lifecycle_gen=None):
                     login='Cần đăng nhập lại',
                     last_error='Cookie bị TikTok từ chối hoặc đã hết hạn',
                 )
-                update_status(f"[{profile_name}] Dừng khởi tạo: cookie/session bị TikTok từ chối, không retry browser.")
+                update_status(f"[{profile_name}] Dừng khởi tạo: cookie/session bị TikTok từ chối.")
                 raise
-
-            if _is_proxy_init_error(e):
-                _set_profile_ui(profile_name, status='Lỗi', browser='Bị lỗi', last_error=str(e))
-                update_status(f"[{profile_name}] Lỗi proxy, không retry: {e}")
-                raise
-
-            if _is_driver_version_mismatch_error(e) and not driver_refreshed_for_mismatch:
-                driver_refreshed_for_mismatch = True
-                chrome_path, chrome_version, chrome_major = _get_chrome_version()
-                driver_version, driver_major = _get_chromedriver_version(driver_path)
-                update_status(
-                    f"[{profile_name}] Phát hiện ChromeDriver lệch phiên bản Chrome. "
-                    f"Browser={chrome_version or chrome_path}, driver={driver_version or driver_path}. Đang tải lại driver..."
+            if isinstance(error, ProfileBusyError):
+                _set_profile_ui(
+                    profile_name,
+                    status='Lỗi',
+                    browser='Bị lỗi',
+                    last_error='Profile đang được session khác dùng; hãy đóng browser và thử lại',
                 )
-                with driver_install_lock:
-                    _invalidate_chromedriver_cache("driver/browser version mismatch")
-                    try:
-                        _profile_driver_path(profile_name).unlink(missing_ok=True)
-                    except Exception:
-                        pass
-            if attempt == max_attempts - 1:
-                _set_profile_ui(profile_name, status='Lỗi', browser='Bị lỗi', last_error=str(e))
-                update_status(f"[{profile_name}] Lỗi khởi tạo sau {max_attempts} lần: {e}")
-                update_status(f"[{profile_name}] Exception Init: {e}")
+                update_status(
+                    f"[{profile_name}] Profile-Patchright vẫn còn session chưa đóng sạch; không retry: {error}"
+                )
                 raise
-            update_status(f"[{profile_name}] [DEBUG] Thử lại lần {attempt+2}...")
-            time.sleep(DRIVER_INIT_RETRY_DELAY) 
-            
-    return None
-
-def _open_upload_page(driver, profile_name):
-    try:
-        if not is_driver_valid(driver):
-            raise InvalidSessionIdException("Driver không còn session hợp lệ trước khi mở trang upload")
-        current_url = (driver.current_url or "").lower()
-        if "tiktokstudio/upload" in current_url and _has_upload_page_signal(driver):
-            return
-        driver.get(TIKTOK_UPLOAD_URL)
-        wait = WebDriverWait(driver, 60)
-        quick_deadline = time.time() + 1.5
-        while time.time() < quick_deadline:
-            if "/login" in (driver.current_url or "").lower():
-                _set_profile_ui(profile_name, login='Cần đăng nhập lại', last_error='TikTok yêu cầu đăng nhập lại')
-                raise TikTokLoginRequiredError("TikTok chuyển về trang đăng nhập. Cookie/session không hợp lệ hoặc đã hết hạn.")
-            if _has_upload_page_signal(driver):
-                return
-            time.sleep(0.2)
-        try:
-            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div[data-e2e='select_video_container']")))
-        except TimeoutException:
-            if "/login" in (driver.current_url or "").lower():
-                _set_profile_ui(profile_name, login='Cần đăng nhập lại', last_error='TikTok yêu cầu đăng nhập lại')
-                raise TikTokLoginRequiredError("TikTok chuyển về trang đăng nhập. Cookie/session không hợp lệ hoặc đã hết hạn.")
-            update_status(f"[{profile_name}] [WARN] Không tìm thấy select_video_container, thử fallback...")
-            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div[class*='upload'], button[data-e2e='post_video_button'], textarea")))
-    except Exception as e:
-        update_status(f"[{profile_name}] Lỗi tải trang upload: {e}")
-        raise
-
-def _safe_open_upload_page(driver, profile_name):
-    if not is_driver_valid(driver):
-        update_status(f"[{profile_name}] [DEBUG] Bỏ qua mở trang upload vì session trình duyệt không còn hợp lệ")
-        return False
-    try:
-        _open_upload_page(driver, profile_name)
-        return True
-    except InvalidSessionIdException:
-        update_status(f"[{profile_name}] [DEBUG] Không thể mở lại trang upload vì session đã mất")
-        return False
-    except Exception as e:
-        update_status(f"[{profile_name}] [DEBUG] Mở lại trang upload chưa thành công: {e}")
-        return False
-
-def _dismiss_cancel_upload_popup(driver, profile_name):
-    """Nếu popup hỏi hủy upload xuất hiện thì bấm NO ngay để giữ phiên upload hiện tại."""
-    if not is_driver_valid(driver):
-        return False
-    try:
-        no_button = WebDriverWait(driver, 1.0).until(
-            EC.element_to_be_clickable((
-                By.XPATH,
-                "//div[contains(@class,'TUXModal') and .//div[contains(text(),'Sure you want to cancel your upload?')]]"
-                "//button[.//div[text()='No']]"
-            ))
-        )
-        ActionChains(driver).move_to_element(no_button).click().perform()
-        update_status(f"[{profile_name}] [DEBUG] Đã phát hiện popup hủy upload và tự động chọn NO để tiếp tục tải video")
-        return True
-    except Exception:
-        return False
-
-def _dismiss_cancel_buttons_best_effort(driver):
-    try:
-        buttons = driver.find_elements(
-            By.XPATH,
-            "//button[@role='button' and @type='button'"
-            " and @data-size='medium' and @data-type='neutral'"
-            " and .//div[contains(@class,'Button__content') and normalize-space()='Cancel']]"
-        )
-        for button in buttons:
-            try:
-                if button.is_displayed() and button.is_enabled():
-                    ActionChains(driver).move_to_element(button).click().perform()
-                    return True
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return False
-
-def _dismiss_content_checks_modal(driver, profile_name):
-    if not is_driver_valid(driver):
-        return False
-    xpath = (
-        "//div[(contains(@class,'TUXModal') or @role='dialog') and "
-        "(.//*[contains(normalize-space(),'automatic content checks') or contains(normalize-space(),'content checks')])]"
-        "//button[.//*[normalize-space()='Cancel'] or normalize-space()='Cancel']"
-    )
-    try:
-        buttons = driver.find_elements(By.XPATH, xpath)
-        if len(buttons) == 1:
-            try:
-                ActionChains(driver).move_to_element(buttons[0]).click().perform()
-            except Exception:
-                driver.execute_script("arguments[0].click();", buttons[0])
-            update_status(f"[{profile_name}] [DEBUG] Đã đóng modal 'Turn on automatic content checks?'")
-            return True
-        elif len(buttons) > 1:
-            update_status(f"[{profile_name}] [WARN] Phát hiện {len(buttons)} nút Cancel trong modal content checks, bỏ qua để tránh click nhầm.")
-    except Exception as e:
-            update_status(f"[{profile_name}] [DEBUG] Lỗi content checks modal: {e}")
-    return False
-
-
-def _has_content_checks_modal(driver):
-    try:
-        return bool(driver.execute_script(
-            """
-            return Array.from(document.querySelectorAll('[role="dialog"], .TUXModal, [class*="Modal"], [class*="modal"]')).some(root => {
-              const style = window.getComputedStyle(root);
-              const rect = root.getBoundingClientRect();
-              if (style.display === 'none' || style.visibility === 'hidden' || rect.width <= 0 || rect.height <= 0) return false;
-              const text = (root.innerText || root.textContent || '').toLowerCase();
-              return text.includes('automatic content checks') || text.includes('content checks');
-            });
-            """
-        ))
-    except Exception:
-        return False
-
-def _dismiss_known_tiktok_popups_fast(driver, profile_name, max_rounds=3):
-    if not is_driver_valid(driver):
-        return False
-    clicked = False
-    safe_texts = ('cancel', 'not now', 'no', 'skip', 'later', 'close', 'got it', 'maybe later', 'dismiss')
-    unsafe_texts = ('post', 'delete', 'discard', 'confirm', 'submit')
-
-    for _ in range(max_rounds):
-        did_click = False
-        try:
-            did_click = bool(driver.execute_script(
-                """
-                const safeTexts = arguments[0];
-                const unsafeTexts = arguments[1];
-                const roots = Array.from(document.querySelectorAll('[role="dialog"], .TUXModal, [class*="Modal"], [class*="modal"]'))
-                  .filter(el => {
-                    const s = window.getComputedStyle(el);
-                    const r = el.getBoundingClientRect();
-                    return s && s.display !== 'none' && s.visibility !== 'hidden' && r.width > 40 && r.height > 40;
-                  });
-                for (const root of roots) {
-                  const rootText = (root.innerText || '').toLowerCase();
-                  const contentCheck = rootText.includes('automatic content checks') || rootText.includes('content checks') || rootText.includes('copyright check') || rootText.includes('eligibility check');
-                  const buttons = Array.from(root.querySelectorAll('button, [role="button"]'));
-                  for (const btn of buttons) {
-                    const text = (btn.innerText || btn.textContent || btn.getAttribute('aria-label') || '').trim().toLowerCase();
-                    if (!text) continue;
-                    if (unsafeTexts.some(x => text === x || text.includes(x))) continue;
-                    const isSafe = safeTexts.some(x => text === x || text.includes(x));
-                    if (!isSafe && !(contentCheck && text.includes('cancel'))) continue;
-                    const s = window.getComputedStyle(btn);
-                    const r = btn.getBoundingClientRect();
-                    if (s.display === 'none' || s.visibility === 'hidden' || r.width <= 0 || r.height <= 0) continue;
-                    btn.click();
-                    return true;
-                  }
-                }
-                return false;
-                """,
-                list(safe_texts),
-                list(unsafe_texts),
-            ))
-        except Exception:
-            did_click = False
-
-        if not did_click:
-            xpaths = [
-                "//div[(contains(@class,'TUXModal') or @role='dialog' or contains(@class,'Modal') or contains(@class,'modal'))]//button[.//*[normalize-space()='Cancel'] or normalize-space()='Cancel']",
-                "//div[(contains(@class,'TUXModal') or @role='dialog' or contains(@class,'Modal') or contains(@class,'modal'))]//button[.//*[normalize-space()='Not now'] or normalize-space()='Not now']",
-                "//div[(contains(@class,'TUXModal') or @role='dialog' or contains(@class,'Modal') or contains(@class,'modal'))]//button[.//*[normalize-space()='No'] or normalize-space()='No']",
-                "//div[(contains(@class,'TUXModal') or @role='dialog' or contains(@class,'Modal') or contains(@class,'modal'))]//button[.//*[normalize-space()='Close'] or normalize-space()='Close']",
-            ]
-            for xpath in xpaths:
-                try:
-                    for button in driver.find_elements(By.XPATH, xpath):
-                        if button.is_displayed() and button.is_enabled():
-                            try:
-                                driver.execute_script("arguments[0].click();", button)
-                            except Exception:
-                                ActionChains(driver).move_to_element(button).click().perform()
-                            did_click = True
-                            break
-                    if did_click:
-                        break
-                except Exception:
-                    continue
-
-        if did_click:
-            clicked = True
-            update_status(f"[{profile_name}] [DEBUG] Đã đóng popup TikTok nhanh để tiếp tục đăng.")
-            time.sleep(0.15)
-            continue
-        break
-    return clicked
-
-
-def _dismiss_tiktok_joyride(driver, profile_name, max_rounds=3):
-    dismissed = False
-    for _ in range(max_rounds):
-        try:
-            result = driver.execute_script(
-                """
-                const overlays = Array.from(document.querySelectorAll('.react-joyride__overlay, [data-test-id="overlay"]'))
-                  .filter(el => {
-                    const style = window.getComputedStyle(el);
-                    const rect = el.getBoundingClientRect();
-                    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-                  });
-                if (!overlays.length) return 'none';
-                const preferred = ['skip', 'close', 'got it', 'done', 'finish', 'no thanks'];
-                const controls = Array.from(document.querySelectorAll(
-                  '.react-joyride__tooltip button, .react-joyride__tooltip [role="button"], [data-action="skip"], [data-action="close"]'
-                ));
-                for (const control of controls) {
-                  const text = (control.innerText || control.textContent || control.getAttribute('aria-label') || '').trim().toLowerCase();
-                  if (preferred.some(item => text === item || text.includes(item))) {
-                    control.click();
-                    return `button:${text}`;
-                  }
-                }
-                overlays[0].click();
-                return 'overlay';
-                """
-            )
-        except Exception:
-            return dismissed
-        if result == 'none':
-            return dismissed
-        dismissed = True
-        update_status(f"[{profile_name}] [DEBUG] Đã đóng hướng dẫn Joyride TikTok ({result}).")
-        time.sleep(0.1)
-    return dismissed
-
-def _has_visible_tiktok_modal(driver):
-    try:
-        return bool(driver.execute_script(
-            """
-            return Array.from(document.querySelectorAll('[role="dialog"], .TUXModal, [class*="Modal"], [class*="modal"]')).some(el => {
-              const s = window.getComputedStyle(el);
-              const r = el.getBoundingClientRect();
-              return s && s.display !== 'none' && s.visibility !== 'hidden' && r.width > 40 && r.height > 40;
-            });
-            """
-        ))
-    except Exception:
-        return False
-
-def _click_post_button(driver, profile_name, post_button):
-    _dismiss_tiktok_joyride(driver, profile_name, max_rounds=3)
-    _dismiss_known_tiktok_popups_fast(driver, profile_name, max_rounds=2)
-    if _has_visible_tiktok_modal(driver):
-        raise Exception('Có popup TikTok chưa xử lý, chưa bấm Đăng để tránh click sai.')
-    post_button = _find_ready_post_button(driver) or post_button
-    blocked_by = driver.execute_script(
-        """
-        const button = arguments[0];
-        const rect = button.getBoundingClientRect();
-        const top = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-        if (!top || top === button || button.contains(top)) return '';
-        return top.className || top.getAttribute('data-test-id') || top.tagName;
-        """,
-        post_button,
-    )
-    if blocked_by:
-        raise Exception(f'Nút Đăng vẫn bị che bởi: {blocked_by}')
-    driver.execute_script("""
-        const el = arguments[0];
-        const rect = el.getBoundingClientRect();
-        el.dispatchEvent(new MouseEvent('click', {
-            bubbles: true, cancelable: true, view: window, composed: true,
-            clientX: rect.left + rect.width / 2,
-            clientY: rect.top + rect.height / 2
-        }));
-    """, post_button)
-
-def _has_blocking_post_modal(driver):
-    try:
-        return bool(driver.execute_script(
-            """
-            const roots = Array.from(document.querySelectorAll(
-              '[role="alert"], [role="status"], [role="dialog"], [data-e2e*="toast"], [class*="Toast"], [class*="toast"]'
-            )).filter(el => {
-              const style = window.getComputedStyle(el);
-              const rect = el.getBoundingClientRect();
-              return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-            });
-            const blocking = [
-              'couldn\'t upload', 'could not upload', 'failed to upload', 'upload failed',
-              'something went wrong', 'vi phạm', 'không thể đăng'
-            ];
-            return roots.some(root => {
-              const text = (root.innerText || root.textContent || '').toLowerCase();
-              return blocking.some(item => text.includes(item));
-            });
-            """
-        ))
-    except Exception:
-        return False
-
-def _capture_post_confirmation_state(driver):
-    try:
-        surfaces = driver.execute_script(
-            """
-            return Array.from(document.querySelectorAll(
-              '[role="alert"], [role="status"], [role="dialog"], [data-e2e*="toast"], [class*="Toast"], [class*="toast"]'
-            )).filter(el => {
-              const style = window.getComputedStyle(el);
-              const rect = el.getBoundingClientRect();
-              return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-            }).map(el => (el.innerText || el.textContent || '').trim().toLowerCase()).filter(Boolean);
-            """
-        ) or []
-    except Exception:
-        surfaces = []
-    try:
-        current_url = (driver.current_url or '').lower()
-    except Exception:
-        current_url = ''
-    return {'url': current_url, 'surfaces': set(surfaces)}
-
-
-def _save_post_diagnostics(driver, profile_name, short_name):
-    try:
-        output_dir = app_base_dir() / 'temp_dl' / 'post_diagnostics'
-        output_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = re.sub(r'[^A-Za-z0-9_.-]+', '_', short_name)[:80] or 'video'
-        stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        base = output_dir / f'{profile_name}_{stamp}_{safe_name}'
-        text_path = base.with_suffix('.txt')
-        screenshot_path = base.with_suffix('.png')
-        body_text = driver.execute_script("return document.body ? document.body.innerText : '';") or ''
-        text_path.write_text(body_text, encoding='utf-8')
-        driver.save_screenshot(str(screenshot_path))
-        if os.environ.get('UPLOAD_CAPTURE_NETWORK') == '1':
-            network_path = base.with_suffix('.network.json')
-            network_rows = []
-            for entry in driver.get_log('performance'):
-                try:
-                    message = json.loads(entry.get('message', '{}')).get('message', {})
-                    method = message.get('method', '')
-                    params = message.get('params', {})
-                    if method == 'Network.requestWillBeSent':
-                        request = params.get('request', {})
-                        network_rows.append({
-                            'event': 'request',
-                            'method': request.get('method'),
-                            'url': request.get('url'),
-                        })
-                    elif method == 'Network.responseReceived':
-                        response = params.get('response', {})
-                        network_rows.append({
-                            'event': 'response',
-                            'status': response.get('status'),
-                            'url': response.get('url'),
-                        })
-                except Exception:
-                    continue
-            network_path.write_text(json.dumps(network_rows, ensure_ascii=False, indent=2), encoding='utf-8')
-        update_status(f"[{profile_name}] Đã lưu chẩn đoán sau Post: {text_path}")
-        return str(text_path)
-    except Exception as error:
-        update_status(f"[{profile_name}] [WARN] Không lưu được chẩn đoán sau Post: {error}")
-        return None
-
-
-def _read_post_network_result(driver):
-    if os.environ.get('UPLOAD_CAPTURE_NETWORK') != '1' and os.environ.get('UPLOAD_TEST_MODE') != '1':
-        return None
-    try:
-        entries = driver.get_log('performance')
-    except Exception:
-        return None
-    for entry in entries:
-        try:
-            message = json.loads(entry.get('message', '{}')).get('message', {})
-            if message.get('method') != 'Network.responseReceived':
-                continue
-            params = message.get('params', {})
-            response = params.get('response', {})
-            url = str(response.get('url', ''))
-            if '/tiktok/web/project/post/' not in url:
-                continue
-            body = driver.execute_cdp_cmd('Network.getResponseBody', {
-                'requestId': params.get('requestId'),
-            }).get('body', '')
-            try:
-                payload = json.loads(body)
-            except Exception:
-                payload = {'raw_body': body[:2000]}
-            return {
-                'http_status': int(response.get('status') or 0),
-                'payload': payload,
-            }
-        except Exception:
-            continue
-    return None
-
-
-def _wait_post_submission_confirmed(driver, profile_name, short_name, baseline=None, timeout=25):
-    end_time = time.time() + timeout
-    baseline = baseline or {'url': '', 'surfaces': set()}
-    success_markers = [
-        'your video has been posted', 'video has been posted', 'post has been uploaded',
-        'content under review', 'under review', 'đã đăng', 'đang xét duyệt'
-    ]
-    success_urls = ('/tiktokstudio/content', '/creator-center/content', '/manage')
-    content_check_handled = False
-
-    while time.time() < end_time:
-        if not is_driver_valid(driver):
-            raise WebDriverException('Mất kết nối trình duyệt khi chờ TikTok xác nhận đăng video')
-        if not content_check_handled and _has_content_checks_modal(driver):
-            if not _dismiss_content_checks_modal(driver, profile_name):
-                raise Exception('Phát hiện modal content checks nhưng không đóng được an toàn.')
-            time.sleep(0.1)
-            final_button = _find_ready_post_button(driver)
-            if not final_button:
-                raise Exception('Không tìm lại được nút Đăng sau modal content checks.')
-            ActionChains(driver).move_to_element(final_button).click().perform()
-            content_check_handled = True
-            update_status(f"[{profile_name}] [DEBUG] Đã bấm Đăng lại sau khi đóng modal content checks.")
-            continue
-        if _has_blocking_post_modal(driver):
-            raise Exception('TikTok hiển thị popup/lỗi sau khi bấm Đăng. Chưa xác nhận đăng thành công.')
-        network_result = _read_post_network_result(driver)
-        if network_result:
-            payload = network_result.get('payload') or {}
-            status_code = payload.get('status_code', payload.get('statusCode'))
-            if network_result.get('http_status') == 200 and status_code == 0:
-                update_status(f"[{profile_name}] TikTok API đã xác nhận đăng video: {short_name}")
-                return True
-            raise PostRejectedError(
-                f"post_rejected: HTTP {network_result.get('http_status')}, "
-                f"status_code={status_code}, status_msg={payload.get('status_msg', '')}"
-            )
-        try:
-            current_url = (driver.current_url or '').lower()
-            state = _capture_post_confirmation_state(driver)
-            new_surfaces = state['surfaces'] - set(baseline.get('surfaces') or set())
-            if any(marker in text for text in new_surfaces for marker in success_markers):
-                update_status(f"[{profile_name}] TikTok đã xác nhận đăng/xử lý video: {short_name}")
-                return True
-            if current_url != baseline.get('url') and any(marker in current_url for marker in success_urls) and '/upload' not in current_url:
-                update_status(f"[{profile_name}] TikTok đã chuyển sang trang quản lý nội dung sau khi đăng: {short_name}")
-                return True
-        except Exception as e:
-            if isinstance(e, WebDriverException):
+            update_status(f"[{profile_name}] Lỗi mở Patchright lần {attempt + 1}: {error}")
+            if attempt == DRIVER_INIT_RETRIES - 1:
+                _set_profile_ui(profile_name, status='Lỗi', browser='Bị lỗi', last_error=str(error))
+                update_status(f"[{profile_name}] Lỗi mở Patchright sau {DRIVER_INIT_RETRIES} lần: {error}")
                 raise
-        time.sleep(0.2)
+            update_status(f"[{profile_name}] Thử mở Patchright lại lần {attempt + 2}...")
+            time.sleep(DRIVER_INIT_RETRY_DELAY)
 
-    diagnostic_path = _save_post_diagnostics(driver, profile_name, short_name)
-    detail = f"; diagnostic={diagnostic_path}" if diagnostic_path else ''
-    raise TimeoutException(f"Chưa thấy TikTok xác nhận đăng thành công sau {timeout}s: {short_name}{detail}")
+    return None
 
 # =========================
 # Upload Logic
 # =========================
-POST_BUTTON_SELECTOR = "button[data-e2e='post_video_button'][aria-disabled='false']"
-UPLOAD_EDITOR_READY_SELECTORS = [
-    "div[data-e2e='upload-progress']",
-    "div[data-e2e='upload-loading']",
-    "div[data-e2e='video-caption-editor']",
-    "div[data-e2e='video-caption-editor-container']",
-    "div[data-e2e='recommend-caption-editor']",
-    "div[data-e2e='publish-settings']",
-    "div[data-e2e='caption-editor']",
-    "div[data-e2e='upload-card']",
-    "div[class*='upload']",
-    "div[class*='caption']",
-    "textarea",
-]
-
-def _find_ready_post_button(driver):
-    try:
-        for button in driver.find_elements(By.CSS_SELECTOR, POST_BUTTON_SELECTOR):
-            try:
-                if button.is_displayed() and button.is_enabled():
-                    return button
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return None
-
-def _has_selected_upload_file(driver):
-    try:
-        return bool(driver.execute_script(
-            """
-            const inputs = Array.from(document.querySelectorAll("input[type='file']"));
-            return inputs.some(input => input.files && input.files.length > 0);
-            """
-        ))
-    except Exception:
-        try:
-            for elem in driver.find_elements(By.CSS_SELECTOR, "input[type='file']"):
-                value = (elem.get_attribute('value') or '').strip()
-                if value:
-                    return True
-        except Exception:
-            pass
-    return False
-
-def _detect_upload_editor_state(driver):
-    try:
-        post_ready = bool(driver.execute_script(
-            """
-            const btn = document.querySelector("button[data-e2e='post_video_button']");
-            if (!btn) return false;
-            const ariaDisabled = btn.getAttribute('aria-disabled');
-            const disabled = btn.disabled || ariaDisabled === 'true';
-            const style = window.getComputedStyle(btn);
-            const visible = style && style.display !== 'none' && style.visibility !== 'hidden' && btn.offsetParent !== null;
-            return visible && !disabled;
-            """
-        ))
-        if post_ready:
-            return {
-                'alive': True,
-                'ready': True,
-                'reason': 'post-ready-js',
-            }
-    except Exception:
-        pass
-
-    has_selected_file = _has_selected_upload_file(driver)
-
-    for selector in UPLOAD_EDITOR_READY_SELECTORS:
-        try:
-            elems = driver.find_elements(By.CSS_SELECTOR, selector)
-            visible = [e for e in elems if e.is_displayed()]
-            if visible:
-                return {
-                    'alive': True,
-                    'ready': False,
-                    'reason': f'editor:{selector}',
-                    'has_selected_file': has_selected_file,
-                }
-        except Exception:
-            continue
-
-    if has_selected_file:
-        return {
-            'alive': True,
-            'ready': False,
-            'reason': 'file-selected-awaiting-editor',
-            'has_selected_file': True,
-        }
-
-    return {
-        'alive': False,
-        'ready': False,
-        'reason': 'no-editor-signal',
-        'has_selected_file': False,
-    }
-
-def _wait_post_button(driver):
-    return WebDriverWait(driver, UPLOAD_READY_TIMEOUT, poll_frequency=UPLOAD_STALL_POLL_INTERVAL).until(
-        lambda d: _find_ready_post_button(d)
-    )
-
-def _has_upload_progress_signal(driver):
-    """Siết tín hiệu upload: ưu tiên dấu hiệu mạnh, tránh nhận nhầm processing/treo."""
-    try:
-        state = _detect_upload_editor_state(driver)
-        return state['alive'], state['reason']
-    except Exception as e:
-        return False, f"signal-error:{e}"
-
-def _classify_upload_phase(signal_reason, editor_state=None):
-    editor_state = editor_state or {}
-    if editor_state.get('ready') or signal_reason == 'post-ready-js':
-        return 'post-ready'
-
-    reason = signal_reason or editor_state.get('reason') or ''
-    reason = str(reason)
-
-    if 'upload-progress' in reason or 'upload-loading' in reason:
-        return 'uploading'
-    if 'file-selected' in reason or 'input[type=\'file\']' in reason or 'input[type="file"]' in reason:
-        return 'file-selected'
-    if 'caption-editor' in reason or 'publish-settings' in reason or 'upload-card' in reason or 'recommend-caption-editor' in reason or 'video-caption-editor' in reason:
-        return 'processing'
-    if editor_state.get('alive'):
-        return 'processing'
-    return 'unknown'
-
-def _watch_upload_until_ready_or_stalled(driver, profile_name, file_name):
-    """Watchdog nhẹ: chỉ quan sát, log và chỉ can thiệp khi xác nhận stalled."""
-    short_name = shorten_filename(file_name)
-    start_ts = time.time()
-    last_progress_ts = start_ts
-    warned = False
-    last_stage_log_ts = 0
-    last_stage_key = None
-    last_signal_check_ts = 0.0
-    last_signal_result = (False, "no-signal")
-    last_phase = None
-    last_phase_change_ts = start_ts
-    last_progress_fingerprint = None
-    last_content_check_ts = 0.0
-
-    update_status(f"[{profile_name}] [DEBUG] Bắt đầu theo dõi tiến trình tải video lên: {short_name}")
-
-    while True:
-        try:
-            if not is_driver_valid(driver):
-                return False, "trình duyệt điều khiển không còn phản hồi", None
-
-            now = time.time()
-
-            if now - last_content_check_ts >= 0.25:
-                _dismiss_tiktok_joyride(driver, profile_name, max_rounds=1)
-                _dismiss_known_tiktok_popups_fast(driver, profile_name, max_rounds=2)
-                last_content_check_ts = now
-
-            post_button = _find_ready_post_button(driver)
-            if post_button:
-                update_status(f"[{profile_name}] [DEBUG] TikTok đã xử lý xong video, nút Đăng đã sẵn sàng: {short_name}")
-                return True, "nút Đăng đã sẵn sàng", post_button
-
-            editor_state = _detect_upload_editor_state(driver)
-            if editor_state.get('ready'):
-                post_button = _find_ready_post_button(driver)
-                if post_button:
-                    return True, editor_state.get('reason', 'editor-ready'), post_button
-
-            if now - last_signal_check_ts >= UPLOAD_SIGNAL_POLL_INTERVAL:
-                last_signal_result = _has_upload_progress_signal(driver)
-                last_signal_check_ts = now
-
-            alive, source = last_signal_result
-            if editor_state.get('alive'):
-                alive = True
-                source = editor_state.get('reason', source)
-
-            phase = _classify_upload_phase(source, editor_state=editor_state)
-            progress_fingerprint = (phase, source, bool(editor_state.get('ready')))
-
-            made_progress = False
-            if phase != last_phase:
-                made_progress = True
-                last_phase = phase
-                last_phase_change_ts = now
-            if progress_fingerprint != last_progress_fingerprint:
-                made_progress = True
-                last_progress_fingerprint = progress_fingerprint
-
-            if alive:
-                if made_progress:
-                    last_progress_ts = now
-                if now - last_stage_log_ts >= 12:
-                    stage_map = {
-                        "selector:div[data-e2e='upload-loading']": "Hệ thống đang tải video lên máy chủ",
-                        "selector:div[data-e2e='upload-progress']": "Thanh tiến trình tải video đang chạy",
-                        f"selector:{POST_BUTTON_SELECTOR}": "Nút Đăng đã bật",
-                        "selector:input[type='file'][accept*='video']": "Video đã được gắn vào biểu mẫu đăng",
-                        "selector:input[type='file']": "Biểu mẫu tải video vẫn sẵn sàng",
-                        "editor:div[data-e2e='upload-loading']": "TikTok đã nhận file và đang dựng giao diện upload",
-                        "editor:div[data-e2e='upload-progress']": "Thanh tiến trình upload đã xuất hiện",
-                        "editor:div[data-e2e='video-caption-editor']": "Khung caption/editor đã mount",
-                        "editor:div[data-e2e='video-caption-editor-container']": "Khung caption/editor đã mount",
-                        "editor:div[data-e2e='recommend-caption-editor']": "Khu vực caption gợi ý đã mount",
-                        "editor:div[data-e2e='publish-settings']": "Khu vực publish settings đã mount",
-                        "editor:div[data-e2e='caption-editor']": "Trình soạn caption đã sẵn sàng một phần",
-                        "editor:div[data-e2e='upload-card']": "Card upload đã được TikTok dựng xong",
-                        "editor:textarea": "Textarea caption đã xuất hiện",
-                        "file-selected-awaiting-editor": "TikTok đã nhận file nhưng giao diện editor đang tải tiếp",
-                        "post-ready-js": "Nút Đăng đã sẵn sàng từ kiểm tra JS",
-                    }
-                    stage_text = stage_map.get(source, "Video vẫn đang được TikTok xử lý")
-                    if source != last_stage_key or now - last_stage_log_ts >= 20:
-                        if made_progress:
-                            update_status(f"[{profile_name}] [DEBUG] {stage_text}: {short_name}")
-                        else:
-                            update_status(f"[{profile_name}] [DEBUG] {stage_text} (chưa có tiến triển mới): {short_name}")
-                        last_stage_log_ts = now
-                        last_stage_key = source
-
-            elapsed_total = now - start_ts
-            idle_for = now - last_progress_ts
-            phase_idle_for = now - last_phase_change_ts
-            if not warned and idle_for >= UPLOAD_PROGRESS_WARN_AFTER:
-                warned = True
-                update_status(f"[{profile_name}] [DEBUG] Video đang xử lý lâu hơn bình thường (~{int(idle_for)} giây chưa thấy tiến triển mới): {short_name}")
-
-            if elapsed_total >= UPLOAD_HARD_TIMEOUT:
-                update_status(f"[{profile_name}] [DEBUG] Phát hiện video bị kẹt cứng sau {int(elapsed_total)} giây tổng thời gian upload: {short_name}")
-                return False, f"video vượt hard-timeout {UPLOAD_HARD_TIMEOUT}s (phase={last_phase}, source={source})", None
-
-            if phase in {'processing', 'file-selected', 'uploading'} and phase_idle_for >= UPLOAD_PHASE_STALL_TIMEOUT:
-                update_status(f"[{profile_name}] [DEBUG] Phát hiện video bị kẹt quá lâu ở phase `{phase}` sau {int(phase_idle_for)} giây: {short_name}")
-                return False, f"video kẹt ở phase {phase} quá {UPLOAD_PHASE_STALL_TIMEOUT}s", None
-
-            if idle_for >= UPLOAD_STALL_TIMEOUT and (not alive or phase == 'unknown'):
-                update_status(f"[{profile_name}] [DEBUG] Phát hiện video có dấu hiệu bị treo sau {int(idle_for)} giây không có tiến triển: {short_name}")
-                return False, f"video tải lâu không có tiến triển ({last_phase or 'unknown'} / {source})", None
-
-            time.sleep(UPLOAD_STALL_POLL_INTERVAL)
-        except Exception as e:
-            update_status(f"[{profile_name}] [DEBUG] Bộ theo dõi tiến trình tải video gặp lỗi: {e}")
-            return False, f"lỗi theo dõi tiến trình tải video: {e}", None
-
-def _ensure_upload_container_ready(driver, quick_only=False):
-    try:
-        elems = driver.find_elements(By.CSS_SELECTOR, "div[data-e2e='select_video_container']")
-        if elems: return True
-        if quick_only:
-            deadline = time.perf_counter() + UPLOAD_CONTAINER_QUICK_WAIT
-            while time.perf_counter() < deadline:
-                time.sleep(0.15)
-                elems = driver.find_elements(By.CSS_SELECTOR, "div[data-e2e='select_video_container']")
-                if elems:
-                    return True
-            return False
-        driver.get(TIKTOK_UPLOAD_URL)
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.CSS_SELECTOR, "div[data-e2e='select_video_container']")))
-        return True
-    except Exception: return False
-
-def _force_reopen_driver(profile_name, reason):
-    if not profiles.get(profile_name, {}).get('running', False):
-        update_status(f"[{profile_name}] Profile không còn chạy, bỏ qua reopen: {reason}")
-        return None
-    lc = get_lifecycle(profile_name)
-    if lc.is_cancelled:
-        update_status(f"[{profile_name}] Lifecycle đã hủy, bỏ qua reopen: {reason}")
-        return None
-    driver = profiles.get(profile_name, {}).get('driver')
-    if driver:
-        try:
-            driver.quit()
-        except Exception:
-            pass
-    profiles[profile_name]['driver'] = None
-    update_status(f"[{profile_name}] [DEBUG] Đang mở lại browser sau lỗi upload: {reason}")
-    try:
-        ensure_driver(profile_name)
-    except Exception as e:
-        update_status(f"[{profile_name}] Reopen thất bại: {e}")
-        return None
-    return profiles[profile_name].get('driver')
-
-def _recover_upload_page_after_failure(profile_name, driver, reason, force_reopen=False):
-    if not profiles.get(profile_name, {}).get('running', False):
-        return False
-    lc = get_lifecycle(profile_name)
-    if lc.is_cancelled:
-        return False
-    update_status(f"[{profile_name}] [DEBUG] Đang reset trang upload sau lỗi: {reason}")
-    if not force_reopen and is_driver_valid(driver):
-        try:
-            if _safe_open_upload_page(driver, profile_name) and _ensure_upload_container_ready(driver, quick_only=True):
-                update_status(f"[{profile_name}] [DEBUG] Đã reset trang upload sau lỗi.")
-                return True
-        except Exception:
-            pass
-    try:
-        new_driver = _force_reopen_driver(profile_name, reason)
-        if new_driver and _ensure_upload_container_ready(new_driver, quick_only=True):
-            update_status(f"[{profile_name}] [DEBUG] Đã mở lại browser và trang upload sẵn sàng.")
-            return True
-        if new_driver:
-            return _safe_open_upload_page(new_driver, profile_name)
-    except Exception as e:
-        update_status(f"[{profile_name}] [DEBUG] Không thể reset trang upload sau lỗi: {e}")
-    return False
-
 def upload_video(profile_name, video_path):
     last_error = None
-    driver = None
+    token = None
     file_name = Path(video_path).name
     short_name = shorten_filename(file_name)
     benchmark_phases = {}
     benchmark_success = False
     benchmark_post_clicked = False
-    driver_reused_before = is_driver_valid(profiles.get(profile_name, {}).get('driver'))
+    result = None
+    driver_reused_before = _browser_session_valid(profiles.get(profile_name, {}).get('driver'))
 
     def record_phase(name, started_at):
         elapsed = time.perf_counter() - started_at
         benchmark_phases[name] = benchmark_phases.get(name, 0.0) + elapsed
 
     try:
-        phase_started = time.perf_counter()
-        ensure_driver(profile_name)
-        record_phase('ensure_driver_seconds', phase_started)
-        driver = profiles[profile_name]['driver']
-        stall_retry_used = False
-        recovered_after_failure = False
         max_attempts = 1 if os.environ.get('UPLOAD_TEST_MODE') == '1' else RETRY_COUNT + 1
         for attempt in range(1, max_attempts + 1):
-            post_clicked = False
+            upload_invoked = False
             try:
+                if not profiles.get(profile_name, {}).get('running', False) or get_lifecycle(profile_name).is_cancelled:
+                    last_error = 'cancelled_safe'
+                    break
+                phase_started = time.perf_counter()
+                token = ensure_driver(profile_name)
+                record_phase('ensure_driver_seconds', phase_started)
                 update_status(f"[{profile_name}] Đang đăng: {short_name}")
                 _set_profile_ui(profile_name, upload='Đang tải video', last_error='')
-                if not _ensure_upload_container_ready(driver, quick_only=True):
-                    _ensure_upload_container_ready(driver, quick_only=False)
                 phase_started = time.perf_counter()
-                try:
-                    file_input = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='file'][accept*='video'], input[type='file']")))
-                except TimeoutException:
-                    _safe_open_upload_page(driver, profile_name)
-                    file_input = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='file'][accept*='video'], input[type='file']")))
-                file_input.send_keys(video_path)
-                record_phase('file_select_seconds', phase_started)
-                _set_profile_ui(profile_name, upload='Đã chọn video')
-                update_status(f"[{profile_name}] [DEBUG] Đã đưa video vào trình tải lên của TikTok: {short_name}")
-                time.sleep(UPLOAD_POST_SENDKEYS_SETTLE_SECONDS)
-                _dismiss_cancel_upload_popup(driver, profile_name)
-                _dismiss_cancel_buttons_best_effort(driver)
-                _dismiss_known_tiktok_popups_fast(driver, profile_name, max_rounds=3)
-                # -------------------------------------------------------------------
-
-                phase_started = time.perf_counter()
-                ready, ready_reason, ready_post_button = _watch_upload_until_ready_or_stalled(
-                    driver,
-                    profile_name,
-                    file_name,
+                upload_invoked = True
+                result = browser_glue.run_upload(
+                    token,
+                    video_path,
+                    status_callback=lambda message: update_status(f"[{profile_name}] {message}"),
+                    stop_before_post=os.environ.get('UPLOAD_TEST_STOP_BEFORE_POST') == '1',
                 )
-                record_phase('wait_until_ready_seconds', phase_started)
-                if not ready:
-                    last_error = ready_reason
-                    _set_profile_ui(profile_name, upload='Bị kẹt', last_error=ready_reason)
-                    update_status(f"[{profile_name}] [DEBUG] Kích hoạt cơ chế khôi phục do tải video bất thường: {ready_reason}")
-                    if is_driver_valid(driver):
-                        _safe_open_upload_page(driver, profile_name)
-                        update_status(f"[{profile_name}] [DEBUG] Đã mở lại trang đăng video để khôi phục phiên tải: {short_name}")
-                    raise TimeoutException(f"Video bị treo trước khi nút Đăng sẵn sàng: {ready_reason}")
+                # Patchright owns before_dispatch=mark_post_dispatch_started semantics.
+                record_phase('patchright_upload_seconds', phase_started)
+                benchmark_post_clicked = bool(result.post_dispatched)
+                last_error = result.message or result.outcome
 
-                post_button = ready_post_button or _wait_post_button(driver)
-                _set_profile_ui(profile_name, upload='Chờ nút Đăng')
-                confirmation_baseline = _capture_post_confirmation_state(driver)
-                phase_started = time.perf_counter()
-                # From this point onward, never retry this file: click dispatch can be uncertain.
-                post_clicked = True
-                benchmark_post_clicked = True
-                _click_post_button(driver, profile_name, post_button)
-                record_phase('post_click_latency_seconds', phase_started)
-                _set_profile_ui(profile_name, upload='Đã gửi lệnh đăng')
-                update_status(f"[{profile_name}] Đã gửi lệnh đăng: {short_name}")
-
-                _set_profile_ui(profile_name, upload='Chờ TikTok xác nhận')
-                phase_started = time.perf_counter()
-                _wait_post_submission_confirmed(driver, profile_name, short_name, baseline=confirmation_baseline)
-                record_phase('confirmation_seconds', phase_started)
-                benchmark_success = True
-
-                try:
-                    os.remove(video_path)
-                except Exception as error:
-                    update_status(f"[{profile_name}] [WARN] Đã đăng nhưng không xóa được video: {error}")
-                try:
-                    if not profiles[profile_name]['config'].get('open_only_when_video', False) and not _ensure_upload_container_ready(driver, quick_only=True):
-                        _safe_open_upload_page(driver, profile_name)
-                except Exception as error:
-                    update_status(f"[{profile_name}] [WARN] Đã đăng nhưng chưa reset được trang upload: {error}")
-                try:
-                    _export_live_cookies_to_config(driver, profile_name)
-                except Exception as error:
-                    update_status(f"[{profile_name}] [WARN] Đã đăng nhưng không lưu được cookie live: {error}")
-                return True
-            except (InvalidSessionIdException, WebDriverException) as e:
-                error_kind = _log_webdriver_failure(
-                    profile_name,
-                    driver,
-                    e,
-                    'after_post' if post_clicked else 'before_post',
-                    short_name,
-                )
-                session_lost = error_kind in {
-                    'invalid_session', 'window_closed', 'renderer_crash', 'browser_disconnected'
-                } or not is_driver_valid(driver)
-                if post_clicked:
-                    last_error = 'driver_session_lost_after_post' if session_lost else f'{error_kind}_after_post'
-                    browser_state = 'Mất kết nối' if session_lost else 'Đang khôi phục'
-                    _set_profile_ui(profile_name, browser=browser_state, upload='Chưa xác nhận', last_error=last_error)
-                    update_status(f"[{profile_name}] Lỗi sau khi bấm Đăng, không retry video này để tránh đăng trùng: {short_name} ({last_error})")
-                    _recover_upload_page_after_failure(profile_name, driver, last_error, force_reopen=session_lost)
-                    recovered_after_failure = True
-                    break
-                last_error = 'driver_session_lost' if session_lost else error_kind
-                _set_profile_ui(profile_name, browser='Mất kết nối' if session_lost else 'Đang khôi phục', upload='Đăng lỗi', last_error=last_error)
-                update_status(f"[{profile_name}] Lỗi WebDriver trước khi Đăng. Đang khôi phục... ({last_error})")
-                if session_lost:
-                    _force_reopen_driver(profile_name, last_error)
-                else:
-                    _recover_upload_page_after_failure(profile_name, driver, last_error, force_reopen=False)
-                driver = profiles[profile_name]['driver']
-                continue
-            except Exception as e:
-                last_error = str(e)
-                if post_clicked:
-                    if not isinstance(e, PostRejectedError):
-                        last_error = f'post_submission_uncertain: {last_error}'
-                    _set_profile_ui(profile_name, upload='Chưa xác nhận', last_error=last_error)
-                    update_status(f"[{profile_name}] Lỗi sau khi thử bấm Đăng; không retry để tránh đăng trùng: {short_name} ({last_error})")
-                    break
-                if "File not found" in str(e):
-                    _set_profile_ui(profile_name, upload='Đăng lỗi', last_error=str(e))
-                    _append_failed_upload_log(profile_name, file_name, str(e), outcome='file_not_found')
-                    return False
-                if os.environ.get('UPLOAD_TEST_MODE') != '1' and "Video bị treo trước khi nút Đăng sẵn sàng" in str(e) and not stall_retry_used:
-                    stall_retry_used = True
-                    update_status(f"[{profile_name}] Video có dấu hiệu treo lâu hoặc kẹt phase. Thực hiện tải lại ngay 1 lần: {short_name}")
+                if result.outcome == 'posted':
+                    benchmark_success = True
+                    _set_profile_ui(profile_name, upload='Đã đăng', last_error='')
+                    _advance_patchright_migration(
+                        profiles[profile_name]['config'],
+                        MigrationState.LOGIN_VERIFIED.value,
+                        MigrationState.UPLOAD_VERIFIED,
+                    )
                     try:
-                        if is_driver_valid(driver):
-                            _safe_open_upload_page(driver, profile_name)
-                    except Exception:
-                        pass
-                    continue
-                update_status(f"[{profile_name}] Lỗi đăng (Lần {attempt}): {e}")
-                _set_profile_ui(profile_name, upload='Đăng lỗi', last_error=str(e))
+                        _cleanup_legacy_profile_after_verified_upload(
+                            profile_name,
+                            profiles[profile_name]['config'],
+                        )
+                    except Exception as cleanup_error:
+                        update_status(
+                            f"[{profile_name}] [WARN] Upload đã xác minh nhưng chưa xóa được profile cũ: {cleanup_error}"
+                        )
+                    save_configs()
+                    try:
+                        os.remove(video_path)
+                    except Exception as error:
+                        update_status(f"[{profile_name}] [WARN] Đã đăng nhưng không xóa được video: {error}")
+                    try:
+                        _export_live_cookies_to_config(token, profile_name)
+                    except Exception as error:
+                        update_status(f"[{profile_name}] [WARN] Đã đăng nhưng không lưu được cookie live: {error}")
+                    return True
+
+                if result.outcome == 'prepared':
+                    benchmark_success = True
+                    _set_profile_ui(profile_name, upload='Dry-run OK (chưa Post)', last_error='')
+                    update_status(
+                        f"[{profile_name}] Pre-Post dry-run hoàn tất: editor sẵn sàng, chưa bấm Post."
+                    )
+                    return True
+
+                no_retry = result.post_dispatched or result.outcome in {
+                    'post_uncertain', 'cancelled_safe', 'cancelled_uncertain', 'rejected', 'login_required'
+                }
+                upload_state = 'Chưa xác nhận' if result.post_dispatched or result.outcome in {'post_uncertain', 'cancelled_uncertain'} else 'Đăng lỗi'
+                if result.outcome == 'login_required':
+                    _set_profile_ui(profile_name, login='Cần đăng nhập lại')
+                _set_profile_ui(profile_name, upload=upload_state, last_error=last_error)
+                if no_retry:
+                    update_status(f"[{profile_name}] Không retry {short_name}: {result.outcome} ({last_error})")
+                    break
+                update_status(f"[{profile_name}] Upload lỗi trước Post (lần {attempt}), có thể retry: {last_error}")
+            except SessionSetupError as error:
+                last_error = str(error)
+                if isinstance(error, ProfileBusyError):
+                    last_error = f'profile_busy: {error}'
+                    break
+                if upload_invoked:
+                    last_error = 'cancelled_safe' if token and token.cancellation_event.is_set() else f'post_uncertain: {error}'
+                    break
+                if attempt >= max_attempts:
+                    break
+                if token:
+                    token.quit()
+                profiles[profile_name]['driver'] = None
+                get_lifecycle(profile_name).detach_automation()
+                update_status(f"[{profile_name}] Session lỗi trước Post, thử lại: {last_error}")
                 time.sleep(0.5)
-        
-        should_recover = str(last_error or '').lower() in {
-            'driver_session_lost',
-            'driver_session_lost_after_post',
-        }
-        if should_recover and not recovered_after_failure:
-            _recover_upload_page_after_failure(profile_name, driver, last_error or 'failed_after_retries', force_reopen=True)
-            update_status(f"[{profile_name}] [DEBUG] Đánh dấu video lỗi và reset trang upload trước video kế tiếp: {short_name}")
-        elif should_recover:
-            update_status(f"[{profile_name}] [DEBUG] Đánh dấu video lỗi; trang upload đã được reset trước video kế tiếp: {short_name}")
-        else:
-            update_status(f"[{profile_name}] [DEBUG] Đánh dấu video lỗi và chuyển sang video kế tiếp, giữ nguyên driver hiện tại: {short_name}")
+
         _set_profile_ui(profile_name, upload='Đăng lỗi', last_error=str(last_error or 'Không đăng được video'))
-        _append_failed_upload_log(profile_name, file_name, last_error or 'failed_after_retries', outcome='failed_after_retries')
+        _append_failed_upload_log(profile_name, file_name, last_error or 'failed_after_retries', outcome=last_error or 'failed_after_retries')
         return False
     except Exception as e:
         last_error = str(e)
@@ -3386,6 +1630,13 @@ def upload_video(profile_name, video_path):
     finally:
         if profile_name in profiles:
             profiles[profile_name]['uploading'] = False
+        try:
+            if result is not None:
+                timings = result.details.get("timings") or {}
+                for timing_key, timing_value in timings.items():
+                    benchmark_phases[timing_key] = timing_value
+        except Exception:
+            pass
         try:
             _write_upload_benchmark(
                 profile_name,
@@ -3443,9 +1694,15 @@ def process_video_queue_thread(profile_name):
                     update_status(f"[{profile_name}] Watchdog bị lỗi, khởi động lại...")
                     folder = profiles[profile_name]['config'].get('folder_path', '')
                     if folder:
+                        lifecycle = get_lifecycle(profile_name)
+                        observer_gen = lifecycle.generation
                         new_obs = Observer()
                         new_obs.schedule(VideoFolderHandler(profile_name), folder, recursive=False)
                         new_obs.start()
+                        if not lifecycle.register_observer(observer_gen, new_obs):
+                            new_obs.stop()
+                            new_obs.join(timeout=2)
+                            continue
                         profiles[profile_name]['observer'] = new_obs
                         update_status(f"[{profile_name}] Watchdog đã khởi động lại.")
                 continue
@@ -3455,7 +1712,7 @@ def process_video_queue_thread(profile_name):
             update_status(f"[{profile_name}] Đã đưa video vào hàng chờ xử lý: {shorten_filename(Path(video_path).name)}")
             config = profiles[profile_name]['config']
             open_only = config.get('open_only_when_video', False)
-            if open_only and not is_driver_valid(profiles[profile_name].get('driver')):
+            if open_only and not _browser_session_valid(profiles[profile_name].get('driver')):
                 _set_profile_ui(profile_name, browser='Đang mở', upload='Có video mới')
                 update_status(f"[{profile_name}] Có video mới, đang mở profile để đăng.")
             _set_profile_ui(profile_name, upload='Đang đăng')
@@ -3938,7 +2195,7 @@ def _first_run_download_check():
 def _stop_all_profiles():
     for name in list(profiles.keys()):
         lc = get_lifecycle(name)
-        if profiles.get(name, {}).get("running") or lc.has_active_driver() or is_driver_valid(lc.get_automation_driver()) or is_driver_valid(lc.get_manual_driver()):
+        if profiles.get(name, {}).get("running") or lc.has_active_driver() or _browser_session_valid(lc.get_automation_driver()) or _browser_session_valid(lc.get_manual_driver()):
             lc.cancel()
     for name in list(profiles.keys()):
         try:
@@ -4305,11 +2562,11 @@ def _thread_sequential_start(targets, context_name):
 
                 start_t = time.time()
                 while time.time() - start_t < START_PROFILE_TIMEOUT:
-                    if is_driver_valid(profiles[name].get('driver')): break
+                    if _browser_session_valid(profiles[name].get('driver')): break
                     if not profiles[name]['running']: break
                     time.sleep(1)
 
-                if is_driver_valid(profiles[name].get('driver')):
+                if _browser_session_valid(profiles[name].get('driver')):
                     update_status(f"[{name}] OK ({time.time()-start_t:.1f}s).")
                     time.sleep(1)
                 elif not profiles[name]['running']: pass
@@ -4349,7 +2606,7 @@ def _thread_sequential_stop(targets, context_name):
         for name in targets:
             if name in profiles:
                 lc = get_lifecycle(name)
-                if profiles[name].get('running', False) or lc.has_active_driver() or is_driver_valid(profiles[name].get('manual_driver')):
+                if profiles[name].get('running', False) or lc.has_active_driver() or _browser_session_valid(profiles[name].get('manual_driver')):
                     lc.cancel()
                 lc.cancel()
         for name in targets:
@@ -4452,21 +2709,30 @@ def start_profile(name=None):
     
     if name not in profiles or profiles[name]['running']:
         return
-    if profiles[name].get('session_busy') or is_driver_valid(profiles[name].get('manual_driver')):
+    if profiles[name].get('session_busy') or _browser_session_valid(profiles[name].get('manual_driver')):
         update_status(f"[{name}] Không thể Start khi browser thủ công hoặc thao tác session đang hoạt động.")
         _set_profile_ui(name, status='Lỗi', last_error='Profile đang được sử dụng bởi thao tác session khác')
         return
     
-    lc = get_lifecycle(name)
-    start_gen = lc.begin()
     config = profiles[name]['config']
 
-    duplicate_profile = _find_running_profile_with_same_data_dir(name)
+    duplicate_profile = _find_profile_with_same_data_dir(name)
     if duplicate_profile:
         message = f"Chrome profile trùng với hồ sơ đang chạy: {duplicate_profile}"
         _set_profile_ui(name, status='Lỗi', browser='Bị lỗi', last_error=message)
         update_status(f"[{name}] Không thể khởi động: {message}.")
         return
+
+    lc = get_lifecycle(name)
+    if lc.has_active_driver():
+        stale_tokens = (lc.get_automation_driver(), lc.get_manual_driver())
+        if any(_browser_session_valid(token) for token in stale_tokens):
+            message = 'Lifecycle vẫn còn browser đang hoạt động'
+            _set_profile_ui(name, status='Lỗi', browser='Bị lỗi', last_error=message)
+            update_status(f"[{name}] Không thể khởi động: {message}.")
+            return
+        lc.cleanup_fast()
+    start_gen = lc.begin()
 
     auto_created = False
     if not os.path.exists(config["folder_path"]):
@@ -4476,14 +2742,17 @@ def start_profile(name=None):
         except Exception as e:
             update_status(f"[{name}] Không thể tạo folder video: {e}")
 
-    if not os.path.exists(config["chrome_profile"]):
-        try:
-            os.makedirs(config["chrome_profile"], exist_ok=True)
-            auto_created = True
-        except Exception as e:
-            update_status(f"[{name}] Không thể tạo chrome profile: {e}")
+    try:
+        browser_glue.ensure_patchright_profile(config)
+        _sync_patchright_migration(config)
+        save_configs()
+    except Exception as error:
+        lc.cancel()
+        _set_profile_ui(name, status='Lỗi', browser='Bị lỗi', last_error=str(error))
+        update_status(f"[{name}] Không thể tạo/resume Profile-Patchright: {error}")
+        return
 
-    if not os.path.exists(config["folder_path"]) or not os.path.exists(config["chrome_profile"]):
+    if not os.path.exists(config["folder_path"]) or not os.path.exists(config["browser_profile_path"]):
         update_status(f"[{name}] Đường dẫn không hợp lệ.")
         return
 
@@ -4506,8 +2775,11 @@ def start_profile(name=None):
                 o = Observer()
                 o.schedule(h, config["folder_path"], recursive=False)
                 o.start()
+                if not lc.register_observer(start_gen, o):
+                    o.stop()
+                    o.join(timeout=2)
+                    return
                 profiles[name]['observer'] = o
-                lc.set_observer(o)
                 _set_profile_ui(name, status='Đang chạy', browser='Chờ video', upload='Chờ video mới')
                 update_status(f"[{name}] Chế độ chỉ mở khi có video mới: bỏ qua video cũ, đang chờ video mới.")
                 threading.Thread(target=process_video_queue_thread, args=(name,), daemon=True).start()
@@ -4524,11 +2796,15 @@ def start_profile(name=None):
                     kill_stale_chrome_processes(name)
                 return
 
-            if is_driver_valid(profiles[name].get('driver')):
+            if _browser_session_valid(profiles[name].get('driver')):
                 h = VideoFolderHandler(name)
                 o = Observer()
                 o.schedule(h, config["folder_path"], recursive=False)
                 o.start()
+                if not lc.register_observer(start_gen, o):
+                    o.stop()
+                    o.join(timeout=2)
+                    return
                 profiles[name]['observer'] = o
                 profiles[name]['watch_started_at'] = time.time()
                 _set_profile_ui(name, status='Đang chạy', browser='Sẵn sàng', upload='Chờ video')
@@ -4559,8 +2835,11 @@ def _stop_profile_driver(name):
     profile['driver'] = None
     drv_manual = profile.get('manual_driver')
     profile['manual_driver'] = None
-    ob = profile.get('observer')
     profile['observer'] = None
+
+    for token in (drv_auto, drv_manual):
+        if isinstance(token, SessionToken):
+            token.set_cancelled()
 
     # Save cookies best-effort before cleanup
     for drv in (drv_auto, drv_manual):
@@ -4569,13 +2848,6 @@ def _stop_profile_driver(name):
                 _export_live_cookies_to_config(drv, name)
             except Exception:
                 pass
-
-    if ob is not None:
-        try:
-            ob.stop()
-            ob.join(timeout=2)
-        except Exception:
-            pass
 
     # Gen-scoped cleanup: only clean if gen still current
     report = lc.cleanup_gen(stop_gen, quit_timeout=3, kill_timeout=2)
@@ -4593,12 +2865,16 @@ def close_profile_browser(name):
     lc = get_lifecycle(name)
     drv = profiles[name].get('driver')
     profiles[name]['driver'] = None
+    lifecycle_driver, lifecycle_service, _owned_pids = lc.detach_automation()
+    if drv is None:
+        drv = lifecycle_driver
     if drv:
+        if isinstance(drv, SessionToken):
+            drv.set_cancelled()
         try:
             _export_live_cookies_to_config(drv, name)
         except Exception:
             pass
-        lc.clear_driver_refs()
         try:
             drv.quit()
         except Exception:
@@ -4620,8 +2896,8 @@ def stop_profile(selected_name=None):
     lc = get_lifecycle(name)
     has_any_driver = (
         profiles[name].get('running', False)
-        or is_driver_valid(profiles[name].get('driver'))
-        or is_driver_valid(profiles[name].get('manual_driver'))
+        or _browser_session_valid(profiles[name].get('driver'))
+        or _browser_session_valid(profiles[name].get('manual_driver'))
         or lc.has_active_driver()
     )
     if not has_any_driver:
@@ -4756,18 +3032,6 @@ def add_profile():
     v_head = ctk.BooleanVar(scroll_frame, value=True)
     ctk.CTkCheckBox(scroll_frame, text="Headless", variable=v_head).pack(pady=5)
 
-    ctk.CTkLabel(scroll_frame, text="Thiết bị kiểm thử:").pack(pady=(8, 2))
-    v_device = StringVar(scroll_frame, value='desktop')
-    ctk.CTkComboBox(scroll_frame, values=['desktop', 'pixel', 'iphone_x', 'custom'], variable=v_device).pack(pady=2)
-    ctk.CTkLabel(scroll_frame, text="User-Agent tùy chỉnh (để trống nếu dùng preset):").pack(pady=2)
-    e_custom_ua = ctk.CTkEntry(scroll_frame, width=400)
-    e_custom_ua.pack(pady=2)
-    ctk.CTkLabel(scroll_frame, text="WebRTC:").pack(pady=(8, 2))
-    v_webrtc = StringVar(scroll_frame, value='controlled')
-    ctk.CTkComboBox(scroll_frame, values=['controlled', 'block'], variable=v_webrtc).pack(pady=2)
-    v_protection = ctk.BooleanVar(scroll_frame, value=True)
-    ctk.CTkCheckBox(scroll_frame, text="Bảo vệ Canvas/WebGL/AudioContext", variable=v_protection).pack(pady=5)
-
     v_open_only = ctk.BooleanVar(scroll_frame, value=False)
     ctk.CTkCheckBox(scroll_frame, text="Chỉ mở khi có video mới", variable=v_open_only).pack(pady=5)
     
@@ -4789,15 +3053,20 @@ def add_profile():
         if not fd or not cp or pj not in projects:
             messagebox.showerror("Lỗi", "Thiếu thông tin")
             return
+        duplicate = _find_profile_with_data_dir(cp)
+        if duplicate:
+            messagebox.showerror("Lỗi", f"Chrome User Data đang được hồ sơ '{duplicate}' sử dụng.")
+            return
+        try:
+            profile_path = Path(cp)
+            if not profile_path.exists():
+                create_owned_root(profile_path)
+        except Exception as error:
+            messagebox.showerror("Lỗi", f"Không tạo được Chrome User Data an toàn: {error}")
+            return
             
         fp_seed = nm + e_cookie.get() + str(time.time_ns())
         fingerprint = _generate_fingerprint(seed=fp_seed)
-        fingerprint = apply_device_preset(fingerprint, v_device.get())
-        if v_device.get() == 'custom' and e_custom_ua.get().strip():
-            fingerprint['user_agent'] = e_custom_ua.get().strip()
-        fingerprint['webrtc_policy'] = v_webrtc.get()
-        fingerprint['fingerprint_protection'] = v_protection.get()
-        fingerprint = ensure_fingerprint_defaults(fingerprint, seed=fp_seed)
         profiles[nm] = {
             'config': {
                 "folder_path": fd, 
@@ -4880,9 +3149,16 @@ def batch_add_profiles():
             video_dir = os.path.join(profile_root, "Video")
             chrome_dir = os.path.join(profile_root, "Profile")
 
+            duplicate = _find_profile_with_data_dir(chrome_dir)
+            if duplicate:
+                update_status(f"[Batch] Bỏ qua {p_name} (Chrome User Data trùng với {duplicate}).")
+                skipped_count += 1
+                continue
+
             try:
                 os.makedirs(video_dir, exist_ok=True)
-                os.makedirs(chrome_dir, exist_ok=True)
+                if not Path(chrome_dir).exists():
+                    create_owned_root(chrome_dir)
             except Exception as e:
                 update_status(f"[Batch] Lỗi tạo folder {p_name}: {e}")
                 skipped_count += 1
@@ -4930,7 +3206,7 @@ def edit_profile():
     sel = tree.selection()
     if not sel: return
     nm = tree.item(sel[0])['values'][0]
-    if profiles[nm].get('running') or profiles[nm].get('session_busy') or is_driver_valid(profiles[nm].get('manual_driver')):
+    if profiles[nm].get('running') or profiles[nm].get('session_busy') or _browser_session_valid(profiles[nm].get('manual_driver')):
         messagebox.showwarning('Sửa hồ sơ', 'Hãy Stop profile và đóng browser trước khi sửa.')
         return
     cfg = profiles[nm]['config']
@@ -4984,19 +3260,6 @@ def edit_profile():
     ctk.CTkCheckBox(scroll_frame, text="Headless", variable=v_head).pack(pady=5)
 
     current_fp = ensure_fingerprint_defaults(cfg.get('fingerprint', {}), seed=nm + cfg.get('cookie_str', ''))
-    ctk.CTkLabel(scroll_frame, text="Thiết bị kiểm thử:").pack(pady=(8, 2))
-    v_device = StringVar(scroll_frame, value=current_fp.get('device_preset', 'desktop'))
-    ctk.CTkComboBox(scroll_frame, values=['desktop', 'pixel', 'iphone_x', 'custom'], variable=v_device).pack(pady=2)
-    ctk.CTkLabel(scroll_frame, text="User-Agent tùy chỉnh (chỉ dùng cho Custom):").pack(pady=2)
-    e_custom_ua = ctk.CTkEntry(scroll_frame, width=400)
-    if current_fp.get('device_preset') == 'custom':
-        e_custom_ua.insert(0, current_fp.get('user_agent', ''))
-    e_custom_ua.pack(pady=2)
-    ctk.CTkLabel(scroll_frame, text="WebRTC:").pack(pady=(8, 2))
-    v_webrtc = StringVar(scroll_frame, value=current_fp.get('webrtc_policy', 'controlled'))
-    ctk.CTkComboBox(scroll_frame, values=['controlled', 'block'], variable=v_webrtc).pack(pady=2)
-    v_protection = ctk.BooleanVar(scroll_frame, value=current_fp.get('fingerprint_protection', True))
-    ctk.CTkCheckBox(scroll_frame, text="Bảo vệ Canvas/WebGL/AudioContext", variable=v_protection).pack(pady=5)
     geo = current_fp.get('geolocation') or {}
     geo_label = ctk.CTkLabel(
         scroll_frame,
@@ -5026,9 +3289,21 @@ def edit_profile():
     def save():
         try: lm = int(e_limit.get().strip())
         except: lm = 0
+        new_chrome_profile = e_chrome.get().strip()
+        old_chrome_profile = str(cfg.get('chrome_profile', ''))
+        duplicate = _find_profile_with_data_dir(new_chrome_profile, exclude_name=nm)
+        if duplicate:
+            messagebox.showerror("Lỗi", f"Chrome User Data đang được hồ sơ '{duplicate}' sử dụng.")
+            return
+        try:
+            if new_chrome_profile and not Path(new_chrome_profile).exists():
+                create_owned_root(new_chrome_profile)
+        except Exception as error:
+            messagebox.showerror("Lỗi", f"Không tạo được Chrome User Data an toàn: {error}")
+            return
         cfg.update({
             "folder_path": e_folder.get().strip(),
-            "chrome_profile": e_chrome.get().strip(),
+            "chrome_profile": new_chrome_profile,
             "cookie_str": e_cookie.get(),
             "tiktok_id": _normalize_tiktok_id(e_tiktok_id.get()),
             "proxy_string": e_proxy.get().strip(),
@@ -5037,13 +3312,12 @@ def edit_profile():
             "open_only_when_video": v_open_only.get(),
             "max_uploads_per_day": max(0, lm)
         })
-        fingerprint = apply_device_preset(current_fp, v_device.get())
-        if v_device.get() == 'custom' and e_custom_ua.get().strip():
-            fingerprint['user_agent'] = e_custom_ua.get().strip()
-        fingerprint['webrtc_policy'] = v_webrtc.get()
-        fingerprint['fingerprint_protection'] = v_protection.get()
+        if normalize_profile_path(new_chrome_profile) != normalize_profile_path(old_chrome_profile):
+            cfg['legacy_chrome_profile'] = new_chrome_profile
+            cfg['browser_profile_path'] = ''
+            cfg['migration_state'] = MigrationState.PENDING.value
         cfg['fingerprint'] = ensure_fingerprint_defaults(
-            fingerprint,
+            cfg.get('fingerprint', current_fp),
             seed=nm + cfg.get('cookie_str', ''),
         )
         save_configs()
@@ -5055,7 +3329,7 @@ def rename_profile():
     sel = tree.selection()
     if not sel: return
     old = tree.item(sel[0])['values'][0]
-    if profiles[old]['running'] or profiles[old].get('session_busy') or is_driver_valid(profiles[old].get('manual_driver')):
+    if profiles[old]['running'] or profiles[old].get('session_busy') or _browser_session_valid(profiles[old].get('manual_driver')) or get_lifecycle(old).has_active_driver():
         messagebox.showerror("Lỗi", "Hãy dừng hồ sơ và đóng browser trước")
         return
     dlg = ctk.CTkToplevel(root)
@@ -5075,6 +3349,8 @@ def rename_profile():
             projects[p].discard(old)
             projects[p].add(new)
         profiles[new] = prof
+        remove_lifecycle(old)
+        profile_operation_locks.pop(old, None)
         save_configs()
         dlg.destroy()
     ctk.CTkButton(dlg, text="Lưu", command=save).pack(pady=10)
@@ -5084,7 +3360,7 @@ def delete_profile():
     sel = tree.selection()
     if not sel: return
     nm = tree.item(sel[0])['values'][0]
-    if profiles[nm]['running'] or profiles[nm].get('session_busy') or is_driver_valid(profiles[nm].get('manual_driver')):
+    if profiles[nm]['running'] or profiles[nm].get('session_busy') or _browser_session_valid(profiles[nm].get('manual_driver')) or get_lifecycle(nm).has_active_driver():
         messagebox.showerror("Lỗi", "Hãy dừng hồ sơ và đóng browser trước")
         return
     ok = messagebox.askyesno("Xác nhận xoá hồ sơ",
@@ -5095,6 +3371,8 @@ def delete_profile():
     p = profiles[nm].get('project')
     if p in projects: projects[p].discard(nm)
     del profiles[nm]
+    remove_lifecycle(nm)
+    profile_operation_locks.pop(nm, None)
     save_configs()
     update_status(f"[UI] Đã xoá hồ sơ '{nm}'.")
 
@@ -5107,155 +3385,101 @@ def open_browser():
     if profiles[nm].get('running') or profiles[nm].get('uploading') or profiles[nm].get('session_busy'):
         messagebox.showwarning('Mở Chrome', 'Hãy Stop profile trước khi mở browser thủ công.')
         return
-    if is_driver_valid(profiles[nm].get('manual_driver')):
+    if _browser_session_valid(profiles[nm].get('manual_driver')):
         messagebox.showwarning('Mở Chrome', 'Browser của profile này đang mở.')
         return
 
     lc = get_lifecycle(nm)
+    if lc.has_active_driver():
+        messagebox.showwarning('Mở Chrome', 'Lifecycle của profile vẫn còn browser đang hoạt động.')
+        return
     manual_gen = lc.begin()
-    driver = None
-    svc = None
-
-    update_status(f"[{nm}] Kiểm tra cập nhật Driver...")
+    profiles[nm]['session_busy'] = True
     _set_profile_ui(nm, browser='Đang mở', last_error='')
-    try:
-        proxy_data = None
-        if cfg.get('use_proxy', False):
-            _set_profile_ui(nm, proxy='Đang kiểm tra')
-            proxy_data = parse_proxy_string(cfg.get('proxy_string', ''))
+
+    def _worker():
+        token = None
+        try:
+            proxy_data = parse_proxy_string(cfg.get('proxy_string', '')) if cfg.get('use_proxy', False) else None
+            if cfg.get('use_proxy', False) and not proxy_data:
+                raise SessionSetupError("Proxy sai định dạng; từ chối mở browser trực tiếp")
+            proxy_expected_ip = proxy_data['ip'] if proxy_data else None
+            direct_ip = None
+            if _refresh_profile_geoip(nm, cfg, proxy_data):
+                save_configs()
             if proxy_data:
-                if proxy_data.get('user') and proxy_data.get('pass') and _using_orbita_browser():
-                    mode = "Orbita proxy auth"
-                elif proxy_data.get('user') and proxy_data.get('pass'):
-                    mode = "Chrome proxy extension"
-                else:
-                    mode = "Chrome native proxy"
-                update_status(f"[{nm}] [DEBUG] Config Proxy ({mode}): {proxy_data['ip']}")
+                _set_profile_ui(nm, proxy='Đang kiểm tra')
+                preflight = _proxy_endpoint_preflight(nm, proxy_data)
+                if not preflight['proxy_exit_ip']:
+                    raise SessionSetupError("Không xác minh được proxy endpoint; từ chối mở browser")
+                proxy_expected_ip = preflight['proxy_exit_ip']
+                direct_ip = preflight['direct_ip']
 
-        geo_changed = _refresh_profile_geoip(nm, cfg, proxy_data)
-        if geo_changed:
+            browser_glue.ensure_patchright_profile(cfg)
+            _sync_patchright_migration(cfg)
             save_configs()
-        opt = _build_fast_chrome_options(cfg, block_images=False, force_visible=True)
+            session_config = browser_glue.build_session_config(
+                cfg, mode=browser_glue.SessionMode.MANUAL, headed=True
+            )
+            opened = browser_glue.browser_service().open_session(session_config).result(
+                timeout=browser_glue.SESSION_OPEN_TIMEOUT
+            )
+            token = SessionToken(
+                profile_name=nm,
+                handle=opened.handle,
+                mode=browser_glue.SessionMode.MANUAL,
+                profile_path=session_config.profile_path,
+                generation=manual_gen,
+            )
 
-        proxy_ext_dir = _apply_chrome_proxy_options(opt, cfg, proxy_data)
-        if proxy_ext_dir:
-            if proxy_ext_dir == "orbita-proxy-auth":
-                update_status(f"[{nm}] [DEBUG] Đã cấu hình Orbita proxy auth")
-            else:
-                update_status(f"[{nm}] [DEBUG] Đã nạp proxy extension: {proxy_ext_dir}")
+            imported = browser_glue.import_cookies(token, parse_cookie(cfg.get('cookie_str', '')))
+            if imported:
+                _save_cookie_injection_metadata(nm, cfg.get('cookie_str', ''))
+            _advance_patchright_migration(cfg, MigrationState.CREATED.value, MigrationState.COOKIES_IMPORTED)
+            if proxy_data:
+                matched, current_ip = browser_glue.verify_exit_ip(token, proxy_expected_ip)
+                if not matched and direct_ip and current_ip and current_ip != direct_ip:
+                    matched = True
+                if not matched:
+                    raise SessionSetupError("Không xác minh được proxy trong browser" if not current_ip else f"Proxy sai IP: {current_ip}")
+                _set_profile_ui(nm, proxy=f"OK: {current_ip}")
+            browser_glue.navigate(token, TIKTOK_BASE_URL)
 
-        path = None
-        old_svc = None
-        for launch_attempt in range(2):
-            try:
-                path = _ensure_profile_driver(nm)
-                svc = Service(path)
-                if old_svc:
-                    _kill_service_process(old_svc)
-                old_svc = svc
-                lc.add_pid(getattr(getattr(svc, 'process', None), 'pid', None))
-                chrome_path = _find_preferred_chrome_executable()
-                update_status(f"[{nm}] [DEBUG] Browser ({_browser_mode_label()}): {chrome_path or 'không tìm thấy'}")
-                driver = webdriver.Chrome(service=svc, options=opt)
-                break
-            except Exception as e:
-                if launch_attempt == 0 and _is_driver_version_mismatch_error(e):
-                    chrome_path, chrome_version, chrome_major = _get_chrome_version()
-                    driver_version, driver_major = _get_chromedriver_version(path)
-                    update_status(
-                        f"[{nm}] Phát hiện ChromeDriver lệch phiên bản Chrome. "
-                        f"Browser={chrome_version or chrome_path}, driver={driver_version or path}. Đang tải lại driver..."
-                    )
-                    with driver_install_lock:
-                        _invalidate_chromedriver_cache("driver/browser version mismatch")
-                        try:
-                            _profile_driver_path(nm).unlink(missing_ok=True)
-                        except Exception:
-                            pass
-                    continue
-                raise
-
-        if lc.is_cancelled or not lc.is_current(manual_gen):
-            if driver:
-                try: driver.quit()
-                except: pass
-            raise RuntimeError("Lifecycle cancelled after manual browser open")
-
-        driver.implicitly_wait(0)
-        driver.set_page_load_timeout(PAGELOAD_TIMEOUT)
-        driver.set_script_timeout(SCRIPT_TIMEOUT)
-        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": """
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                Object.defineProperty(Navigator.prototype, 'webdriver', {get: () => undefined});
-            """
-        })
-        _inject_fingerprint_js(driver, nm)
-        _enable_aux_resource_blocking(driver, nm)
-        _set_profile_ui(nm, browser='Đã mở')
-        
-        if proxy_data:
-            update_status(f"[{nm}] [DEBUG] Đang check IP...")
-            try:
-                is_match, current_ip = verify_proxy_ip(driver, proxy_data['ip'])
-                if not is_match:
-                    driver.refresh()
-                    _wait_document_ready(driver, timeout=3.0)
-                    is_match, current_ip = verify_proxy_ip(driver, proxy_data['ip'])
-                if not is_match:
-                    _set_profile_ui(nm, proxy='Sai IP', last_error=f"Proxy sai IP: {current_ip}")
-                    update_status(f"[{nm}] LỖI PROXY: IP THỰC TẾ ({current_ip}) != PROXY ({proxy_data['ip']}).")
-                    driver.quit()
-                    raise RuntimeError(f"Proxy Mismatch: {current_ip} != {proxy_data['ip']}")
-                else:
-                    _set_profile_ui(nm, proxy=f"OK: {current_ip}")
-                    update_status(f"[{nm}] Proxy OK: {current_ip}")
-            except RuntimeError:
-                raise
-            except Exception as e:
-                _set_profile_ui(nm, proxy='Proxy lỗi', last_error=str(e))
-                update_status(f"[{nm}] Lỗi check Proxy: {e}")
-                try: driver.quit()
-                except: pass
-                raise RuntimeError(f"Proxy error: {e}")
-        
-        _prepare_tiktok_cookies(driver, nm, cfg, require_upload_ready=False)
-        driver.get(TIKTOK_BASE_URL)
-        if manual_gen is None or not lc.register_manual(manual_gen, driver):
-            try:
-                driver.quit()
-            except Exception:
-                pass
-            raise RuntimeError("Lifecycle changed before manual driver publish")
-        profiles[nm]['manual_driver'] = driver
-        _set_profile_ui(nm, browser='Chrome đang mở')
-        messagebox.showinfo("Info", "Đóng trình duyệt khi xong.")
-        
-        def _wait_close():
-            while True:
+            if not lc.register_manual(manual_gen, token):
+                raise RuntimeError("Lifecycle changed before manual session publish")
+            profiles[nm]['manual_driver'] = token
+            profiles[nm]['session_busy'] = False
+            _set_profile_ui(nm, browser='Patchright đang mở')
+            update_status(f"[{nm}] Browser thủ công đã mở. Đóng cửa sổ khi hoàn tất.")
+            browser_glue.watch_manual_close(token)
+        except Exception as error:
+            if token:
+                token.set_cancelled()
+                token.quit()
+            _set_profile_ui(nm, browser='Bị lỗi', last_error=str(error))
+            update_status(f"[{nm}] Lỗi mở browser thủ công: {error}")
+        finally:
+            closed_ok = True
+            if token:
                 try:
-                    if not driver.window_handles: break
-                except: break
-                time.sleep(0.5)
-            try: driver.quit()
-            except: pass
-            if profiles.get(nm, {}).get('manual_driver') is driver:
+                    _export_live_cookies_to_config(token, nm)
+                except Exception:
+                    pass
+                closed_ok = token.quit()
+            if profiles.get(nm, {}).get('manual_driver') is token:
                 profiles[nm]['manual_driver'] = None
-            _set_profile_ui(nm, browser='Đã đóng', login='Chờ lấy cookie')
-            update_status(f"[{nm}] Browser thủ công đã đóng. Bấm 'Lấy Cookie TikTok' trong menu chuột phải để đồng bộ session.")
-        threading.Thread(target=_wait_close, daemon=True).start()
-    except Exception as e:
-        if driver:
-            try: driver.quit()
-            except: pass
-            driver = None
-        if svc:
-            _kill_service_process(svc)
-        _set_profile_ui(nm, browser='Bị lỗi', last_error=str(e))
-        messagebox.showerror("Lỗi", str(e))
-    finally:
-        if not is_driver_valid(driver) and not lc.is_current(manual_gen):
-            lc.cleanup_fast()
+            if token:
+                lc.release_manual(token)
+            profiles.get(nm, {})['session_busy'] = False
+            if token:
+                if closed_ok:
+                    _set_profile_ui(nm, browser='Đã đóng', login='Chờ lấy cookie')
+                    update_status(f"[{nm}] Browser thủ công đã đóng. Bấm 'Lấy Cookie TikTok' để đồng bộ session.")
+                else:
+                    _set_profile_ui(nm, browser='Đóng lỗi', last_error='Browser chưa được đóng sạch; hãy thử lại')
+                    update_status(f"[{nm}] Browser thủ công chưa được đóng sạch; profile có thể vẫn bị khóa.")
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 def _wait_and_close_driver(driver, name):
     pass 
@@ -5342,6 +3566,10 @@ def _shutdown_all_profiles():
         remaining = max(0.1, deadline - time.time())
         t.join(timeout=remaining)
     after_kill_cleanup_running_profiles()
+    try:
+        browser_glue.shutdown_browser_service(timeout=5.0)
+    except Exception as error:
+        update_status(f"[Browser] Lỗi shutdown Patchright service: {error}")
 
 
 def on_closing():
@@ -5535,14 +3763,21 @@ def _run_single_upload_test_from_env():
 
     def capture_content_page():
         try:
-            driver = profiles[profile_name]['driver']
+            token = profiles[profile_name]['driver']
+            login_state = browser_glue.page_login_state(token, timeout=15)
+            if login_state == 'login_required':
+                finish(False, 'login_required: TikTok hiển thị trang đăng nhập')
+                return
             artifacts = app_base_dir() / 'temp_dl' / 'upload_test_verify'
             artifacts.mkdir(parents=True, exist_ok=True)
             screenshot_path = artifacts / f'round_{round_number:02d}.png'
             text_path = artifacts / f'round_{round_number:02d}.txt'
-            body_text = driver.execute_script("return document.body ? document.body.innerText : '';") or ''
+            async def _capture(page):
+                body = await page.evaluate("document.body ? document.body.innerText : ''")
+                await page.screenshot(path=str(screenshot_path), full_page=True)
+                return body
+            body_text = browser_glue.run_operation(token, _capture) or ''
             text_path.write_text(body_text, encoding='utf-8')
-            driver.save_screenshot(str(screenshot_path))
             print(f"UPLOAD_VERIFY_ARTIFACT={json.dumps({'text': str(text_path), 'screenshot': str(screenshot_path)}, ensure_ascii=True)}", flush=True)
             finish(True, 'đã chụp trang quản lý nội dung')
         except Exception as error:
@@ -5550,8 +3785,8 @@ def _run_single_upload_test_from_env():
 
     def open_content_page():
         try:
-            driver = profiles[profile_name]['driver']
-            driver.get('https://www.tiktok.com/tiktokstudio/content')
+            token = profiles[profile_name]['driver']
+            browser_glue.navigate(token, 'https://www.tiktok.com/tiktokstudio/content')
             root.after(8000, capture_content_page)
         except Exception as error:
             finish(False, f'lỗi mở trang quản lý nội dung: {error}')
@@ -5570,7 +3805,7 @@ def _run_single_upload_test_from_env():
                 state['start_count'] = profile.get('uploads_today_count', 0)
                 clone_one_video()
                 return
-        if profile and profile.get('running') and is_driver_valid(driver) and _has_upload_page_signal(driver):
+        if profile and profile.get('running') and _browser_session_valid(driver):
             if verify_only:
                 open_content_page()
                 return
@@ -5716,7 +3951,6 @@ ui_handlers = {
     'show_statistics_board': show_statistics_board,
     'open_browser': open_browser,
     'get_tiktok_cookies': get_tiktok_cookies,
-    'reset_fingerprint': reset_fingerprint,
     'clean_browser': clean_browser,
     'change_license_key': change_license_key,
     'check_update': check_update_clicked,

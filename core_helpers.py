@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import os
 import re
@@ -6,7 +7,27 @@ import time
 
 from datetime import datetime, timezone
 from pathlib import Path
-from selenium.common.exceptions import InvalidSessionIdException, TimeoutException
+
+
+_TIKTOK_DOMAIN = "tiktok.com"
+
+
+def _normalize_cookie_domain(domain):
+    """Keep subdomain cookies usable for the hosts the tool actually opens.
+
+    The tool navigates to ``www.tiktok.com``. A bare registrable domain such
+    as ``tiktok.com`` is a host-only cookie that never reaches the ``www``
+    subdomain, so it is widened to ``.tiktok.com``. Specific domains such as
+    ``www.tiktok.com`` / ``.www.tiktok.com`` are kept untouched."""
+    raw = str(domain or "").strip()
+    if not raw:
+        return raw
+    lower = raw.lower()
+    if lower == _TIKTOK_DOMAIN:
+        return "." + _TIKTOK_DOMAIN
+    if lower.startswith("." + _TIKTOK_DOMAIN):
+        return raw
+    return raw
 
 
 def parse_cookie(cookie_str):
@@ -17,8 +38,8 @@ def parse_cookie(cookie_str):
         if not isinstance(cookies, list):
             raise ValueError("Cookie JSON phải là danh sách")
         for cookie in cookies:
-            if 'domain' in cookie and cookie['domain'].startswith('.'):
-                cookie['domain'] = cookie['domain'][1:]
+            if 'domain' in cookie:
+                cookie['domain'] = _normalize_cookie_domain(cookie['domain'])
         return cookies
     except json.JSONDecodeError:
         cookies = []
@@ -32,7 +53,7 @@ def parse_cookie(cookie_str):
                 cookies.append({
                     "name": name.strip(),
                     "value": value.strip(),
-                    "domain": "tiktok.com",
+                    "domain": "." + _TIKTOK_DOMAIN,
                     "path": "/",
                     "expiry": expiry_future,
                 })
@@ -65,43 +86,23 @@ def parse_proxy_string(proxy_str):
     return None
 
 
-def verify_proxy_ip(driver, expected_ip):
-    services = [
-        "http://ipv4.icanhazip.com",
-        "http://httpbin.org/ip",
-        "http://checkip.amazonaws.com"
-    ]
-    ip_pattern = r"\b(?:\d{1,3}\.){3}\d{1,3}\b"
-    for url in services:
+def _extract_ip_address(content):
+    for candidate in re.findall(r"[0-9A-Fa-f:.]+", str(content or "")):
         try:
-            driver.set_page_load_timeout(15)
-            driver.get(url)
-            time.sleep(1)
-            content = driver.find_element("tag name", "body").text.strip()
-            match = re.search(ip_pattern, content)
-            if match:
-                current_ip = match.group(0)
-                return current_ip == expected_ip, current_ip
-        except Exception:
+            return str(ipaddress.ip_address(candidate.strip(".:") or candidate))
+        except ValueError:
             continue
-    return False, "Không xác định"
-
-
-def is_driver_valid(driver):
-    if not driver:
-        return False
-    try:
-        _ = driver.current_url
-        return True
-    except (InvalidSessionIdException, Exception):
-        return False
+    return None
 
 
 def normalize_profile_path(path):
+    raw = str(path or "").strip().strip('"')
+    if not raw:
+        return ""
     try:
-        return os.path.normcase(os.path.abspath(os.path.normpath(str(path or "").strip().strip('"'))))
+        return os.path.normcase(os.path.abspath(os.path.normpath(raw)))
     except Exception:
-        return str(path or "").strip().lower()
+        return raw.lower()
 
 
 def process_uses_profile(cmdline, profile_path):
@@ -116,44 +117,6 @@ def process_uses_profile(cmdline, profile_path):
         if normalize_profile_path(value) == target:
             return True
     return False
-
-
-def classify_webdriver_error(error):
-    text = str(error or '').lower()
-    if isinstance(error, InvalidSessionIdException) or 'invalid session id' in text:
-        return 'invalid_session'
-    if 'no such window' in text or 'target window already closed' in text:
-        return 'window_closed'
-    if 'tab crashed' in text or ('renderer' in text and 'crash' in text):
-        return 'renderer_crash'
-    if any(token in text for token in ('disconnected', 'not connected to devtools', 'chrome not reachable')):
-        return 'browser_disconnected'
-    if isinstance(error, TimeoutException):
-        return 'timeout'
-    return 'webdriver_error'
-
-
-def profile_driver_path(chrome_profile, configured_path=''):
-    expected = Path(chrome_profile).parent / 'Driver' / 'chromedriver.exe'
-    configured = str(configured_path or '').strip()
-    if configured and normalize_profile_path(configured) == normalize_profile_path(expected):
-        return Path(configured)
-    return expected
-
-
-def clear_profile_directory(directory):
-    path = Path(directory).resolve()
-    if path.name.lower() != 'profile' or path.parent == path:
-        raise ValueError(f'Đường dẫn User Data không an toàn để làm sạch: {path}')
-    path.mkdir(parents=True, exist_ok=True)
-    for child in path.iterdir():
-        if child.is_dir():
-            shutil.rmtree(child, ignore_errors=True)
-        else:
-            try:
-                child.unlink()
-            except FileNotFoundError:
-                pass
 
 
 def is_file_stable(path, checks, interval):
@@ -195,24 +158,3 @@ def copy_video_atomically(source, destination):
         except Exception:
             pass
     return dst
-
-
-def clean_chrome_lock_files(profile_path):
-    try:
-        files_to_remove = ["SingletonLock", "SingletonSocket", "SingletonCookie"]
-        for fname in files_to_remove:
-            f_path = os.path.join(profile_path, fname)
-            if os.path.exists(f_path):
-                try:
-                    os.remove(f_path)
-                except Exception:
-                    pass
-
-            f_path_default = os.path.join(profile_path, "Default", fname)
-            if os.path.exists(f_path_default):
-                try:
-                    os.remove(f_path_default)
-                except Exception:
-                    pass
-    except Exception:
-        pass

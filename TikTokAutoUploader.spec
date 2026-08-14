@@ -27,6 +27,7 @@ datas += collect_data_files('customtkinter')
 datas += _collect_watchdog_files()
 datas += collect_data_files('charset_normalizer')
 datas += collect_data_files('requests')
+datas += collect_data_files('patchright')
 
 hidden_imports = [
     'selenium.webdriver',
@@ -109,6 +110,7 @@ hidden_imports += collect_submodules('yt_dlp')
 hidden_imports += collect_submodules('pyngrok')
 hidden_imports += collect_submodules('googleapiclient')
 hidden_imports += collect_submodules('charset_normalizer')
+hidden_imports += collect_submodules('patchright')
 
 a = Analysis(
     ['main.py'],

@@ -455,7 +455,7 @@ class TestResourceAssetsNoFFmpeg(unittest.TestCase):
 
     def test_resource_assets_still_has_core(self):
         from version import RESOURCE_ASSETS
-        self.assertIn("Browser", RESOURCE_ASSETS)
+        self.assertNotIn("Browser", RESOURCE_ASSETS)
         self.assertIn("ngrok.exe", RESOURCE_ASSETS)
         self.assertIn("service_account.json", RESOURCE_ASSETS)
 
