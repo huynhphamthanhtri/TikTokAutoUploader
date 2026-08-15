@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 
-UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center"
+UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center&tab=video"
 POST_ENDPOINT_FRAGMENT = "/tiktok/web/project/post/"
 
 # Keep all TikTok DOM knowledge here. Exact popup text is intentional: broad

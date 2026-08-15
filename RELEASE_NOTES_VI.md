@@ -1,3 +1,19 @@
+# Phiên bản 1.0.14
+
+## Điểm mới
+- Bổ sung TikTok Insights (Beta): kiểm tra trực tiếp thông tin tài khoản TikTok theo chế độ chỉ đọc.
+- Xem nhanh Balance, Payout, trạng thái KYC và Payment Method ngay trong bảng kết quả kiểm tra.
+- Lưu lịch sử kiểm tra vào cơ sở dữ liệu cục bộ (SQLite) trong thư mục dữ liệu ứng dụng, không ghi vào cấu hình.
+
+## Cải thiện
+- Các request kiểm tra tài khoản đều đi qua chính sách an toàn chỉ đọc: chỉ HTTPS, endpoint cố định, giới hạn kích thước phản hồi và không chứa cookie/token/chữ ký.
+- Phân biệt rõ trạng thái từng mục: thành công, thành công không có dữ liệu, cần đăng nhập, giới hạn, không khả dụng hoặc lỗi.
+- Các mục chưa hỗ trợ đầy đủ (Dashboard, RPM, Views, Creative Rewards, Traffic, Video Rank, Violations) hiển thị N/A và không phát request đoán.
+- Cải thiện đóng browser đúng cách sau khi kiểm tra để tránh khóa profile.
+
+## Sửa lỗi
+- Khắc phục một số trường hợp giá trị số tiền bị hiểu sai (bool/đơn vị minor) và dữ liệu cũ không bị hiển thị như dữ liệu mới.
+
 # Phiên bản 1.0.13
 
 ## Điểm mới

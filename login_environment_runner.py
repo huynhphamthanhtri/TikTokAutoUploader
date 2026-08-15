@@ -63,7 +63,7 @@ STUDIO_VERIFY_TIMEOUT = int(os.environ.get("LOGIN_TEST_STUDIO_TIMEOUT", "30"))
 PERSISTENCE_VERIFY_TIMEOUT = 45
 PROBE_TIMEOUT = 10
 LOGIN_PAGE_URL = "https://www.tiktok.com/login/phone-or-email/email"
-STUDIO_UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center"
+STUDIO_UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center&tab=video"
 
 # Config fields that the runner may touch and therefore snapshots/restores.
 RESTORED_CONFIG_FIELDS = (

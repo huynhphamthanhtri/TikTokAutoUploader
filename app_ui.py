@@ -166,6 +166,8 @@ def build_dashboard(root, state, handlers):
 
     ctk.CTkButton(manage_left, text="Thêm", width=72, height=32, command=handlers['add_profile'], fg_color=neutral[0], hover_color=neutral[1]).pack(side='left', padx=3, pady=2)
     ctk.CTkButton(manage_left, text="Mở Chrome", width=96, height=32, command=handlers['open_browser'], fg_color=neutral[0], hover_color=neutral[1]).pack(side='left', padx=3, pady=2)
+    widgets['btn_check_cookie'] = ctk.CTkButton(manage_left, text="Check Cookie", width=104, height=32, command=handlers['check_cookie_live'], fg_color=("#7c3aed", "#6d28d9"))
+    widgets['btn_check_cookie'].pack(side='left', padx=3, pady=2)
 
     overflow_actions = [
         ("Sửa", handlers['edit_profile']),
@@ -214,11 +216,13 @@ def build_dashboard(root, state, handlers):
     tree = ttk.Treeview(
         table_frame,
         style='Modern.Treeview',
-        columns=('name', 'status', 'tiktok', 'proxy', 'region', 'upload', 'last_error', 'folder', 'chrome', 'headless', 'limit'),
+        columns=('name', 'activity', 'browser', 'status', 'tiktok', 'proxy', 'region', 'upload', 'last_error', 'folder', 'chrome', 'headless', 'limit'),
         show='headings',
         selectmode='extended'
     )
     tree.heading('name', text='Tên', command=lambda: handlers['sort_tree'](tree, 'name', False))
+    tree.heading('activity', text='Hoạt động', command=lambda: handlers['sort_tree'](tree, 'activity', False))
+    tree.heading('browser', text='Browser', command=lambda: handlers['sort_tree'](tree, 'browser', False))
     tree.heading('status', text='Sức khỏe', command=lambda: handlers['sort_tree'](tree, 'status', False))
     tree.heading('tiktok', text='TikTok ID', command=lambda: handlers['sort_tree'](tree, 'tiktok', False))
     tree.heading('proxy', text='Proxy', command=lambda: handlers['sort_tree'](tree, 'proxy', False))
@@ -230,7 +234,9 @@ def build_dashboard(root, state, handlers):
     tree.heading('headless', text='Headless', command=lambda: handlers['sort_tree'](tree, 'headless', False))
     tree.heading('limit', text='Limit', command=lambda: handlers['sort_tree'](tree, 'limit', False))
     tree.column('name', width=140, minwidth=100, stretch=False)
-    tree.column('status', width=130, minwidth=110, anchor='center', stretch=False)
+    tree.column('activity', width=120, minwidth=105, anchor='center', stretch=False)
+    tree.column('browser', width=130, minwidth=115, anchor='center', stretch=False)
+    tree.column('status', width=120, minwidth=100, anchor='center', stretch=False)
     tree.column('tiktok', width=110, minwidth=90, anchor='center', stretch=False)
     tree.column('proxy', width=100, minwidth=85, anchor='center', stretch=False)
     tree.column('region', width=80, minwidth=60, anchor='center', stretch=False)
@@ -327,6 +333,8 @@ def build_dashboard(root, state, handlers):
     ctx_menu.add_command(label="Copy Folder Video", command=handlers['copy_folder_path'])
     ctx_menu.add_command(label="Copy Link Kênh", command=handlers['copy_channel_link'])
     ctx_menu.add_command(label="Mở trình duyệt", command=handlers['open_browser'])
+    ctx_menu.add_command(label="Kiểm tra Cookie (Đã chọn)", command=handlers['check_cookie_live'])
+    ctx_menu.add_command(label="Kiểm tra thông tin TikTok", command=handlers['inspect_tiktok_account'])
     ctx_menu.add_command(label="Lấy Cookie TikTok", command=handlers['get_tiktok_cookies'])
     ctx_menu.add_command(label="Reset Browser", command=handlers['clean_browser'])
     ctx_menu.add_command(label="Xem chi tiết", command=handlers['view_profile_details'])

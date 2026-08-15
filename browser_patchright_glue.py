@@ -19,6 +19,7 @@ from pathlib import Path
 
 from browser_maintenance import create_owned_root
 from core_helpers import _extract_ip_address, parse_cookie, parse_proxy_string
+from tiktok_account_discovery import build_discovery_operation, is_readonly_allowed
 from patchright_browser import (
     BrowserServiceClosedError,
     BrowserSessionConfig,
@@ -570,6 +571,36 @@ def wait_page_login_state(token, timeout=30.0, poll=1.0, run_timeout=OP_DEFAULT_
         time.sleep(poll)
 
 
+def wait_upload_page_ready(token, timeout=30.0, poll=1.0, run_timeout=OP_DEFAULT_TIMEOUT):
+    """Poll until TikTok's upload surface (file input / upload card) is visible.
+
+    Returns True when the upload page is ready to accept the next video, False
+    when it is not ready within ``timeout``. Session errors are reported as
+    False (never raised) so an already-confirmed post is not downgraded by a
+    failed "return to upload" step."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            state = page_login_state(token, timeout=run_timeout)
+        except (SessionSetupError, StaleSessionError):
+            return False
+        if state == "authenticated":
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll)
+
+
+def navigate_upload_ready(token, url, timeout=OP_DEFAULT_TIMEOUT, ready_timeout=30.0, poll=1.0):
+    """Navigate to the upload URL and wait until its surface is ready.
+
+    Returns True when the page is upload-ready. Raises SessionSetupError only
+    when the session itself is stale; a live session that simply has not shown
+    the upload surface is reported as False."""
+    navigate(token, url, timeout=timeout)
+    return wait_upload_page_ready(token, timeout=ready_timeout, poll=poll, run_timeout=timeout)
+
+
 def page_url(token, timeout=OP_DEFAULT_TIMEOUT):
     async def _url(page):
         return page.url
@@ -715,3 +746,186 @@ def watch_manual_close(token, poll=0.5):
             token.quit()
         except Exception:
             pass
+
+
+def discover_tiktok_readonly_endpoints(token, pages=None, timeout=OP_DEFAULT_TIMEOUT):
+    """Discover read-only Creator Center endpoints from a live session.
+
+    Runs the discovery collector on the browser runtime thread. Returns a
+    tiktok_account_discovery.DiscoveryResult. Never issues non-GET requests."""
+    operation = build_discovery_operation(pages=pages or ())
+    return run_operation(token, operation, timeout=timeout)
+
+
+def inspect_tiktok_account(token, endpoint_paths=(), urls_by_path=None, timeout=OP_DEFAULT_TIMEOUT):
+    """Fetch read-only Creator Center JSON endpoints via in-page fetch.
+
+    Only GET requests on allowlisted paths are issued; every request is checked
+    by the same read-only guard as the discovery collector. When ``urls_by_path``
+    carries an observed full URL for a seed path it is replayed as-is (the real
+    query context, e.g. the reward analytics params) instead of guessing a bare
+    path. Returns a dict of ``{path: payload}`` for endpoints that returned
+    JSON, plus a ``_errors`` list for endpoints that failed the guard or did not
+    parse."""
+    from tiktok_account_discovery import SEED_ENDPOINTS
+
+    paths = list(endpoint_paths) if endpoint_paths else list(SEED_ENDPOINTS)
+    urls_by_path = dict(urls_by_path or {})
+    results = {}
+    errors = []
+
+    async def _fetch_all(page):
+        for path in paths:
+            url = urls_by_path.get(path) or ("https://www.tiktok.com" + path)
+            if not is_readonly_allowed(url, "GET"):
+                errors.append({"path": path, "reason": "not_readonly_allowed"})
+                continue
+            try:
+                payload = await page.evaluate(
+                    """async (url) => {
+                        const res = await fetch(url, {
+                            credentials: 'include',
+                            headers: {'Accept': 'application/json'},
+                        });
+                        const contentType = res.headers.get('content-type') || '';
+                        let body = null;
+                        if (contentType.includes('json')) {
+                            try { body = await res.json(); } catch (e) { body = null; }
+                        }
+                        return {status: res.status, contentType, body};
+                    }""",
+                    url,
+                )
+            except Exception as error:
+                errors.append(
+                    {"path": path, "reason": "fetch_failed", "error": type(error).__name__}
+                )
+                continue
+            if payload and payload.get("status") == 200 and payload.get("body") is not None:
+                from tiktok_account_inspection import to_plain
+
+                results[path] = to_plain(payload.get("body"))
+            else:
+                errors.append(
+                    {
+                        "path": path,
+                        "reason": "bad_response",
+                        "status": (payload or {}).get("status"),
+                    }
+                )
+        return {"results": results, "errors": errors}
+
+    try:
+        value = run_operation(token, _fetch_all, timeout=timeout)
+    except SessionSetupError as error:
+        return {"results": {}, "errors": [{"reason": "session_error", "error": str(error)}]}
+    value = dict(value or {})
+    value["checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return value
+
+
+def fetch_tiktok_capabilities(token, requests, timeout=OP_DEFAULT_TIMEOUT * 2):
+    """Execute verified read-only capability contracts in the browser context."""
+    from readonly_policy import evaluate_request
+    from tiktok_endpoint_catalog import endpoint_policy
+    from tiktok_account_inspection import to_plain
+    from tiktok_account_discovery import extract_payload_keys
+
+    prepared = []
+    errors = []
+    for request in requests or ():
+        spec = endpoint_policy(request.endpoint_id)
+        if spec is None:
+            errors.append({"capability": request.capability, "endpoint_id": request.endpoint_id, "reason": "unknown_endpoint"})
+            continue
+        decision = evaluate_request(spec, request.url, request.method, request.body)
+        if not decision.allowed:
+            errors.append({"capability": request.capability, "endpoint_id": request.endpoint_id, "reason": decision.reason})
+            continue
+        prepared.append(
+            {
+                "capability": request.capability,
+                "endpointId": request.endpoint_id,
+                "method": request.method,
+                "url": request.url,
+                "body": dict(request.body or {}),
+                "headers": dict(request.headers or {}),
+                "maxBytes": int(spec.max_response_bytes),
+            }
+        )
+
+    async def _fetch(page):
+        return await page.evaluate(
+            """async (requests) => {
+                const out = [];
+                for (const item of requests) {
+                    try {
+                        const headers = Object.assign({'Accept': 'application/json'}, item.headers || {});
+                        const options = {method: item.method, credentials: 'include', headers};
+                        if (item.method === 'POST') {
+                            const contentType = String(headers['Content-Type'] || '').toLowerCase();
+                            options.body = contentType.includes('x-www-form-urlencoded')
+                                ? new URLSearchParams(item.body || {}).toString()
+                                : JSON.stringify(item.body || {});
+                        }
+                        const response = await fetch(item.url, options);
+                        const contentType = response.headers.get('content-type') || '';
+                        const contentLength = Number(response.headers.get('content-length') || 0);
+                        if (contentLength > item.maxBytes) {
+                            out.push({capability: item.capability, endpointId: item.endpointId,
+                                      status: response.status, contentType, error: 'response_too_large'});
+                            continue;
+                        }
+                        const text = await response.text();
+                        if (new TextEncoder().encode(text).length > item.maxBytes) {
+                            out.push({capability: item.capability, endpointId: item.endpointId,
+                                      status: response.status, contentType, error: 'response_too_large'});
+                            continue;
+                        }
+                        let body = null;
+                        try { body = JSON.parse(text); } catch (_) {}
+                        out.push({capability: item.capability, endpointId: item.endpointId,
+                                  status: response.status, contentType, body,
+                                  error: body === null ? 'invalid_json' : ''});
+                    } catch (error) {
+                        out.push({capability: item.capability, endpointId: item.endpointId,
+                                  status: 0, contentType: '', body: null,
+                                  error: error && error.name ? error.name : 'fetch_failed'});
+                    }
+                }
+                return out;
+            }""",
+            prepared,
+        )
+
+    if not prepared:
+        return {"results": {}, "errors": errors}
+    rows = run_operation(token, _fetch, timeout=timeout) or ()
+    results = {}
+    for raw in rows:
+        row = dict(raw or {})
+        capability = str(row.get("capability") or "")
+        endpoint_id = str(row.get("endpointId") or "")
+        status = int(row.get("status") or 0)
+        error = str(row.get("error") or "")
+        body = row.get("body")
+        if status == 200 and not error and body is not None:
+            plain_body = to_plain(body)
+            results[capability] = {
+                "endpoint_id": endpoint_id,
+                "status": status,
+                "content_type": str(row.get("contentType") or ""),
+                "payload": plain_body,
+                "payload_keys": list(extract_payload_keys(plain_body)),
+            }
+        else:
+            errors.append(
+                {
+                    "capability": capability,
+                    "endpoint_id": endpoint_id,
+                    "status": status,
+                    "content_type": str(row.get("contentType") or ""),
+                    "reason": error or "bad_response",
+                }
+            )
+    return {"results": results, "errors": errors}
