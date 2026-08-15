@@ -49,7 +49,7 @@ DISCOVERY_PAGES = (
     "https://www.tiktok.com/tiktokstudio/monetization",
 )
 
-# Seed endpoints with observed evidence in request_traces.
+# Seed endpoints with previously observed request evidence.
 SEED_ENDPOINTS = (
     "/tiktokstudio/api/web/user",
     "/tiktok/v1/creator/m10n_center/reward_analytics",
