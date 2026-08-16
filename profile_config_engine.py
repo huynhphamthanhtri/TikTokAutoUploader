@@ -32,6 +32,7 @@ def generate_orbita_profile_config(
     user_agent: Optional[str] = None,
     hardware_concurrency: int = 8,
     device_memory: int = 8,
+    profile_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Tạo cấu trúc cấu hình đầy đủ chuẩn Orbita 144 / data.huynhthang."""
     canvas_seed = generate_deterministic_seed(account_uuid, "canvas")
@@ -73,6 +74,7 @@ def generate_orbita_profile_config(
             "noiseEnabled": True,
             "noiseSeed": audio_seed,
         },
+        "extensions": [],
         "webgl": {
             "noiseEnabled": True,
             "vendor": "Google Inc. (NVIDIA)",
@@ -80,7 +82,15 @@ def generate_orbita_profile_config(
             "maxAnisotropy": 16,
             "maxTextureSize": 16384,
             "maxViewportDims": [16384, 16384],
-            "glParamValues": {},
+            "glParamValues": [
+                {"name": "ALPHA_BITS", "value": 8},
+                {"name": "BLUE_BITS", "value": 8},
+                {"name": "DEPTH_BITS", "value": 24},
+                {"name": "GREEN_BITS", "value": 8},
+                {"name": "RED_BITS", "value": 8},
+                {"name": "STENCIL_BITS", "value": 8},
+                {"name": "MAX_TEXTURE_SIZE", "value": 16384},
+            ],
             "extensions": [
                 "ANGLE_instanced_arrays",
                 "EXT_blend_minmax",
@@ -202,6 +212,8 @@ def generate_orbita_profile_config(
                 {"name": "PDF Viewer", "filename": "internal-pdf-viewer", "description": "Portable Document Format"}
             ],
         },
+        "license_key": os.environ.get("VIBE_ORBITA_LICENSE_KEY", ""),
+        "profile_name": str(profile_name or account_uuid),
         "proxy": proxy_info or {},
     }
     return config

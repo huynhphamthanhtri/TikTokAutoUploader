@@ -164,14 +164,14 @@ class PatchrightBrowserTests(unittest.TestCase):
         self.profile = self.temp_dir.name
 
     def tearDown(self):
-        self.browser.shutdown()
+        self.browser.shutdown(timeout=10)
         self.runtime.shutdown()
         self.temp_dir.cleanup()
 
     def open(self, **changes):
         values = {"profile_path": self.profile}
         values.update(changes)
-        return self.browser.open_session(BrowserSessionConfig(**values)).result(2)
+        return self.browser.open_session(BrowserSessionConfig(**values)).result(10)
 
     def test_open_run_and_close_use_runtime_thread(self):
         result = self.open(

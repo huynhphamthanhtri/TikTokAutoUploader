@@ -264,25 +264,19 @@ def resolve_browser_executable(app_base=None):
     ``.local-browsers`` lookup."""
     browser_dir = _bundled_browser_dir(app_base)
     candidates = [
-        browser_dir / "orbita-browser-144" / "chrome.exe",
-    ]
-    if app_base is None:
-        app_data_chrome = os.path.expandvars(r"%APPDATA%\tiktokmanager\Chrome-bin\chrome.exe")
-        if os.path.exists(app_data_chrome):
-            candidates.append(Path(app_data_chrome))
-    candidates.extend([
-        browser_dir / "orbita-browser-123" / "chrome.exe",
         browser_dir / "chrome-win64" / "chrome.exe",
+        browser_dir / "orbita-browser-144" / "chrome.exe",
+        browser_dir / "orbita-browser-123" / "chrome.exe",
         browser_dir / "chrome.exe",
         browser_dir / "chrome" / "chrome.exe",
-    ])
+    ]
     for path in candidates:
         if path is not None and _is_valid_executable(path):
             return str(path)
     return _find_system_chrome_executable()
 
 
-def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None):
+def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profile_name=None):
     """Map app config to a patchright native session configuration."""
     profile_path = config.get("browser_profile_path")
     if not profile_path:
@@ -298,7 +292,7 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None):
             "Không tìm thấy browser. Hãy tải tài nguyên Browser lần đầu "
             "(nút 'Tải tài nguyên') hoặc cài Google Chrome rồi thử lại."
         )
-    kwargs["executable_path"] = str(executable)
+    kwargs["executable_path"] = executable
 
     proxy = None
     if config.get("use_proxy", False):
@@ -324,9 +318,12 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None):
     if proxy is not None:
         kwargs["proxy"] = proxy
 
-    fingerprint = config.get("fingerprint", {}) or {}
+    fingerprint = config.get("fingerprint") or {}
+    user_agent = fingerprint.get("user_agent") or config.get("user_agent")
+    if user_agent:
+        kwargs["user_agent"] = user_agent
     timezone_id = fingerprint.get("timezone")
-    if isinstance(timezone_id, str) and "/" in timezone_id and "utc" not in timezone_id.lower():
+    if timezone_id:
         kwargs["timezone_id"] = timezone_id
     lang = fingerprint.get("lang")
     if isinstance(lang, str) and len(lang) <= 64:
@@ -367,21 +364,30 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None):
         if isinstance(geo, dict):
             geoip_info["latitude"] = geo.get("latitude")
             geoip_info["longitude"] = geo.get("longitude")
+
+    resolved_profile_name = str(
+        profile_name
+        or config.get("profile_name")
+        or config.get("name")
+        or account_uuid
+    )
     orbita_cfg = generate_orbita_profile_config(
         account_uuid=account_uuid,
         proxy_info=proxy_info,
         geoip_info=geoip_info,
         user_agent=config.get("user_agent"),
+        profile_name=resolved_profile_name,
     )
     write_profile_config_files(profile_path, orbita_cfg)
 
     kwargs["args"] = (
         "--no-first-run",
         "--log-level=3",
-        "--ht-auto",
         "--disable-session-crashed-bubble",
         "--disable-backgrounding-occluded-windows",
     )
+    kwargs["account_uuid"] = account_uuid
+    kwargs["profile_name"] = resolved_profile_name
     return BrowserSessionConfig(**kwargs)
 
 
@@ -420,7 +426,7 @@ def _validate_session_handle(handle, session_config):
 
 def open_session(config, profile_name, timeout=SESSION_OPEN_TIMEOUT):
     service = browser_service()
-    session_config = build_session_config(config, mode=SessionMode.AUTOMATION)
+    session_config = build_session_config(config, mode=SessionMode.AUTOMATION, profile_name=profile_name)
     try:
         future = service.open_session(session_config)
         result = future.result(timeout=timeout)

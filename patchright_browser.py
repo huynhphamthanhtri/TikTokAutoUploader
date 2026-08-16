@@ -40,6 +40,8 @@ class BrowserSessionConfig:
     geolocation: Mapping[str, float] | None = None
     permissions: tuple[str, ...] = ()
     proxy: Mapping[str, str] | None = None
+    account_uuid: str | None = None
+    profile_name: str | None = None
 
     def __post_init__(self) -> None:
         if not str(self.profile_path).strip():
@@ -322,6 +324,21 @@ class PatchrightBrowser:
                     pass
 
             context = await playwright.chromium.launch_persistent_context(**kwargs)
+
+            # Inject VIBE Independent Stealth Engine at Context Level
+            try:
+                from vibe_stealth_engine import generate_stealth_js
+                resolved_id = str(config.account_uuid or config.profile_name or Path(profile).parent.name or Path(profile).name)
+                stealth_js = generate_stealth_js({
+                    "account_uuid": resolved_id,
+                    "profile_name": str(config.profile_name or Path(profile).parent.name),
+                    "hardware_concurrency": 8,
+                    "device_memory": 8,
+                })
+                await context.add_init_script(stealth_js)
+            except Exception:
+                pass
+
             pages = list(context.pages)
             page = pages[0] if pages else await context.new_page()
             handle = SessionHandle(session_id, generation, profile, config.mode)

@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from profile_config_engine import (
     generate_deterministic_seed,
@@ -62,6 +63,12 @@ class TestProfileConfigEngine(unittest.TestCase):
         self.assertFalse(config["webrtc"]["disableWebRTC"])
         self.assertEqual(config["navigator"]["userAgent"], "Custom/144.0.0.0")
         self.assertIn("brands", config["clientHints"])
+
+    def test_license_key_is_empty_by_default(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VIBE_ORBITA_LICENSE_KEY", None)
+            config = generate_orbita_profile_config("uuid-no-license")
+        self.assertEqual(config["license_key"], "")
 
     def test_write_profile_config_files(self):
         """Both data.huynhthang and data.orbita are generated in profile dir."""

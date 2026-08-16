@@ -1,3 +1,18 @@
+# Phiên bản 1.0.16
+
+## Điểm mới
+- Bổ sung VIBE Stealth Engine độc lập cho browser profile.
+- Bổ sung cấu hình nhận dạng profile theo tài khoản khi mở Patchright.
+
+## Cải thiện
+- Cập nhật thứ tự lựa chọn browser, ưu tiên Chromium đóng gói trước các bản Orbita tương thích.
+- Cải thiện cấu hình User-Agent, timezone và profile identity khi tạo browser session.
+- Cải thiện dừng callback server và thu hồi thread của YouTube Monitor.
+
+## Sửa lỗi
+- Khắc phục browser TikTok Manager tự đóng do kiểm tra license anti-detect khi khởi chạy.
+- Loại bỏ launch flag gây lỗi license trên browser profile hiện tại.
+
 # Phiên bản 1.0.15
 
 ## Điểm mới

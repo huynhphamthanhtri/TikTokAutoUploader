@@ -1829,8 +1829,14 @@ def _stop_callback_server():
     try:
         if _callback_server:
             _callback_server.shutdown()
+            _callback_server.server_close()
     except Exception:
         pass
+    if _callback_server_thread and _callback_server_thread.is_alive():
+        try:
+            _callback_server_thread.join(timeout=2)
+        except Exception:
+            pass
     _callback_server = None
     _callback_server_thread = None
     _callback_port = None
@@ -2030,15 +2036,20 @@ def _get_monitor_gen():
         return _monitor_gen
 
 
-def _join_all_threads(timeout=5):
+def _join_all_threads(timeout=8):
     deadline = time.time() + timeout
     threads = list(_all_threads)
     for t in threads:
         if t.is_alive():
-            remaining = max(0.05, deadline - time.time())
+            remaining = max(0.1, deadline - time.time())
             if remaining <= 0:
                 break
             t.join(timeout=remaining)
+    if any(t.is_alive() for t in threads):
+        time.sleep(0.15)
+        for t in threads:
+            if t.is_alive():
+                t.join(timeout=1.0)
 
 
 def _live_monitor_threads():

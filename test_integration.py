@@ -9,6 +9,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 class TestMonitorLifecycle(unittest.TestCase):
     @staticmethod
+    def _wait_for_stop(*_args, **_kwargs):
+        import youtube_monitor.core as core
+        core.stop_event.wait(5)
+
+    @staticmethod
     def _reset_monitor_state():
         import youtube_monitor.core as core
         core.stop_event.set()
@@ -39,7 +44,12 @@ class TestMonitorLifecycle(unittest.TestCase):
              patch("youtube_monitor.core.requests.post") as mock_post, \
              patch("youtube_monitor.core.requests.get") as mock_get, \
              patch("youtube_monitor.core._ngrok_bin_path", return_value=None), \
-             patch("youtube_monitor.core._load_tiktok_proxies", return_value=({}, [])):
+             patch("youtube_monitor.core._load_tiktok_proxies", return_value=({}, [])), \
+             patch("youtube_monitor.core.websub_processor_worker", side_effect=self._wait_for_stop), \
+             patch("youtube_monitor.core.worker_main", side_effect=self._wait_for_stop), \
+             patch("youtube_monitor.core._retry_maintainer", side_effect=self._wait_for_stop), \
+             patch("youtube_monitor.core._resubscribe_worker", side_effect=self._wait_for_stop), \
+             patch("youtube_monitor.core._polling_worker", side_effect=self._wait_for_stop):
 
             from youtube_monitor.core import (
                 start_monitor, stop_monitor, get_status, get_monitor_health,
@@ -116,7 +126,12 @@ class TestMonitorLifecycle(unittest.TestCase):
              patch("youtube_monitor.core.requests.post"), \
              patch("youtube_monitor.core.requests.get") as mock_get, \
              patch("youtube_monitor.core._ngrok_bin_path", return_value=None), \
-             patch("youtube_monitor.core._load_tiktok_proxies", return_value=({}, [])):
+             patch("youtube_monitor.core._load_tiktok_proxies", return_value=({}, [])), \
+             patch("youtube_monitor.core.websub_processor_worker", side_effect=self._wait_for_stop), \
+             patch("youtube_monitor.core.worker_main", side_effect=self._wait_for_stop), \
+             patch("youtube_monitor.core._retry_maintainer", side_effect=self._wait_for_stop), \
+             patch("youtube_monitor.core._resubscribe_worker", side_effect=self._wait_for_stop), \
+             patch("youtube_monitor.core._polling_worker", side_effect=self._wait_for_stop):
 
             from youtube_monitor.core import start_monitor, stop_monitor
 
