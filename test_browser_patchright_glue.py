@@ -111,6 +111,21 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
         session = glue.build_session_config(config)
         self.assertEqual(session.executable_path, r"C:\custom\chrome.exe")
 
+    def test_resolve_bundled_orbita_144_first(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            browser = Path(temporary) / "Browser" / "orbita-browser-144"
+            browser.mkdir(parents=True)
+            exe = browser / "chrome.exe"
+            exe.write_bytes(b"x")
+            # Also create 123 to verify 144 takes precedence
+            browser_123 = Path(temporary) / "Browser" / "orbita-browser-123"
+            browser_123.mkdir(parents=True)
+            (browser_123 / "chrome.exe").write_bytes(b"y")
+            self.assertEqual(
+                glue.resolve_browser_executable(app_base=temporary),
+                str(exe),
+            )
+
     def test_resolve_bundled_orbita_first(self):
         with tempfile.TemporaryDirectory() as temporary:
             browser = Path(temporary) / "Browser" / "orbita-browser-123"

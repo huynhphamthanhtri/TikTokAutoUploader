@@ -300,6 +300,27 @@ class PatchrightBrowser:
             if config.proxy is not None:
                 kwargs["proxy"] = dict(config.proxy)
 
+            # Ensure native Orbita anti-detect configuration is present
+            data_orbita_path = os.path.join(profile, "data.orbita")
+            if not os.path.exists(data_orbita_path):
+                try:
+                    from profile_config_engine import (
+                        generate_orbita_profile_config,
+                        write_profile_config_files,
+                    )
+                    cfg = generate_orbita_profile_config(
+                        account_uuid=Path(profile).name,
+                        proxy_info=dict(config.proxy) if config.proxy else None,
+                        geoip_info={
+                            "timezone": config.timezone_id,
+                            "latitude": config.geolocation.get("latitude") if config.geolocation else None,
+                            "longitude": config.geolocation.get("longitude") if config.geolocation else None,
+                        } if (config.timezone_id or config.geolocation) else None,
+                    )
+                    write_profile_config_files(profile, cfg)
+                except Exception:
+                    pass
+
             context = await playwright.chromium.launch_persistent_context(**kwargs)
             pages = list(context.pages)
             page = pages[0] if pages else await context.new_page()

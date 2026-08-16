@@ -41,6 +41,10 @@ from patchright_profile_migration import (
     profile_owner_id,
     set_profile_owner,
 )
+from profile_config_engine import (
+    generate_orbita_profile_config,
+    write_profile_config_files,
+)
 
 try:
     from patchright_upload import SELECTORS as _UPLOAD_SELECTORS
@@ -260,13 +264,20 @@ def resolve_browser_executable(app_base=None):
     ``.local-browsers`` lookup."""
     browser_dir = _bundled_browser_dir(app_base)
     candidates = [
+        browser_dir / "orbita-browser-144" / "chrome.exe",
+    ]
+    if app_base is None:
+        app_data_chrome = os.path.expandvars(r"%APPDATA%\tiktokmanager\Chrome-bin\chrome.exe")
+        if os.path.exists(app_data_chrome):
+            candidates.append(Path(app_data_chrome))
+    candidates.extend([
         browser_dir / "orbita-browser-123" / "chrome.exe",
         browser_dir / "chrome-win64" / "chrome.exe",
         browser_dir / "chrome.exe",
         browser_dir / "chrome" / "chrome.exe",
-    ]
+    ])
     for path in candidates:
-        if _is_valid_executable(path):
+        if path is not None and _is_valid_executable(path):
             return str(path)
     return _find_system_chrome_executable()
 
@@ -337,7 +348,40 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None):
                 }
                 kwargs["permissions"] = ("geolocation",)
 
-    kwargs["args"] = ("--no-first-run", "--log-level=3")
+    # Generate native Orbita Anti-Detect config (data.orbita & data.huynhthang)
+    account_uuid = str(
+        config.get("account_uuid")
+        or config.get("profile_name")
+        or (Path(profile_path).name if profile_path else "")
+    )
+    proxy_info = None
+    if proxy is not None:
+        proxy_info = dict(proxy)
+    geoip_info = {}
+    if isinstance(fingerprint, dict):
+        geoip_info = {
+            "timezone": fingerprint.get("timezone"),
+            "ip": fingerprint.get("ip"),
+        }
+        geo = fingerprint.get("geolocation")
+        if isinstance(geo, dict):
+            geoip_info["latitude"] = geo.get("latitude")
+            geoip_info["longitude"] = geo.get("longitude")
+    orbita_cfg = generate_orbita_profile_config(
+        account_uuid=account_uuid,
+        proxy_info=proxy_info,
+        geoip_info=geoip_info,
+        user_agent=config.get("user_agent"),
+    )
+    write_profile_config_files(profile_path, orbita_cfg)
+
+    kwargs["args"] = (
+        "--no-first-run",
+        "--log-level=3",
+        "--ht-auto",
+        "--disable-session-crashed-bubble",
+        "--disable-backgrounding-occluded-windows",
+    )
     return BrowserSessionConfig(**kwargs)
 
 

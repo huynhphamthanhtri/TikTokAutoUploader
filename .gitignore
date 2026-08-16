@@ -35,6 +35,7 @@ CookiesDir/
 downloads/
 temp_dl/
 request_traces/
+profile/
 
 # Logs
 *.log

@@ -203,3 +203,81 @@ def session_proxy_key(config):
     )
     import hashlib
     return hashlib.sha256(identity.encode('utf-8')).hexdigest()
+
+
+class ProfileLeaseError(RuntimeError):
+    """Raised when profile is locked by another process."""
+    pass
+
+
+class ProfileLease:
+    """Acquires and holds an exclusive OS-level file lock on a profile directory."""
+
+    def __init__(self, profile_path, account_uuid=''):
+        self.profile_path = normalize_path(profile_path)
+        self.account_uuid = str(account_uuid or '')
+        self.lock_file_path = os.path.join(self.profile_path, '.profile_lease.lock') if self.profile_path else ''
+        self._file_obj = None
+        self._locked = False
+
+    def acquire(self):
+        if not self.lock_file_path:
+            return False
+        os.makedirs(self.profile_path, exist_ok=True)
+        try:
+            self._file_obj = open(self.lock_file_path, 'a+', encoding='utf-8')
+            if os.name == 'nt':
+                import msvcrt
+                self._file_obj.seek(0)
+                msvcrt.locking(self._file_obj.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self._file_obj.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            import json, time
+            self._file_obj.seek(0)
+            self._file_obj.truncate()
+            metadata = {
+                'pid': os.getpid(),
+                'account_uuid': self.account_uuid,
+                'acquired_at': time.time(),
+            }
+            self._file_obj.write(json.dumps(metadata))
+            self._file_obj.flush()
+            self._locked = True
+            return True
+        except (OSError, IOError) as exc:
+            if self._file_obj:
+                try:
+                    self._file_obj.close()
+                except Exception:
+                    pass
+                self._file_obj = None
+            self._locked = False
+            raise ProfileLeaseError(f'Profile {self.profile_path} is currently in use by another process') from exc
+
+    def release(self):
+        if self._locked and self._file_obj:
+            try:
+                if os.name == 'nt':
+                    import msvcrt
+                    self._file_obj.seek(0)
+                    msvcrt.locking(self._file_obj.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self._file_obj.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+            try:
+                self._file_obj.close()
+            except Exception:
+                pass
+            self._file_obj = None
+            self._locked = False
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()

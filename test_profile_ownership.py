@@ -192,5 +192,33 @@ class SessionProxyKeyTests(unittest.TestCase):
         self.assertNotEqual(http_key, socks_key)
 
 
+class ProfileLeaseTests(unittest.TestCase):
+    def test_profile_lease_acquire_and_release(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            from profile_ownership import ProfileLease, ProfileLeaseError
+            lease1 = ProfileLease(tmp_dir, 'uuid-test-1')
+            self.assertTrue(lease1.acquire())
+
+            # Attempting second lease on same directory should raise ProfileLeaseError
+            lease2 = ProfileLease(tmp_dir, 'uuid-test-2')
+            with self.assertRaises(ProfileLeaseError):
+                lease2.acquire()
+
+            # After releasing lease1, lease2 should be able to acquire
+            lease1.release()
+            self.assertTrue(lease2.acquire())
+            lease2.release()
+
+    def test_profile_lease_context_manager(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            from profile_ownership import ProfileLease, ProfileLeaseError
+            with ProfileLease(tmp_dir, 'uuid-ctx-1'):
+                with self.assertRaises(ProfileLeaseError):
+                    with ProfileLease(tmp_dir, 'uuid-ctx-2'):
+                        pass
+
+
 if __name__ == '__main__':
     unittest.main()

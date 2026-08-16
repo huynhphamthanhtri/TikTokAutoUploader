@@ -8,6 +8,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 class TestMonitorLifecycle(unittest.TestCase):
+    @staticmethod
+    def _reset_monitor_state():
+        import youtube_monitor.core as core
+        core.stop_event.set()
+        core.channels_store.stop_autosave()
+        core._stop_callback_server()
+        core._join_all_threads(timeout=10)
+        core._all_threads.clear()
+        for work_queue in (core.websub_payload_queue, core.download_queue):
+            while True:
+                try:
+                    work_queue.get_nowait()
+                    work_queue.task_done()
+                except core.queue.Empty:
+                    break
+        core._monitor_started = False
+        core._monitor_started_epoch = None
+
+    def setUp(self):
+        self._reset_monitor_state()
+
+    def tearDown(self):
+        self._reset_monitor_state()
+
     def test_start_stop_restart(self):
         with patch("youtube_monitor.core.make_server") as mock_ms, \
              patch("youtube_monitor.core.ngrok.connect") as mock_ng, \

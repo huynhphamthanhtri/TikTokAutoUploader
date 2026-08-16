@@ -1,3 +1,20 @@
+# Phiên bản 1.0.15
+
+## Điểm mới
+- Nâng cấp giao diện quản lý theo bố cục Sidebar, Header và các workspace độc lập cho Profiles, YouTube, lịch sử và tài chính.
+- Bổ sung thẻ tổng quan profile, danh sách dự án trên Sidebar, log drawer thu gọn và toast notification.
+- Bổ sung giao diện tổng hợp Monetization cùng các hộp thoại profile, proxy và chi tiết tài chính.
+- Bổ sung engine cấu hình profile Orbita 144 và cơ chế profile lease cấp hệ điều hành.
+
+## Cải thiện
+- Tăng chiều cao hàng và độ rõ của bảng profile, giữ nguyên multi-select, sort, context menu và incremental refresh.
+- Ưu tiên Orbita 144 khi có sẵn, đồng thời duy trì các browser fallback hiện có.
+- Bổ sung kiểm thử contract giao diện, UI components, dialogs, monetization client và profile configuration.
+
+## Sửa lỗi
+- Cải thiện tính nhất quán của bố cục khi chuyển workspace mà không tạo lại YouTube Monitor và Batch views.
+- Giữ tương thích với các widget key và handler hiện có trong controller.
+
 # Phiên bản 1.0.14
 
 ## Điểm mới

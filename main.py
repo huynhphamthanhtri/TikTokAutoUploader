@@ -2520,7 +2520,7 @@ def _migrate_profile_drivers():
 # --- BẢNG THỐNG KÊ MỚI ---
 def show_statistics_board():
     if not _license_guard(): return
-    
+
     dlg = ctk.CTkToplevel(root)
     dlg.title("Thống kê hoạt động")
     dlg.geometry("500x400")
@@ -2541,17 +2541,17 @@ def show_statistics_board():
     tv.heading('name', text='Tên Hồ Sơ')
     tv.heading('today', text='Hôm nay')
     tv.heading('yesterday', text='Hôm qua')
-    
+
     tv.column('name', width=200)
     tv.column('today', width=100, anchor='center')
     tv.column('yesterday', width=100, anchor='center')
-    
+
     tv.pack(fill='both', expand=True, padx=10, pady=(0, 10))
 
     # Load dữ liệu (có filter theo Project đang chọn bên ngoài cho tiện)
     p = selected_project_var.get()
     targets = sorted(profiles.keys()) if p == ALL_OPTION else sorted(projects.get(p, []))
-    
+
     for name in targets:
         if name in profiles:
             td = profiles[name]['uploads_today_count']
@@ -3196,7 +3196,7 @@ def cleanup_failed_videos():
         except Exception as e:
             messagebox.showerror("Lỗi", f"Không thể đọc file log: {e}")
             return
-    
+
     failed_total_size = 0
     failed_count = 0
     failed_to_delete = []
@@ -3211,7 +3211,7 @@ def cleanup_failed_videos():
                 failed_total_size += os.path.getsize(fpath)
                 failed_count += 1
                 failed_to_delete.append(fpath)
-    
+
     # === PHASE 2: VIDEO ĐANG CHỜ ===
     VIDEO_EXTS = ('.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv')
     pending_total_size = 0
@@ -3423,6 +3423,29 @@ def _refresh_status_bar():
         header_total_label.set(str(total))
         header_running_label.set(str(running))
         header_project_label.set(selected_project_var.get() or ALL_OPTION)
+
+        from ui_components import calculate_summary_counts
+        counts = calculate_summary_counts(
+            profiles,
+            active_project=selected_project_var.get() or ALL_OPTION,
+            filter_text=filter_var.get(),
+        )
+        if 'summary_cookie_var' in ui_state:
+            ui_state['summary_cookie_var'].set(str(counts["cookie_live"]))
+        if 'summary_error_var' in ui_state:
+            ui_state['summary_error_var'].set(str(counts["errors"]))
+
+        if 'project_list_view' in ui_widgets:
+            proj_counts = {ALL_OPTION: len(profiles)}
+            for p_name in projects:
+                proj_counts[p_name] = sum(
+                    1 for p in profiles.values()
+                    if p.get('config', {}).get('project_name', 'Mặc định') == p_name
+                )
+            ui_widgets['project_list_view'].update_projects(
+                proj_counts,
+                active_project=selected_project_var.get() or ALL_OPTION,
+            )
     except Exception:
         pass
 
@@ -6397,6 +6420,20 @@ scale_var = StringVar(master=root, value="100%")
 header_total_label = StringVar(master=root, value="0")
 header_running_label = StringVar(master=root, value="0")
 header_project_label = StringVar(master=root, value=ALL_OPTION)
+summary_cookie_var = StringVar(master=root, value="0")
+summary_error_var = StringVar(master=root, value="0")
+mono_total_balance_var = StringVar(master=root, value="$0.00")
+mono_ready_count_var = StringVar(master=root, value="0")
+mono_action_needed_var = StringVar(master=root, value="0")
+
+from ui_components import ToastManager
+toast_manager = ToastManager(root)
+
+from tiktok_monetization_client import fetch_monetization_snapshot
+from ui_dialogs import MonetizationDetailModal
+from concurrent.futures import ThreadPoolExecutor
+
+monetization_cache = {}
 
 configure_ttk_styles()
 
@@ -6407,7 +6444,149 @@ ui_state = {
     'header_total_label': header_total_label,
     'header_running_label': header_running_label,
     'header_project_label': header_project_label,
+    'summary_cookie_var': summary_cookie_var,
+    'summary_error_var': summary_error_var,
+    'mono_total_balance_var': mono_total_balance_var,
+    'mono_ready_count_var': mono_ready_count_var,
+    'mono_action_needed_var': mono_action_needed_var,
 }
+
+def _update_monetization_table(*_args):
+    mono_tree = ui_widgets.get('monetization_tree') if 'ui_widgets' in globals() else None
+    if not mono_tree:
+        return
+    
+    current_proj = selected_project_var.get()
+    kw = filter_var.get().strip().lower()
+    
+    total_balance = 0.0
+    ready_count = 0
+    action_count = 0
+
+    for item in mono_tree.get_children():
+        mono_tree.delete(item)
+
+    for name, prof in sorted(profiles.items()):
+        config = prof.get('config', {})
+        if current_proj != ALL_OPTION and config.get('project_name') != current_proj:
+            continue
+        if kw and kw not in name.lower() and kw not in config.get('tiktok_account', '').lower():
+            continue
+
+        snap = monetization_cache.get(name, {})
+        bal_val = float(snap.get('balance', 0.0) or 0.0)
+        p_status = snap.get('payout_status', 'CHƯA CHECK')
+        k_status = snap.get('kyc_status', 'N/A')
+        p_method = snap.get('payment_method', 'N/A')
+        chk_at = snap.get('checked_at', 'Chưa kiểm tra')
+        reg = snap.get('region', config.get('region', 'US'))
+
+        total_balance += bal_val
+        if p_status == 'PAYOUT_READY':
+            ready_count += 1
+        elif p_status in ('PAYOUT_NOT_LINKED', 'NO_AUTH', 'ERROR') or k_status in ('NOT_STARTED', 'REJECTED'):
+            action_count += 1
+
+        mono_tree.insert(
+            '',
+            'end',
+            iid=name,
+            values=(
+                name,
+                config.get('tiktok_account') or 'N/A',
+                reg,
+                f"${bal_val:,.2f}",
+                p_status,
+                k_status,
+                p_method,
+                chk_at,
+            ),
+        )
+
+    mono_total_balance_var.set(f"${total_balance:,.2f}")
+    mono_ready_count_var.set(str(ready_count))
+    mono_action_needed_var.set(str(action_count))
+
+
+def _do_fetch_monetization_worker(targets):
+    toast_manager.enqueue(f"Bắt đầu quét số dư {len(targets)} tài khoản...", level="info")
+    success_count = 0
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {
+            executor.submit(fetch_monetization_snapshot, name, profiles[name].get('config', {})): name
+            for name in targets if name in profiles
+        }
+        for fut in futures:
+            name = futures[fut]
+            try:
+                data = fut.result(timeout=20.0)
+                monetization_cache[name] = data
+                if data.get("status") == "SUCCESS":
+                    success_count += 1
+            except Exception as e:
+                monetization_cache[name] = {
+                    "balance": 0.0,
+                    "payout_status": "ERROR",
+                    "kyc_status": "ERROR",
+                    "payment_method": "N/A",
+                    "checked_at": "Lỗi",
+                    "errors": [str(e)],
+                }
+    
+    root.after(0, _update_monetization_table)
+    toast_manager.enqueue(
+        f"Hoàn tất quét thu nhập: {success_count}/{len(targets)} OK",
+        level="success" if success_count > 0 else "warning"
+    )
+
+
+def refresh_all_monetization():
+    current_proj = selected_project_var.get()
+    targets = [
+        name for name, prof in profiles.items()
+        if current_proj == ALL_OPTION or prof.get('config', {}).get('project_name') == current_proj
+    ]
+    if not targets:
+        toast_manager.enqueue("Không có profile nào để quét thu nhập.", level="warning")
+        return
+    threading.Thread(target=_do_fetch_monetization_worker, args=(targets,), daemon=True).start()
+
+
+def refresh_selected_monetization():
+    mono_tree = ui_widgets.get('monetization_tree') if 'ui_widgets' in globals() else None
+    selected = list(mono_tree.selection()) if mono_tree else []
+    if not selected and 'tree' in globals():
+        selected = list(tree.selection())
+    if not selected:
+        toast_manager.enqueue("Vui lòng chọn ít nhất 1 profile để quét thu nhập.", level="warning")
+        return
+    threading.Thread(target=_do_fetch_monetization_worker, args=(selected,), daemon=True).start()
+
+
+def view_monetization_details():
+    mono_tree = ui_widgets.get('monetization_tree') if 'ui_widgets' in globals() else None
+    selected = list(mono_tree.selection()) if mono_tree else []
+    if not selected and 'tree' in globals():
+        selected = list(tree.selection())
+    if not selected:
+        toast_manager.enqueue("Vui lòng chọn 1 profile để xem chi tiết.", level="warning")
+        return
+    prof_name = selected[0]
+    snap = monetization_cache.get(prof_name, {})
+    if not snap:
+        config = profiles.get(prof_name, {}).get('config', {})
+        snap = {
+            "profile_name": prof_name,
+            "region": config.get("region", "US"),
+            "balance": 0.0,
+            "payout_status": "CHƯA KIỂM TRA",
+            "payment_method": "N/A",
+            "kyc_status": "N/A",
+            "rewards_estimated": "$0.00",
+            "checked_at": "Chưa kiểm tra",
+        }
+    MonetizationDetailModal(root, prof_name, snap)
+
 
 def _youtube_profile_names():
     return sorted(profiles.keys())
@@ -6497,6 +6676,9 @@ ui_handlers = {
     'get_tiktok_cookies': get_tiktok_cookies,
     'check_cookie_live': check_cookie_live,
     'inspect_tiktok_account': inspect_selected_tiktok_account,
+    'refresh_all_monetization': refresh_all_monetization,
+    'refresh_selected_monetization': refresh_selected_monetization,
+    'view_monetization_details': view_monetization_details,
     'clean_browser': clean_browser,
     'change_license_key': change_license_key,
     'check_update': check_update_clicked,
@@ -6513,6 +6695,10 @@ ui_handlers = {
     'activity': activity_handlers,
 }
 ui_widgets = build_dashboard(root, ui_state, ui_handlers)
+
+# Bind double-click on monetization tree
+if 'monetization_tree' in ui_widgets:
+    ui_widgets['monetization_tree'].bind("<Double-1>", lambda _e: view_monetization_details())
 
 topbar = ui_widgets['topbar']
 manage_frame = ui_widgets['manage_frame']
@@ -6547,7 +6733,12 @@ def _start_youtube_monitor_safe():
 
 selected_project_var.trace('w', update_profile_list)
 filter_var.trace('w', update_profile_list)
+selected_project_var.trace('w', _update_monetization_table)
+filter_var.trace('w', _update_monetization_table)
 scale_var.trace('w', _apply_scale)
+
+# Initial population of monetization table
+root.after(200, _update_monetization_table)
 
 def _on_tree_right_click(event):
     iid = tree.identify_row(event.y)
@@ -6563,6 +6754,10 @@ tree.bind("<<TreeviewSelect>>", _update_action_buttons)
 def _tick():
     # Cập nhật UI
     _refresh_status_bar()
+    try:
+        toast_manager.poll_queue()
+    except Exception:
+        pass
     try:
         if youtube_monitor_view:
             youtube_monitor_view.refresh_data()
