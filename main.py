@@ -4777,149 +4777,329 @@ def assign_to_project():
 
 def add_profile():
     if not _license_guard(): return
+    
+    width, height = _dialog_size(960, 740)
     dlg = ctk.CTkToplevel(root)
-    dlg.title("Thêm hồ sơ")
-    dlg.geometry("640x1050")
-    
-    scroll_frame = ctk.CTkScrollableFrame(dlg, width=620, height=900)
-    scroll_frame.pack(fill='both', expand=True, padx=10, pady=(10, 0))
-    
-    ctk.CTkLabel(scroll_frame, text="Tên:").pack(pady=2)
-    e_name = ctk.CTkEntry(scroll_frame, width=400)
-    e_name.pack(pady=2)
-    
-    ctk.CTkLabel(scroll_frame, text="Email:").pack(pady=2)
-    e_email = ctk.CTkEntry(scroll_frame, width=400)
-    e_email.pack(pady=2)
+    dlg.title("DONGLAO-TIKTOK — Thêm Hồ Sơ Mới")
+    dlg.geometry(f"{width}x{height}")
+    dlg.minsize(800, 600)
+    dlg.transient(root)
+    try:
+        dlg.grab_set()
+    except Exception:
+        pass
 
-    ctk.CTkLabel(scroll_frame, text="Mật khẩu TikTok:").pack(pady=2)
-    e_password = ctk.CTkEntry(scroll_frame, width=400, show='*')
-    e_password.pack(pady=2)
+    scroll = ctk.CTkScrollableFrame(dlg, fg_color='#f3f4f6')
+    scroll.pack(fill='both', expand=True, padx=10, pady=(10, 0))
 
-    ctk.CTkLabel(scroll_frame, text="ID TikTok:").pack(pady=2)
-    e_tiktok_id = ctk.CTkEntry(scroll_frame, width=400)
-    e_tiktok_id.pack(pady=2)
-
-    ctk.CTkLabel(scroll_frame, text="Khóa 2FA:").pack(pady=2)
-    e_auth2fa = ctk.CTkEntry(scroll_frame, width=400, show='*')
-    e_auth2fa.pack(pady=2)
-
-    ctk.CTkLabel(scroll_frame, text="Mật khẩu email:").pack(pady=2)
-    e_passmail = ctk.CTkEntry(scroll_frame, width=400, show='*')
-    e_passmail.pack(pady=2)
-
-    ctk.CTkLabel(scroll_frame, text="Email backup:").pack(pady=2)
-    e_mail_backup = ctk.CTkEntry(scroll_frame, width=400)
-    e_mail_backup.pack(pady=2)
-
-    ctk.CTkLabel(scroll_frame, text="Mật khẩu email backup:").pack(pady=2)
-    e_pass_mail_backup = ctk.CTkEntry(scroll_frame, width=400, show='*')
-    e_pass_mail_backup.pack(pady=2)
-
-    ctk.CTkLabel(scroll_frame, text="Ghi chú:").pack(pady=2)
-    e_note = ctk.CTkEntry(scroll_frame, width=400)
-    e_note.pack(pady=2)
-
-    ctk.CTkLabel(scroll_frame, text="Thư mục video:").pack(pady=2)
-    e_folder = ctk.CTkEntry(scroll_frame, width=400)
-    e_folder.pack()
-    ctk.CTkButton(scroll_frame, text="...", width=50, command=lambda: e_folder.insert(0, filedialog.askdirectory())).pack()
+    # --- Top Bar: Dán Nhanh Chuỗi Tài Khoản ---
+    quick_card, quick_body = _ui_card(scroll, '⚡ Dán Nhanh Chuỗi Dữ Liệu', 'Tự động phân tách và điền vào các ô nhập liệu bên dưới')
+    quick_row = ctk.CTkFrame(quick_body, fg_color='transparent')
+    quick_row.pack(fill='x', pady=2)
     
-    ctk.CTkLabel(scroll_frame, text="Chrome User Data:").pack(pady=2)
-    e_chrome = ctk.CTkEntry(scroll_frame, width=400)
-    e_chrome.pack()
-    ctk.CTkButton(scroll_frame, text="...", width=50, command=lambda: e_chrome.insert(0, filedialog.askdirectory())).pack()
-    
-    ctk.CTkLabel(scroll_frame, text="Cookie:").pack(pady=2)
-    e_cookie = ctk.CTkEntry(scroll_frame, width=400)
-    e_cookie.pack()
-    
-    # --- PROXY UI ---
-    v_use_proxy = ctk.BooleanVar(scroll_frame, value=False)
-    ctk.CTkCheckBox(scroll_frame, text="Sử dụng Proxy", variable=v_use_proxy).pack(pady=(10, 2))
-    
-    ctk.CTkLabel(scroll_frame, text="Proxy (IP:Port:User:Pass):").pack(pady=2)
-    e_proxy = ctk.CTkEntry(scroll_frame, width=400)
-    e_proxy.pack()
-    
-    ctk.CTkLabel(scroll_frame, text="Limit/Ngày (0=No):").pack(pady=2)
-    e_limit = ctk.CTkEntry(scroll_frame, width=400)
-    e_limit.insert(0, "0")
-    e_limit.pack()
-    
-    v_head = ctk.BooleanVar(scroll_frame, value=True)
-    ctk.CTkCheckBox(scroll_frame, text="Headless", variable=v_head).pack(pady=5)
+    e_quick_paste = ctk.CTkEntry(
+        quick_row,
+        placeholder_text="Dán chuỗi (vd: Name|Email|Pass|TikTokID|2FA|Cookie|Proxy hoặc UID|User|Pass|Cookie|Proxy)...",
+        height=32,
+        border_width=1,
+        border_color='#cbd5e1',
+    )
+    e_quick_paste.pack(side='left', fill='x', expand=True)
 
-    v_open_only = ctk.BooleanVar(scroll_frame, value=False)
-    ctk.CTkCheckBox(scroll_frame, text="Chỉ mở khi có video mới", variable=v_open_only).pack(pady=5)
+    # --- Card 1: Thông tin nhận diện ---
+    card1, body1 = _ui_card(scroll, '1. Thông Tin Nhận Diện', 'Tên profile và thông tin tài khoản cơ bản')
+    body1.grid_columnconfigure(0, weight=1)
+    body1.grid_columnconfigure(1, weight=1)
     
-    v_proj = StringVar(scroll_frame, value='Mặc định')
-    ctk.CTkComboBox(scroll_frame, values=list(projects.keys()), variable=v_proj).pack(pady=5)
+    _, e_name = _edit_field(body1, 0, 0, 'Tên hồ sơ (*)')
+    
+    proj_frame = ctk.CTkFrame(body1, fg_color='transparent')
+    proj_frame.grid(row=0, column=1, sticky='nsew', padx=8, pady=4)
+    ctk.CTkLabel(proj_frame, text='Dự án / Nhóm', font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    v_proj = StringVar(proj_frame, value='Mặc định' if 'Mặc định' in projects else (list(projects.keys())[0] if projects else 'Mặc định'))
+    cb_proj = ctk.CTkComboBox(proj_frame, values=list(projects.keys()) if projects else ['Mặc định'], variable=v_proj, height=32)
+    cb_proj.pack(fill='x', pady=(3, 0))
 
+    _, e_email = _edit_field(body1, 1, 0, 'Email liên kết')
+    _, e_tiktok_id = _edit_field(body1, 1, 1, 'TikTok ID (@username hoặc Numeric UID)')
+
+    note_row = ctk.CTkFrame(body1, fg_color='transparent')
+    note_row.grid(row=2, column=0, columnspan=2, sticky='nsew', padx=8, pady=4)
+    ctk.CTkLabel(note_row, text='Ghi chú', font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    e_note = ctk.CTkTextbox(note_row, height=54, wrap='word', border_width=1, border_color='#cbd5e1')
+    e_note.pack(fill='x', pady=(3, 0))
+
+    # --- Card 2: Bảo mật & Cookie ---
+    card2, body2 = _ui_card(scroll, '2. Bảo Mật & Xác Thực', 'Mật khẩu, mã 2FA và Cookie phiên đăng nhập')
+    body2.grid_columnconfigure(0, weight=1)
+    body2.grid_columnconfigure(1, weight=1)
+    
+    _, e_password = _edit_secret(body2, 0, 0, 'Mật khẩu TikTok')
+    _, e_auth2fa = _edit_secret(body2, 0, 1, 'Khóa 2FA (Secret Key)')
+    _, e_passmail = _edit_secret(body2, 1, 0, 'Mật khẩu email')
+    _, e_mail_backup = _edit_field(body2, 1, 1, 'Email backup')
+    _, e_pass_mail_backup = _edit_secret(body2, 2, 0, 'Mật khẩu email backup')
+
+    cookie_row = ctk.CTkFrame(body2, fg_color='transparent')
+    cookie_row.grid(row=3, column=0, columnspan=2, sticky='nsew', padx=8, pady=4)
+    ctk.CTkLabel(cookie_row, text='Cookie TikTok (tùy chọn, dùng khi chưa có session trình duyệt)', font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    e_cookie = ctk.CTkTextbox(cookie_row, height=72, wrap='word', border_width=1, border_color='#cbd5e1')
+    e_cookie.pack(fill='x', pady=(3, 0))
+
+    # --- Card 3: Proxy & Mạng ---
+    card3, body3 = _ui_card(scroll, '3. Cấu Hình Proxy & Mạng', 'Định tuyến lưu lượng qua Proxy riêng biệt')
+    body3.grid_columnconfigure(0, weight=1)
+    body3.grid_columnconfigure(1, weight=1)
+
+    proxy_top = ctk.CTkFrame(body3, fg_color='transparent')
+    proxy_top.grid(row=0, column=0, columnspan=2, sticky='nsew', padx=8, pady=4)
+    v_use_proxy = ctk.BooleanVar(proxy_top, value=False)
+    ctk.CTkCheckBox(proxy_top, text="Kích hoạt sử dụng Proxy cho hồ sơ này", variable=v_use_proxy, font=('Segoe UI', 12, 'bold')).pack(side='left')
+
+    ctk.CTkLabel(proxy_top, text="Loại:", font=('Segoe UI', 11), text_color='#64748b').pack(side='left', padx=(20, 6))
+    v_proxy_type = ctk.StringVar(value="http")
+    cb_proxy_type = ctk.CTkOptionMenu(proxy_top, values=["http", "socks5"], variable=v_proxy_type, width=90, height=28)
+    cb_proxy_type.pack(side='left')
+
+    proxy_input_frame = ctk.CTkFrame(body3, fg_color='transparent')
+    proxy_input_frame.grid(row=1, column=0, columnspan=2, sticky='nsew', padx=8, pady=4)
+    ctk.CTkLabel(proxy_input_frame, text='Chuỗi Proxy (IP:Port hoặc IP:Port:User:Pass)', font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    e_proxy = ctk.CTkEntry(proxy_input_frame, height=32, border_width=1, border_color='#cbd5e1', placeholder_text="192.168.1.1:8080 hoặc 192.168.1.1:8080:user:pass")
+    e_proxy.pack(fill='x', pady=(3, 0))
+
+    test_proxy_row = ctk.CTkFrame(body3, fg_color='transparent')
+    test_proxy_row.grid(row=2, column=0, columnspan=2, sticky='nsew', padx=8, pady=4)
+    lbl_proxy_test = ctk.CTkLabel(test_proxy_row, text="", font=('Segoe UI', 11))
+    
+    def _test_proxy_live():
+        raw_p = e_proxy.get().strip()
+        if not raw_p:
+            lbl_proxy_test.configure(text="⚠️ Vui lòng nhập chuỗi proxy trước khi test", text_color="#d97706")
+            return
+        lbl_proxy_test.configure(text="⏳ Đang kiểm tra kết nối proxy...", text_color="#0284c7")
+        def _bg_test():
+            try:
+                p_data = parse_proxy_string(raw_p, v_proxy_type.get())
+                if not p_data:
+                    root.after(0, lambda: lbl_proxy_test.configure(text="❌ Định dạng chuỗi proxy không hợp lệ", text_color="#dc2626"))
+                    return
+                geo = resolve_geoip(p_data, timeout=8)
+                ip = geo.get('ip') or p_data.get('ip')
+                country = geo.get('country') or 'Unknown'
+                city = geo.get('city', '')
+                loc_str = f"[{country}] {city} - IP: {ip}".strip()
+                root.after(0, lambda: lbl_proxy_test.configure(text=f"🟢 Proxy LIVE: {loc_str}", text_color="#16a34a"))
+            except Exception as exc:
+                root.after(0, lambda: lbl_proxy_test.configure(text=f"🔴 Lỗi kết nối proxy: {exc}", text_color="#dc2626"))
+        threading.Thread(target=_bg_test, daemon=True).start()
+
+    btn_test_proxy = ctk.CTkButton(
+        test_proxy_row,
+        text="⚡ Kiểm Tra Proxy",
+        width=120,
+        height=28,
+        fg_color=UIThemeTokens.ACCENT_PRIMARY,
+        hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
+        text_color="#ffffff",
+        font=('Segoe UI', 11, 'bold'),
+        command=_test_proxy_live,
+    )
+    btn_test_proxy.pack(side='left')
+    lbl_proxy_test.pack(side='left', padx=10)
+
+    # --- Card 4: Thư mục dữ liệu & Vận hành ---
+    card4, body4 = _ui_card(scroll, '4. Thư Mục Dữ Liệu & Vận Hành', 'Cấu hình đường dẫn lưu trữ video và profile browser')
+    body4.grid_columnconfigure(0, weight=1)
+    body4.grid_columnconfigure(1, weight=1)
+
+    v_auto_dirs = ctk.BooleanVar(body4, value=True)
+    chk_auto_dirs = ctk.CTkCheckBox(
+        body4,
+        text="Tự động sinh thư mục chuẩn (Auto_Data/<TênProfile>/...) (Khuyên dùng)",
+        variable=v_auto_dirs,
+        font=('Segoe UI', 12, 'bold'),
+    )
+    chk_auto_dirs.grid(row=0, column=0, columnspan=2, sticky='w', padx=8, pady=4)
+
+    folder_frame = ctk.CTkFrame(body4, fg_color='transparent')
+    folder_frame.grid(row=1, column=0, columnspan=2, sticky='nsew', padx=8, pady=4)
+    ctk.CTkLabel(folder_frame, text='Thư mục video (*)', font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    folder_row = ctk.CTkFrame(folder_frame, fg_color='transparent')
+    folder_row.pack(fill='x', pady=(3, 0))
+    e_folder = ctk.CTkEntry(folder_row, height=32, border_width=1, border_color='#cbd5e1')
+    e_folder.pack(side='left', fill='x', expand=True)
+    ctk.CTkButton(folder_row, text='Chọn...', width=70, height=32, fg_color='#eef2ff', text_color='#2563eb',
+                  hover_color='#dbeafe', command=lambda: _browse_dir(e_folder)).pack(side='left', padx=(4, 0))
+    ctk.CTkButton(folder_row, text='Mở', width=44, height=32, fg_color='#f1f5f9', text_color='#334155',
+                  hover_color='#e2e8f0', command=lambda: _open_dir(e_folder.get())).pack(side='left', padx=(4, 0))
+
+    chrome_frame = ctk.CTkFrame(body4, fg_color='transparent')
+    chrome_frame.grid(row=2, column=0, columnspan=2, sticky='nsew', padx=8, pady=4)
+    ctk.CTkLabel(chrome_frame, text='Chrome User Data (Profile Browser) (*)', font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
+    chrome_row = ctk.CTkFrame(chrome_frame, fg_color='transparent')
+    chrome_row.pack(fill='x', pady=(3, 0))
+    e_chrome = ctk.CTkEntry(chrome_row, height=32, border_width=1, border_color='#cbd5e1')
+    e_chrome.pack(side='left', fill='x', expand=True)
+    ctk.CTkButton(chrome_row, text='Chọn...', width=70, height=32, fg_color='#eef2ff', text_color='#2563eb',
+                  hover_color='#dbeafe', command=lambda: _browse_dir(e_chrome)).pack(side='left', padx=(4, 0))
+    ctk.CTkButton(chrome_row, text='Mở', width=44, height=32, fg_color='#f1f5f9', text_color='#334155',
+                  hover_color='#e2e8f0', command=lambda: _open_dir(e_chrome.get())).pack(side='left', padx=(4, 0))
+
+    def _sync_auto_paths(*_):
+        if not v_auto_dirs.get():
+            return
+        nm = e_name.get().strip()
+        if nm:
+            safe = "".join(c for c in nm if c.isalnum() or c in (' ', '-', '_')).strip() or "Profile"
+            base = app_base_dir() / "Auto_Data" / safe
+            e_folder.delete(0, 'end')
+            e_folder.insert(0, str(base / "Video"))
+            e_chrome.delete(0, 'end')
+            e_chrome.insert(0, str(base / "Profile"))
+
+    e_name.bind('<KeyRelease>', _sync_auto_paths)
+
+    _, e_limit = _edit_field(body4, 3, 0, 'Giới hạn video / ngày (0 = không giới hạn)', '0')
+    _, v_head = _edit_check(body4, 3, 1, 'Chạy ngầm (Headless)', True)
+    _, v_open_only = _edit_check(body4, 4, 0, 'Chỉ mở khi có video mới', False)
+
+    # --- Quick Paste Handler ---
+    def _apply_quick_paste():
+        raw_text = e_quick_paste.get().strip()
+        if not raw_text:
+            return
+        parts = [p.strip() for p in raw_text.replace('\t', '|').split('|') if p.strip()]
+        if not parts:
+            return
+        
+        # Heuristic Auto-Fill based on parts count
+        if len(parts) >= 1 and not e_name.get().strip():
+            e_name.insert(0, parts[0])
+            _sync_auto_paths()
+        
+        for part in parts[1:]:
+            if '@' in part and '.' in part and not e_email.get().strip():
+                e_email.insert(0, part)
+            elif 'sessionid=' in part or 'sid_guard=' in part:
+                e_cookie.delete('1.0', 'end')
+                e_cookie.insert('1.0', part)
+            elif (':' in part and any(c.isdigit() for c in part)) and not e_proxy.get().strip():
+                e_proxy.insert(0, part)
+                v_use_proxy.set(True)
+            elif part.startswith('@') and not e_tiktok_id.get().strip():
+                e_tiktok_id.insert(0, part)
+            elif len(part) in (16, 26, 32) and part.isalnum() and part.isupper() and not e_auth2fa.get().strip():
+                e_auth2fa.insert(0, part)
+            elif not e_password.get().strip() and len(part) >= 6:
+                e_password.insert(0, part)
+
+        toast_manager.enqueue("Đã tự động trích xuất chuỗi vào các ô", level="info")
+
+    btn_quick_apply = ctk.CTkButton(
+        quick_row,
+        text="⚡ Áp Dụng",
+        width=95,
+        height=32,
+        fg_color=UIThemeTokens.ACCENT_PRIMARY,
+        hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
+        text_color="#ffffff",
+        font=('Segoe UI', 11, 'bold'),
+        command=_apply_quick_paste,
+    )
+    btn_quick_apply.pack(side='left', padx=(6, 0))
+
+    # --- Save Logic ---
     def save():
         nm = e_name.get().strip()
-        if not nm or nm in profiles:
-            messagebox.showerror("Lỗi", "Tên không hợp lệ")
+        if not nm:
+            messagebox.showerror("Lỗi", "Vui lòng nhập Tên hồ sơ.", parent=dlg)
+            return
+        if nm in profiles:
+            messagebox.showerror("Lỗi", f"Hồ sơ '{nm}' đã tồn tại.", parent=dlg)
             return
         fd = e_folder.get().strip()
         cp = e_chrome.get().strip()
-        pj = v_proj.get()
-        try: lm = int(e_limit.get().strip())
-        except: lm = 0
-        if lm < 0: lm = 0
-        
-        if not fd or not cp or pj not in projects:
-            messagebox.showerror("Lỗi", "Thiếu thông tin")
+        pj = v_proj.get().strip() or 'Mặc định'
+        try:
+            lm = int(e_limit.get().strip())
+        except Exception:
+            lm = 0
+        if lm < 0:
+            lm = 0
+
+        if not fd or not cp:
+            messagebox.showerror("Lỗi", "Vui lòng nhập đầy đủ Thư mục video và Chrome Profile.", parent=dlg)
             return
+
+        if pj not in projects:
+            projects[pj] = set()
+
         duplicate = _find_profile_with_data_dir(cp)
         if duplicate:
-            messagebox.showerror("Lỗi", f"Chrome User Data đang được hồ sơ '{duplicate}' sử dụng.")
+            messagebox.showerror("Lỗi", f"Thư mục Chrome Profile đang được hồ sơ '{duplicate}' sử dụng.", parent=dlg)
             return
+
         try:
             profile_path = Path(cp)
             if not profile_path.exists():
                 create_owned_root(profile_path)
+            video_path = Path(fd)
+            video_path.mkdir(parents=True, exist_ok=True)
         except Exception as error:
-            messagebox.showerror("Lỗi", f"Không tạo được Chrome User Data an toàn: {error}")
+            messagebox.showerror("Lỗi", f"Không tạo được thư mục an toàn: {error}", parent=dlg)
             return
-            
-        fp_seed = nm + e_cookie.get() + str(time.time_ns())
+
+        fp_seed = nm + e_cookie.get('1.0', 'end').strip() + str(time.time_ns())
         fingerprint = _generate_fingerprint(seed=fp_seed)
+        
         profiles[nm] = {
             'config': {
-                "folder_path": fd, 
-                "chrome_profile": cp, 
-                "cookie_str": e_cookie.get(),
+                "folder_path": fd,
+                "chrome_profile": cp,
+                "cookie_str": e_cookie.get('1.0', 'end').strip(),
                 "email": e_email.get().strip(),
                 "password": e_password.get(),
                 "tiktok_id": _normalize_tiktok_id(e_tiktok_id.get()),
-                "auth2fa": e_auth2fa.get(),
+                "auth2fa": e_auth2fa.get().strip(),
                 "passmail": e_passmail.get(),
                 "mail_backup": e_mail_backup.get().strip(),
                 "pass_mail_backup": e_pass_mail_backup.get(),
-                "note": e_note.get().strip(),
+                "note": e_note.get('1.0', 'end').strip(),
                 "proxy_string": e_proxy.get().strip(),
-                "proxy_type": "http",
+                "proxy_type": v_proxy_type.get().lower(),
                 "use_proxy": v_use_proxy.get(),
-                "headless": v_head.get(), 
+                "headless": v_head.get(),
                 "open_only_when_video": v_open_only.get(),
                 "max_uploads_per_day": lm,
                 "fingerprint": fingerprint,
                 "stats_today": 0,
                 "stats_yesterday": 0,
-                "stats_date": datetime.now().strftime('%Y-%m-%d')
+                "stats_date": datetime.now().strftime('%Y-%m-%d'),
             },
-            'queue': queue.Queue(), 'observer': None, 'driver': None, 'running': False,
-            'processed_files': set(), 'last_event_time': {}, 'uploading': False, 'project': pj,
+            'queue': queue.Queue(),
+            'observer': None,
+            'driver': None,
+            'running': False,
+            'processed_files': set(),
+            'last_event_time': {},
+            'uploading': False,
+            'project': pj,
             'uploads_today_count': 0,
             'uploads_yesterday_count': 0,
-            'uploads_today_date': datetime.now().strftime('%Y-%m-%d')
+            'uploads_today_date': datetime.now().strftime('%Y-%m-%d'),
         }
         ensure_account_uuid(profiles[nm]['config'])
         projects[pj].add(nm)
         save_configs()
+        update_profile_list()
+        try:
+            request_profile_refresh()
+        except Exception:
+            pass
+        toast_manager.enqueue(f"Đã thêm hồ sơ: {nm}", level="info")
         dlg.destroy()
-    ctk.CTkButton(dlg, text="Lưu", command=save).pack(pady=10)
+
+    _ui_footer(dlg, primary_text="💾 Lưu Hồ Sơ", primary_command=save, secondary_text="Hủy", secondary_command=dlg.destroy)
 
 # --- IMPORT HÀNG LOẠT ---
 def _apply_import_plans(plans, proxy_type='http', default_project='Mặc định'):
@@ -5038,15 +5218,21 @@ def batch_add_profiles():
     if not _license_guard(): return
 
     dlg = ctk.CTkToplevel(root)
-    dlg.title("Import tài khoản hàng loạt")
-    dlg.geometry("960x760")
-    dlg.grab_set()
+    dlg.title("DONGLAO-TIKTOK — Import Tài Khoản Hàng Loạt")
+    dlg.geometry("980x780")
+    dlg.minsize(800, 600)
+    dlg.configure(fg_color=UIThemeTokens.BG_ROOT)
+    dlg.transient(root)
+    try:
+        dlg.grab_set()
+    except Exception:
+        pass
 
-    top = ctk.CTkFrame(dlg)
-    top.pack(fill='x', padx=10, pady=(10, 4))
+    top = ctk.CTkFrame(dlg, fg_color=UIThemeTokens.BG_CARD, corner_radius=10, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+    top.pack(fill='x', padx=12, pady=(12, 6))
     top.grid_columnconfigure(1, weight=1)
 
-    ctk.CTkLabel(top, text="Format:").grid(row=0, column=0, sticky='w')
+    ctk.CTkLabel(top, text="Định dạng:", font=('Segoe UI', 12, 'bold'), text_color=UIThemeTokens.TEXT_PRIMARY).grid(row=0, column=0, sticky='w', padx=10, pady=(8, 2))
     preset_var = StringVar(value='Đầy đủ 11 trường')
     presets = {
         'Đầy đủ 11 trường': DEFAULT_FORMAT,
@@ -5056,56 +5242,56 @@ def batch_add_profiles():
     def _apply_preset(*_):
         if preset_var.get() in presets and presets[preset_var.get()]:
             format_var.set(presets[preset_var.get()])
-    preset_combo = ctk.CTkComboBox(top, values=list(presets.keys()), variable=preset_var, width=300, height=30, command=lambda _: _apply_preset())
-    preset_combo.grid(row=0, column=1, sticky='w', padx=4)
+    preset_combo = ctk.CTkComboBox(top, values=list(presets.keys()), variable=preset_var, width=320, height=30, command=lambda _: _apply_preset())
+    preset_combo.grid(row=0, column=1, sticky='w', padx=6, pady=(8, 2))
 
     format_var = StringVar(value=DEFAULT_FORMAT)
-    format_entry = ctk.CTkEntry(top, textvariable=format_var, width=340, height=30)
-    format_entry.grid(row=1, column=1, sticky='ew', padx=4, pady=(4, 0))
+    format_entry = ctk.CTkEntry(top, textvariable=format_var, width=340, height=30, border_width=1, border_color='#cbd5e1')
+    format_entry.grid(row=1, column=1, sticky='ew', padx=6, pady=(4, 0))
 
-    ctk.CTkLabel(top, text="(Delimiter `|`, nháy đôi trường bên phải để chèn)").grid(row=2, column=1, sticky='w', padx=4)
+    ctk.CTkLabel(top, text="(Phân tách bằng dấu `|`, bấm các thẻ bên phải để chèn nhanh trường)", font=('Segoe UI', 10), text_color=UIThemeTokens.TEXT_MUTED).grid(row=2, column=1, sticky='w', padx=6, pady=(2, 8))
 
-    opt = ctk.CTkFrame(dlg)
-    opt.pack(fill='x', padx=10, pady=2)
+    opt = ctk.CTkFrame(dlg, fg_color=UIThemeTokens.BG_CARD, corner_radius=10, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+    opt.pack(fill='x', padx=12, pady=(0, 6))
     skip_header_var = ctk.BooleanVar(opt, value=False)
-    ctk.CTkCheckBox(opt, text="Dòng đầu là tiêu đề", variable=skip_header_var).pack(side='left', padx=(0, 14))
-    ctk.CTkLabel(opt, text="Proxy type:").pack(side='left')
+    ctk.CTkCheckBox(opt, text="Dòng đầu là tiêu đề", variable=skip_header_var, font=('Segoe UI', 11)).pack(side='left', padx=(10, 16), pady=8)
+    ctk.CTkLabel(opt, text="Loại Proxy:", font=('Segoe UI', 11), text_color=UIThemeTokens.TEXT_PRIMARY).pack(side='left')
     proxy_type_var = StringVar(opt, value='http')
-    ctk.CTkComboBox(opt, values=['http', 'socks5'], variable=proxy_type_var, width=110, height=28).pack(side='left', padx=(4, 14))
-    ctk.CTkLabel(opt, text="Trùng tên:").pack(side='left')
-    dup_policy_var = StringVar(opt, value='Bỏ qua')
-    ctk.CTkComboBox(opt, values=['Bỏ qua', 'Cập nhật', 'Báo lỗi'], variable=dup_policy_var, width=120, height=28).pack(side='left', padx=4)
+    ctk.CTkOptionMenu(opt, values=['http', 'socks5'], variable=proxy_type_var, width=100, height=28).pack(side='left', padx=(4, 16), pady=8)
+    ctk.CTkLabel(opt, text="Khi trùng tên:", font=('Segoe UI', 11, 'bold'), text_color=UIThemeTokens.TEXT_PRIMARY).pack(side='left')
+    dup_policy_var = StringVar(opt, value='Cập nhật')
+    ctk.CTkOptionMenu(opt, values=['Cập nhật', 'Bỏ qua', 'Báo lỗi'], variable=dup_policy_var, width=120, height=28, button_color=UIThemeTokens.ACCENT_PRIMARY).pack(side='left', padx=4, pady=8)
 
-    middle = ctk.CTkFrame(dlg)
-    middle.pack(fill='both', expand=True, padx=10, pady=4)
+    middle = ctk.CTkFrame(dlg, fg_color=UIThemeTokens.BG_CARD, corner_radius=10, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+    middle.pack(fill='both', expand=True, padx=12, pady=(0, 6))
     middle.grid_columnconfigure(0, weight=1)
     middle.grid_columnconfigure(1, weight=0)
     middle.grid_rowconfigure(0, weight=1)
 
-    txt_input = ctk.CTkTextbox(middle, width=600, height=300)
-    txt_input.grid(row=0, column=0, sticky='nsew', padx=(0, 8))
+    txt_input = ctk.CTkTextbox(middle, width=620, height=260, font=("Consolas", 10))
+    txt_input.grid(row=0, column=0, sticky='nsew', padx=(8, 8), pady=8)
 
-    field_panel = ctk.CTkScrollableFrame(middle, width=240, height=300, label_text="Nhấn đôi để chèn trường")
-    field_panel.grid(row=0, column=1, sticky='ns')
+    field_panel = ctk.CTkScrollableFrame(middle, width=220, height=260, label_text="Nhấn để chèn trường")
+    field_panel.grid(row=0, column=1, sticky='ns', padx=(0, 8), pady=8)
     for field in DEFAULT_FIELDS:
         ctk.CTkButton(
-            field_panel, text=field, height=26, fg_color='#e2e8f0', hover_color='#cbd5e1', text_color='#0f172a',
+            field_panel, text=field, height=26, fg_color='#e2e8f0', hover_color='#cbd5e1', text_color='#0f172a', font=('Segoe UI', 10),
             command=lambda f=field: format_var.set((format_var.get() + ('' if format_var.get().endswith('|') else '|') + f)),
         ).pack(fill='x', pady=2)
 
-    prev_frame = ctk.CTkFrame(dlg)
-    prev_frame.pack(fill='x', padx=10, pady=(2, 4))
+    prev_frame = ctk.CTkFrame(dlg, fg_color=UIThemeTokens.BG_CARD, corner_radius=10, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+    prev_frame.pack(fill='x', padx=12, pady=(0, 6))
     prev_cols = ('name', 'email', 'tiktok', 'proxy', 'status')
-    prev_tree = ttk.Treeview(prev_frame, columns=prev_cols, show='headings', height=8)
+    prev_tree = ttk.Treeview(prev_frame, columns=prev_cols, show='headings', height=6)
     for col, text, width in (
-        ('name', 'Name', 160), ('email', 'Email', 180), ('tiktok', 'TikTok ID', 120),
-        ('proxy', 'Proxy', 140), ('status', 'Trạng thái', 120),
+        ('name', 'Tên Profile', 160), ('email', 'Email', 180), ('tiktok', 'TikTok ID', 120),
+        ('proxy', 'Proxy', 140), ('status', 'Trạng thái xử lý', 140),
     ):
         prev_tree.heading(col, text=text)
         prev_tree.column(col, width=width, anchor='w')
-    prev_tree.pack(fill='x')
-    error_label = ctk.CTkLabel(prev_frame, text="", text_color='#b91c1c')
-    error_label.pack(anchor='w')
+    prev_tree.pack(fill='x', padx=8, pady=(8, 4))
+    error_label = ctk.CTkLabel(prev_frame, text="", text_color=UIThemeTokens.STATUS_ERROR, font=('Segoe UI', 11))
+    error_label.pack(anchor='w', padx=10, pady=(0, 6))
 
     def _parse_current():
         fields = parse_format(format_var.get())
@@ -5126,64 +5312,72 @@ def batch_add_profiles():
         plans = plan_import(records, existing, policy)
         for plan in plans:
             mask = masked_record(plan['record'])
-            status = {'skip': 'Đã tồn tại', 'update': 'Cập nhật', 'error': 'Trùng tên', 'add': 'Thêm mới'}[plan['action']]
+            status = {'skip': '⚪ Bỏ qua (Đã tồn tại)', 'update': '🟡 Cập nhật thông tin', 'error': '🔴 Trùng tên', 'add': '🟢 Thêm mới'}[plan['action']]
             prev_tree.insert('', 'end', values=(mask.get('name', ''), mask.get('email', ''), mask.get('tiktok_id', ''), mask.get('proxy_string', ''), status))
-        error_label.configure(text=f"Hợp lệ: {len(records)} | Lỗi: {len(errors)}" + (f" | ví dụ dòng {errors[0][0]}: {errors[0][1]}" if errors else ""))
+        error_label.configure(text=f"Hợp lệ: {len(records)} | Lỗi định dạng: {len(errors)}" + (f" | ví dụ dòng {errors[0][0]}: {errors[0][1]}" if errors else ""))
 
     def open_file():
-        path = filedialog.askopenfilename(filetypes=[('Text files', '*.txt'), ('All files', '*.*')])
+        path = filedialog.askopenfilename(filetypes=[('Text files', '*.txt'), ('All files', '*.*')], parent=dlg)
         if not path:
             return
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 txt_input.delete('1.0', 'end')
                 txt_input.insert('1.0', f.read())
+            do_preview()
         except Exception as exc:
-            messagebox.showerror("Lỗi", f"Không đọc được file:\n{exc}")
+            messagebox.showerror("Lỗi", f"Không đọc được file:\n{exc}", parent=dlg)
 
     def run_import():
         try:
             _, records, errors = _parse_current()
         except ValueError as exc:
-            messagebox.showerror("Format không hợp lệ", str(exc))
+            messagebox.showerror("Format không hợp lệ", str(exc), parent=dlg)
             return
         if errors:
             lines = '\n'.join(f"Dòng {ln}: {reason}" for ln, reason in errors[:20])
-            messagebox.showerror("Dữ liệu không hợp lệ", f"Có {len(errors)} dòng lỗi:\n{lines}")
+            messagebox.showerror("Dữ liệu không hợp lệ", f"Có {len(errors)} dòng lỗi:\n{lines}", parent=dlg)
             return
         if not records:
-            messagebox.showwarning("Import", "Không có dữ liệu hợp lệ để import.")
+            messagebox.showwarning("Import", "Không có dữ liệu hợp lệ để import.", parent=dlg)
             return
         existing = set(profiles.keys())
         policy = 'skip' if dup_policy_var.get() == 'Bỏ qua' else ('update' if dup_policy_var.get() == 'Cập nhật' else 'error')
         plans = plan_import(records, existing, policy)
         if any(plan['action'] == 'error' for plan in plans):
             names = [plan['record']['name'] for plan in plans if plan['action'] == 'error']
-            messagebox.showerror("Trùng tên", "Chính sách 'Báo lỗi' được chọn nhưng có tên đã tồn tại:\n" + '\n'.join(names[:20]))
+            messagebox.showerror("Trùng tên", "Chính sách 'Báo lỗi' được chọn nhưng có tên đã tồn tại:\n" + '\n'.join(names[:20]), parent=dlg)
             return
         proxy_type = proxy_type_var.get()
         result = _apply_import_plans(plans, proxy_type)
         try:
             save_configs()
+            update_profile_list()
+            try:
+                request_profile_refresh()
+            except Exception:
+                pass
         except Exception as exc:
             _rollback_import(result)
-            messagebox.showerror("Lỗi lưu", f"Không lưu được cấu hình, đã hoàn nguyên:\n{exc}")
+            messagebox.showerror("Lỗi lưu", f"Không lưu được cấu hình, đã hoàn nguyên:\n{exc}", parent=dlg)
             return
         skipped = sum(1 for plan in plans if plan['action'] == 'skip')
+        toast_manager.enqueue(f"Import thành công: {len(result['added'])} thêm mới, {len(result['updated'])} cập nhật", level="info")
         messagebox.showinfo(
             "Hoàn tất",
             f"Đã thêm: {len(result['added'])}\nĐã cập nhật: {len(result['updated'])}\nBỏ qua: {skipped}",
+            parent=dlg,
         )
         dlg.destroy()
 
-    btn_row = ctk.CTkFrame(dlg)
-    btn_row.pack(fill='x', padx=10, pady=(4, 10))
-    ctk.CTkButton(btn_row, text="Mở file TXT", command=open_file, fg_color="#64748b", hover_color="#475569").pack(side='left', padx=2)
-    ctk.CTkButton(btn_row, text="Xem trước", command=do_preview, fg_color="#2563eb", hover_color="#1d4ed8").pack(side='left', padx=2)
-    ctk.CTkButton(btn_row, text="Nhập dữ liệu", command=run_import, fg_color="#16a34a", hover_color="#15803d").pack(side='right', padx=2)
+    btn_row = ctk.CTkFrame(dlg, fg_color='transparent')
+    btn_row.pack(fill='x', padx=12, pady=(4, 12))
+    ctk.CTkButton(btn_row, text="📁 Mở File TXT", command=open_file, fg_color="#64748b", hover_color="#475569", height=32, text_color="#ffffff").pack(side='left', padx=2)
+    ctk.CTkButton(btn_row, text="👁️ Xem Trước", command=do_preview, fg_color=UIThemeTokens.ACCENT_PRIMARY, hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER, height=32, text_color="#ffffff").pack(side='left', padx=6)
+    ctk.CTkButton(btn_row, text="⚡ Nhập Dữ Liệu", command=run_import, fg_color=UIThemeTokens.STATUS_LIVE, hover_color="#15803d", height=32, text_color="#ffffff", font=('Segoe UI', 11, 'bold')).pack(side='right', padx=2)
 
     dlg.after(200, do_preview)
-# --------------------------------
+
 
 def export_profiles():
     if not _license_guard(): return
@@ -5191,24 +5385,26 @@ def export_profiles():
     selected_names = [tree.item(i)['values'][0] for i in sel] if sel else []
 
     dlg = ctk.CTkToplevel(root)
-    dlg.title("Xuất tài khoản")
-    dlg.geometry("860x640")
+    dlg.title("DONGLAO-TIKTOK — Xuất Dữ Liệu Tài Khoản")
+    dlg.geometry("880x660")
+    dlg.minsize(700, 500)
+    dlg.configure(fg_color=UIThemeTokens.BG_ROOT)
+    dlg.transient(root)
+    try:
+        dlg.grab_set()
+    except Exception:
+        pass
 
-    top = ctk.CTkFrame(dlg)
-    top.pack(fill='x', padx=10, pady=(10, 4))
+    top = ctk.CTkFrame(dlg, fg_color=UIThemeTokens.BG_CARD, corner_radius=10, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+    top.pack(fill='x', padx=12, pady=(12, 6))
     top.grid_columnconfigure(1, weight=1)
 
     scope_var = StringVar(value='Tất cả')
-    ctk.CTkLabel(top, text="Phạm vi:").grid(row=0, column=0, sticky='w')
+    ctk.CTkLabel(top, text="Phạm vi:", font=('Segoe UI', 11, 'bold'), text_color=UIThemeTokens.TEXT_PRIMARY).grid(row=0, column=0, sticky='w', padx=10, pady=(8, 4))
     scope_row = ctk.CTkFrame(top, fg_color='transparent')
-    scope_row.grid(row=0, column=1, sticky='w', padx=4)
+    scope_row.grid(row=0, column=1, sticky='w', padx=4, pady=(8, 4))
     ctk.CTkRadioButton(scope_row, text="Tất cả", variable=scope_var, value='Tất cả').pack(side='left', padx=(0, 14))
     ctk.CTkRadioButton(scope_row, text="Đã chọn", variable=scope_var, value='Đã chọn').pack(side='left')
-
-    ctk.CTkLabel(top, text="Format:").grid(row=1, column=0, sticky='w', pady=(6, 0))
-    format_var = StringVar(value=DEFAULT_FORMAT)
-    format_entry = ctk.CTkEntry(top, textvariable=format_var, width=480, height=30)
-    format_entry.grid(row=1, column=1, sticky='ew', padx=4, pady=(6, 0))
 
     field_row = ctk.CTkScrollableFrame(dlg, width=400, height=64, label_text="Nhấn đôi để chèn trường")
     field_row.pack(fill='x', padx=10, pady=4)

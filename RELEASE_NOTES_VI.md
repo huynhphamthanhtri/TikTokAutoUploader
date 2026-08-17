@@ -1,3 +1,21 @@
+# Phiên bản 1.0.18
+
+## Điểm mới
+- Thiết kế lại hộp thoại Thêm hồ sơ theo bố cục card 4 phần: thông tin tài khoản, proxy, thư mục dữ liệu và vận hành.
+- Bổ sung kiểm tra proxy trực tiếp (test live, hiển thị quốc gia/IP) ngay trong hộp thoại thêm hồ sơ.
+- Bổ sung Quick Paste: dán nguyên chuỗi thông tin, ứng dụng tự trích xuất tên, email, cookie, proxy, 2FA và mật khẩu vào đúng ô.
+- Bổ sung tự động sinh thư mục chuẩn Auto_Data/<Tên hồ sơ>/ theo tên hồ sơ.
+- Bỏ hoàn toàn fallback trình duyệt Orbita, chỉ sử dụng Chromium chrome-win64 kèm stealth engine gốc.
+
+## Cải thiện
+- Tối ưu tham số khởi chạy browser để giảm RAM, chống treo và tăng hiệu năng khi chạy nhiều profile.
+- Dọn dẹp tự động các cache tạm (GPU, shader, code, media) trong thư mục profile mà không ảnh hưởng cookie/session.
+- Cải thiện kiểm tra trùng lặp thư mục Chrome Profile và thông báo lỗi rõ ràng khi thêm hồ sơ.
+- Mở rộng kiểm thử hộp thoại thêm hồ sơ và luồng nhập hàng loạt profile.
+
+## Sửa lỗi
+- Sửa lỗi hộp thoại thêm hồ sơ không tạo được thư mục video khi hồ sơ được thêm mới.
+
 # Phiên bản 1.0.17
 
 ## Điểm mới

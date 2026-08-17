@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -258,15 +259,14 @@ def _is_valid_executable(path):
 def resolve_browser_executable(app_base=None):
     """Return a Chromium-compatible executable path for Patchright.
 
-    Preference order: bundled ``Browser/chrome-win64``, then other bundled resources, then system Google Chrome.
+    Strict preference order: bundled ``Browser/chrome-win64/chrome.exe``, then system Google Chrome.
+    Orbita binaries have been completely removed in favor of standard chrome-win64 + native stealth engine.
     Returns ``None`` when no usable browser is found so callers can fail with a
     clear Vietnamese message instead of relying on Patchright's default
     ``.local-browsers`` lookup."""
     browser_dir = _bundled_browser_dir(app_base)
     candidates = [
         browser_dir / "chrome-win64" / "chrome.exe",
-        browser_dir / "orbita-browser-144" / "chrome.exe",
-        browser_dir / "orbita-browser-123" / "chrome.exe",
         browser_dir / "chrome.exe",
         browser_dir / "chrome" / "chrome.exe",
     ]
@@ -400,8 +400,9 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profi
         profile_name=resolved_profile_name,
     )
     write_profile_config_files(profile_path, orbita_cfg)
+    clean_profile_volatile_caches(profile_path)
 
-    # Ultra-optimized arguments for low RAM & high concurrency multi-profile hanging
+    # Ultra-optimized arguments for low RAM, anti-freeze & high concurrency multi-profile TikTok automation
     kwargs["args"] = (
         "--no-first-run",
         "--log-level=3",
@@ -422,12 +423,47 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profi
         "--metrics-recording-only",
         "--password-store=basic",
         "--use-mock-keychain",
-        "--js-flags=--max-old-space-size=512",
-        "--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints",
+        "--renderer-process-limit=2",
+        "--disable-site-isolation-trials",
+        "--disable-dev-shm-usage",
+        "--disable-component-extensions-with-background-pages",
+        "--disk-cache-size=33554432",
+        "--media-cache-size=67108864",
+        "--aggressive-cache-discard",
+        "--js-flags=--max-old-space-size=256 --expose-gc",
+        "--enable-features=MemoryReducer,PurgeAndSuspend,ResourceLoadScheduler",
+        "--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints,InterestFeedContentSuggestions,CalculateNativeWinOcclusion",
     )
     kwargs["account_uuid"] = account_uuid
     kwargs["profile_name"] = resolved_profile_name
     return BrowserSessionConfig(**kwargs)
+
+
+def clean_profile_volatile_caches(profile_path):
+    """Safely purge volatile rendering and network caches from profile dir.
+    
+    Preserves cookies, local storage, indexedDB, sessions, and credentials.
+    Only purges GPU cache, shader cache, code cache, and media cache to minimize RAM and disk bloat.
+    """
+    if not profile_path:
+        return
+    p = Path(profile_path)
+    if not p.exists():
+        return
+    volatile_subdirs = [
+        p / "Default" / "Cache",
+        p / "Default" / "Code Cache",
+        p / "Default" / "GPUCache",
+        p / "GrShaderCache",
+        p / "ShaderCache",
+        p / "Default" / "Media Cache",
+    ]
+    for target in volatile_subdirs:
+        try:
+            if target.exists() and target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+        except Exception:
+            pass
 
 
 def _canonical_profile(path):

@@ -111,33 +111,7 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
         session = glue.build_session_config(config)
         self.assertEqual(session.executable_path, r"C:\custom\chrome.exe")
 
-    def test_resolve_bundled_orbita_144_first(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            browser = Path(temporary) / "Browser" / "orbita-browser-144"
-            browser.mkdir(parents=True)
-            exe = browser / "chrome.exe"
-            exe.write_bytes(b"x")
-            # Also create 123 to verify 144 takes precedence
-            browser_123 = Path(temporary) / "Browser" / "orbita-browser-123"
-            browser_123.mkdir(parents=True)
-            (browser_123 / "chrome.exe").write_bytes(b"y")
-            self.assertEqual(
-                glue.resolve_browser_executable(app_base=temporary),
-                str(exe),
-            )
-
-    def test_resolve_bundled_orbita_first(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            browser = Path(temporary) / "Browser" / "orbita-browser-123"
-            browser.mkdir(parents=True)
-            exe = browser / "chrome.exe"
-            exe.write_bytes(b"x")
-            self.assertEqual(
-                glue.resolve_browser_executable(app_base=temporary),
-                str(exe),
-            )
-
-    def test_resolve_chrome_win64_when_orbita_missing(self):
+    def test_resolve_chrome_win64_first(self):
         with tempfile.TemporaryDirectory() as temporary:
             browser = Path(temporary) / "Browser" / "chrome-win64"
             browser.mkdir(parents=True)
@@ -186,7 +160,7 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
 
     def test_resolve_internal_browser_dir(self):
         with tempfile.TemporaryDirectory() as temporary:
-            browser = Path(temporary) / "_internal" / "Browser" / "orbita-browser-123"
+            browser = Path(temporary) / "_internal" / "Browser" / "chrome-win64"
             browser.mkdir(parents=True)
             exe = browser / "chrome.exe"
             exe.write_bytes(b"x")
@@ -603,6 +577,38 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
 
         with self._patch_login_state_run(FakePage()):
             self.assertEqual(glue.page_login_state(token), "indeterminate")
+
+    def test_build_session_config_ram_optimization_args(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = {
+                "browser_profile_path": temp_dir,
+                "browser_executable": r"C:\browser\chrome.exe",
+            }
+            session = glue.build_session_config(config)
+            self.assertIn("--renderer-process-limit=2", session.args)
+            self.assertIn("--js-flags=--max-old-space-size=256 --expose-gc", session.args)
+            self.assertIn("--disk-cache-size=33554432", session.args)
+            self.assertIn("--media-cache-size=67108864", session.args)
+            self.assertIn("--aggressive-cache-discard", session.args)
+            self.assertIn("--enable-features=MemoryReducer,PurgeAndSuspend,ResourceLoadScheduler", session.args)
+
+    def test_clean_profile_volatile_caches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            p = Path(temp_dir)
+            cache_dir = p / "Default" / "Cache"
+            code_cache_dir = p / "Default" / "Code Cache"
+            cookies_file = p / "Default" / "Cookies"
+            
+            cache_dir.mkdir(parents=True)
+            code_cache_dir.mkdir(parents=True)
+            (cache_dir / "data_0").write_bytes(b"cache")
+            cookies_file.write_bytes(b"secret_session")
+            
+            glue.clean_profile_volatile_caches(temp_dir)
+            
+            self.assertFalse(cache_dir.exists())
+            self.assertFalse(code_cache_dir.exists())
+            self.assertTrue(cookies_file.exists())
 
 
 if __name__ == "__main__":

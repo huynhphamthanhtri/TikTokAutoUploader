@@ -1,4 +1,4 @@
-__version__ = "1.0.17"
+__version__ = "1.0.18"
 RESOURCE_RELEASE_VERSION = "1.0.8"
 APP_NAME = "TikTokAutoUploader"
 RELEASE_ASSET_PREFIX = "DONGLAO-TIKTOK-v"
