@@ -476,6 +476,9 @@ class TikTokMonetizationClient:
                 elif bind_status == 1:
                     result["payment_method"] = "Đã liên kết"
                     result["payout_status"] = "PAYOUT_READY"
+                elif bind_status == 2:
+                    result["payment_method"] = "🟡 Đang xác minh PTTT (Pending)"
+                    result["payout_status"] = "PAYOUT_PENDING"
                 else:
                     result["payment_method"] = "Chưa liên kết (None)"
                     result["payout_status"] = "PAYOUT_NOT_LINKED"
@@ -502,22 +505,33 @@ class TikTokMonetizationClient:
                 k_obj = raw_kyc.get("kyc_status") or (raw_kyc.get("data", {}) if isinstance(raw_kyc.get("data"), dict) else {}).get("kyc_status")
                 last_sub = raw_kyc.get("last_submitted_data", {}) or (raw_kyc.get("data", {}) if isinstance(raw_kyc.get("data"), dict) else {}).get("last_submitted_data", {})
 
+                full_name = ""
                 if isinstance(last_sub, dict):
-                    result["kyc_full_name"] = str(last_sub.get("full_name", "") or "")
+                    full_name = str(last_sub.get("full_name", "") or "")
+                    result["kyc_full_name"] = full_name
                     result["kyc_id_type"] = str(last_sub.get("id_type", "") or "")
                     result["kyc_id_country"] = str(last_sub.get("id_issue_country_region", "") or "")
                     result["kyc_birthday"] = str(last_sub.get("birthday", "") or "")
                     result["kyc_nationality"] = str(last_sub.get("nationality", "") or "")
 
                 if isinstance(k_obj, dict):
-                    created = k_obj.get("created", False)
-                    cdd = k_obj.get("cdd_status", 0)
-                    fail_poa = k_obj.get("fail_dynamic_poa", False) or k_obj.get("id_doc_resubmit", False)
+                    created = bool(k_obj.get("created", False))
+                    cdd = int(k_obj.get("cdd_status", 0) or 0)
+                    fail_poa = bool(k_obj.get("fail_dynamic_poa", False))
+                    id_resubmit = bool(k_obj.get("id_doc_resubmit", False))
+                    poa_resubmit = bool(k_obj.get("poa_doc_resubmit", False))
 
-                    if fail_poa:
-                        result["kyc_status"] = "REJECTED"
-                    elif created or cdd in (1, 2, 7):
+                    if fail_poa or id_resubmit or poa_resubmit:
+                        result["kyc_status"] = "RESUBMIT"
+                    elif created and cdd >= 7:
                         result["kyc_status"] = "APPROVED"
+                    elif cdd in (1, 2) or (created and cdd < 7):
+                        result["kyc_status"] = "PENDING"
+                    elif not created and not full_name:
+                        result["kyc_status"] = "NOT_STARTED"
+                    else:
+                        result["kyc_status"] = "WARNING" if full_name else "NOT_STARTED"
+
                     kyc_uid = (
                         k_obj.get("user_id") if isinstance(k_obj, dict) else None
                     ) or raw_kyc.get("user_id") or raw_kyc.get("uid") or (raw_kyc.get("data", {}) if isinstance(raw_kyc.get("data"), dict) else {}).get("user_id")
@@ -529,6 +543,8 @@ class TikTokMonetizationClient:
                         result["kyc_status"] = "APPROVED"
                     elif any(x in k_status for x in ("PEND", "REVIEW", "WAIT")):
                         result["kyc_status"] = "PENDING"
+                    elif any(x in k_status for x in ("RESUBMIT", "POA", "RE_SUBMIT")):
+                        result["kyc_status"] = "RESUBMIT"
                     elif any(x in k_status for x in ("REJECT", "FAIL", "DENI")):
                         result["kyc_status"] = "REJECTED"
                     else:
@@ -566,6 +582,7 @@ class TikTokMonetizationClient:
                         check_list = raw_crp.get("apply_check_list", []) or []
                         raw_data = raw_crp.get("raw", {}) if isinstance(raw_crp.get("raw"), dict) else raw_crp
                         p_data = raw_data.get("profile", {}) if isinstance(raw_data.get("profile"), dict) else {}
+                        appeal_info = p_data.get("appeal_info", {}) if isinstance(p_data.get("appeal_info"), dict) else {}
                         punishments = raw_data.get("punishment_infos", []) or raw_crp.get("punishment_infos", []) or []
 
                         f_item = next((c for c in check_list if c.get("key") == "follower_count"), {})
@@ -585,53 +602,95 @@ class TikTokMonetizationClient:
                             result["region"] = str(st_reg).strip().upper()
                             result["store_region"] = str(st_reg).strip().upper()
 
+                        punishment_title = ""
                         if punishments:
                             p_first = punishments[0]
-                            p_title = p_first.get("title", "")
+                            punishment_title = p_first.get("title", "")
                             p_desc = p_first.get("description", "")
-                            result["crp_punishment"] = p_title
+                            result["crp_punishment"] = punishment_title
                             result["crp_punishment_desc"] = p_desc
                             result["crp_punishments_all"] = punishments
 
-                        reapply_ts = p_data.get("reapply_starting_date", 0)
+                        # Punishment label normalization
+                        if punishment_title:
+                            p_t_lower = punishment_title.lower()
+                            if "security" in p_t_lower:
+                                punishment_label = "Bảo mật (TKTBM)"
+                            elif "unoriginal" in p_t_lower or "copy" in p_t_lower:
+                                punishment_label = "Nội dung copy"
+                            else:
+                                punishment_label = punishment_title
+                        else:
+                            punishment_label = ""
+
+                        reapply_ts = p_data.get("reapply_starting_date", 0) or 0
+                        reapply_date_str = ""
+                        can_reapply = False
                         if reapply_ts and reapply_ts > 0:
                             try:
-                                result["crp_reapply_date"] = time.strftime("%d/%m/%Y", time.localtime(float(reapply_ts)))
-                                if float(reapply_ts) <= time.time():
-                                    result["crp_can_reapply"] = True
+                                reapply_date_str = time.strftime("%d/%m/%Y", time.localtime(float(reapply_ts)))
+                                if float(reapply_ts) <= now_ts:
+                                    can_reapply = True
                             except Exception:
-                                result["crp_reapply_date"] = str(reapply_ts)
+                                reapply_date_str = str(reapply_ts)
 
+                        result["crp_reapply_date"] = reapply_date_str
+                        result["crp_can_reapply"] = can_reapply
                         result["crp_could_appeal"] = bool(p_data.get("could_appeal", False))
                         result["crp_could_reapply"] = bool(p_data.get("could_reapply", False))
 
+                        appeal_submit_ts = appeal_info.get("appeal_submit_time", 0) or 0
+                        appeal_deadline_ts = appeal_info.get("appeal_review_deadline", 0) or 0
+
+                        f_k = result["crp_followers"] / 1000.0 if result["crp_followers"] >= 1000 else result["crp_followers"]
+                        f_th = result["crp_followers_threshold"] / 1000.0
+                        f_unit = "k" if result["crp_followers"] >= 1000 else ""
+
+                        # Evaluate lifecycle state
                         if p_status.lower() in ("enabled", "active") or raw_crp.get("enabled") is True:
                             result["crp_status"] = "ACTIVE"
                             result["crp_display"] = "🟢 KIẾM TIỀN"
-                        elif p_status.lower() in ("in review", "review"):
+                        elif appeal_submit_ts > 0 and (appeal_deadline_ts * 1000 > now_ts * 1000 or appeal_deadline_ts == 0):
+                            result["crp_status"] = "APPEAL"
+                            d_str = ""
+                            if appeal_deadline_ts:
+                                try:
+                                    d_str = f" - Hạn: {time.strftime('%d/%m/%Y', time.localtime(float(appeal_deadline_ts)))}"
+                                except Exception:
+                                    pass
+                            result["crp_display"] = f"🟡 ĐANG KHÁNG{d_str}"
+                        elif p_status.lower() in ("in review", "review") or raw_crp.get("formatted") == "In Review":
                             result["crp_status"] = "REVIEW"
                             result["crp_display"] = "🟡 ĐANG DUYỆT"
-                        elif result["crp_punishment"]:
-                            p_t_lower = result["crp_punishment"].lower()
-                            if "security" in p_t_lower:
+                        elif reapply_ts and reapply_ts > 0:
+                            if can_reapply:
+                                # Reapply date has passed! Evaluate current stats
+                                if result["crp_all_met"]:
+                                    result["crp_status"] = "ELIGIBLE"
+                                    result["crp_display"] = "🟢 ĐỦ ĐK (Hết hạn phạt - Sẵn sàng ĐK lại)"
+                                else:
+                                    result["crp_status"] = "INELIGIBLE"
+                                    result["crp_display"] = f"⚪ CHƯA ĐỦ ({f_k:.1f}{f_unit}/{f_th:.0f}k - Hết hạn phạt)"
+                            else:
+                                # Reapply date is in the future (penalty still active)
+                                if "bảo mật" in punishment_label.lower():
+                                    result["crp_status"] = "TKTBM"
+                                    result["crp_display"] = f"🔴 TKTBM (ĐK lại: {reapply_date_str})"
+                                else:
+                                    result["crp_status"] = "REJECTED"
+                                    result["crp_display"] = f"🔴 BỊ LOẠI ({punishment_label} - ĐK lại: {reapply_date_str})"
+                        elif punishment_title:
+                            if "bảo mật" in punishment_label.lower():
                                 result["crp_status"] = "TKTBM"
                                 result["crp_display"] = "🔴 TKTBM (Bảo mật)"
-                            elif "unoriginal" in p_t_lower or "copy" in p_t_lower:
-                                result["crp_status"] = "REJECTED"
-                                reapply_str = f" - ĐK lại: {result['crp_reapply_date']}" if result['crp_reapply_date'] else ""
-                                result["crp_display"] = f"🔴 BỊ LOẠI (Nội dung copy{reapply_str})"
                             else:
                                 result["crp_status"] = "REJECTED"
-                                reapply_str = f" - ĐK lại: {result['crp_reapply_date']}" if result['crp_reapply_date'] else ""
-                                result["crp_display"] = f"🔴 BỊ LOẠI ({result['crp_punishment']}{reapply_str})"
+                                result["crp_display"] = f"🔴 BỊ LOẠI ({punishment_label})"
                         elif result["crp_all_met"]:
                             result["crp_status"] = "ELIGIBLE"
                             result["crp_display"] = "🟢 ĐỦ ĐIỀU KIỆN"
                         else:
                             result["crp_status"] = "INELIGIBLE"
-                            f_k = result["crp_followers"] / 1000.0 if result["crp_followers"] >= 1000 else result["crp_followers"]
-                            f_th = result["crp_followers_threshold"] / 1000.0
-                            f_unit = "k" if result["crp_followers"] >= 1000 else ""
                             result["crp_display"] = f"⚪ CHƯA ĐỦ ({f_k:.1f}{f_unit}/{f_th:.0f}k)"
                         break
             except Exception as e:

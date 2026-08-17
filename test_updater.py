@@ -26,13 +26,13 @@ class UpdaterTests(unittest.TestCase):
 
     def test_check_update_returns_release_metadata(self):
         release = {
-            "tag_name": "v1.0.19",
-            "name": "Phiên bản 1.0.19",
+            "tag_name": "v1.0.20",
+            "name": "Phiên bản 1.0.20",
             "body": "## Cải thiện\n- Ổn định hơn",
-            "html_url": "https://github.com/owner/repo/releases/tag/v1.0.19",
+            "html_url": "https://github.com/owner/repo/releases/tag/v1.0.20",
             "published_at": "2026-07-24T00:00:00Z",
             "assets": [{
-                "name": "DONGLAO-TIKTOK-v1.0.19.zip",
+                "name": "DONGLAO-TIKTOK-v1.0.20.zip",
                 "browser_download_url": "https://example.com/app.zip",
                 "size": 123,
             }],
@@ -41,8 +41,8 @@ class UpdaterTests(unittest.TestCase):
         with patch.object(updater, "get_latest_release", return_value=(release, None)):
             result = updater.check_update()
         self.assertTrue(result["has_update"])
-        self.assertEqual(result["latest_version"], "1.0.19")
-        self.assertEqual(result["release_name"], "Phiên bản 1.0.19")
+        self.assertEqual(result["latest_version"], "1.0.20")
+        self.assertEqual(result["release_name"], "Phiên bản 1.0.20")
         self.assertIn("• Ổn định hơn", result["release_notes"])
         self.assertEqual(result["release_url"], release["html_url"])
 

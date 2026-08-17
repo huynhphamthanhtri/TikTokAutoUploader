@@ -43,8 +43,8 @@ from patchright_profile_migration import (
     set_profile_owner,
 )
 from profile_config_engine import (
+    generate_stealth_profile_config,
     generate_orbita_profile_config,
-    write_profile_config_files,
 )
 
 try:
@@ -366,7 +366,7 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profi
                 }
                 kwargs["permissions"] = ("geolocation",)
 
-    # Generate native Orbita Anti-Detect config (data.orbita & data.huynhthang)
+    # Generate native stealth anti-detect config dictionary (in-memory)
     account_uuid = str(
         config.get("account_uuid")
         or config.get("profile_name")
@@ -392,14 +392,13 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profi
         or config.get("name")
         or account_uuid
     )
-    orbita_cfg = generate_orbita_profile_config(
+    stealth_cfg = generate_stealth_profile_config(
         account_uuid=account_uuid,
         proxy_info=proxy_info,
         geoip_info=geoip_info,
         user_agent=config.get("user_agent"),
         profile_name=resolved_profile_name,
     )
-    write_profile_config_files(profile_path, orbita_cfg)
     clean_profile_volatile_caches(profile_path)
 
     # Ultra-optimized arguments for low RAM, anti-freeze & high concurrency multi-profile TikTok automation
@@ -436,6 +435,7 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profi
     )
     kwargs["account_uuid"] = account_uuid
     kwargs["profile_name"] = resolved_profile_name
+    kwargs["stealth_config"] = stealth_cfg
     return BrowserSessionConfig(**kwargs)
 
 

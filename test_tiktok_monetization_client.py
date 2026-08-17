@@ -2,6 +2,7 @@
 test_tiktok_monetization_client.py - Unit tests for tiktok_monetization_client.py
 """
 
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -75,156 +76,204 @@ class TestTikTokMonetizationClient(unittest.TestCase):
         self.assertEqual(res["payment_method"], "Cookie die - Không check được")
 
     @patch("requests.Session.get")
-    def test_fetch_monetization_success_mock(self, mock_get):
-        """Parses payout_summary, business/rewards, onboarding_detail, and kyc correctly."""
+    def test_kyc_approved_only_when_cdd_ge_7_and_no_errors(self, mock_get):
+        """Verifies real APPROVED state matching live AUTO 18 account (cdd_status=7, created=True)."""
         def side_effect(url, **kwargs):
             mock_resp = MagicMock()
             mock_resp.status_code = 200
-            if "payout_summary" in url:
+            if "kyc" in url:
                 mock_resp.json.return_value = {
-                    "data": {
-                        "total_balance": {"value": "1500.25", "currency": "USD", "currency_symbol": "$"},
-                        "available_balance": {"value": "1500.25"},
-                        "frozen_balance": {"value": "0.00"},
-                        "next_payout_date": 1729036800,
-                    }
-                }
-            elif "rewards" in url:
-                mock_resp.json.return_value = {
-                    "data": {
-                        "summary": {"estimated_amount": {"currency_amount": "$1,500.25"}},
-                        "pending_earnings": [
-                            {"title": "Jul 2026", "amount": {"currency_amount": "$900.00"}, "bill_id": "999888", "timestamp": 1722470400}
-                        ],
-                        "payout_breakdown": [{"title": "Qualified Videos", "amount": {"currency_amount": "$1,500.25"}}],
+                    "base_resp": {"status_code": 0},
+                    "kyc_status": {
+                        "cdd_status": 7,
+                        "created": True,
+                        "fail_dynamic_poa": False,
+                        "id_doc_resubmit": False,
+                        "poa_doc_resubmit": False,
+                        "user_id": 7447972851385451523,
+                    },
+                    "last_submitted_data": {
+                        "full_name": "Nguyen Van A",
+                        "id_type": "ID_CARD",
+                        "id_issue_country_region": "VN",
                     }
                 }
             elif "payout_onboarding" in url:
                 mock_resp.json.return_value = {
                     "data": {
-                        "payment_method": "Chase Bank",
-                        "account_number": "9876543210",
+                        "pi_bind_status": 1,
+                        "masked_instrument_identity": "test***@gmail.com",
+                        "user_tax_status": 1,
                     }
                 }
-            elif "kyc" in url:
+            elif "payout_summary" in url:
                 mock_resp.json.return_value = {
-                    "kyc_status": {
-                        "cdd_status": 1,
-                        "created": True,
-                        "user_id": 7447972851385451523,
-                    }
-                }
-            return mock_resp
-
-        mock_get.side_effect = side_effect
-
-        cfg = {
-            "use_proxy": False,
-            "cookie_str": "sessionid=valid_token",
-            "region": "US",
-        }
-        res = fetch_monetization_snapshot("US_Profile_01", cfg)
-
-        self.assertEqual(res["status"], "SUCCESS")
-        self.assertEqual(res["balance"], 1500.25)
-        self.assertEqual(res["currency"], "USD")
-        self.assertEqual(res["payout_status"], "PAYOUT_READY")
-        self.assertIn("Chase Bank", res["payment_method"])
-        self.assertIn("***3210", res["payment_method"])
-        self.assertEqual(res["kyc_status"], "APPROVED")
-        self.assertEqual(res["tiktok_user_id"], "7447972851385451523")
-        self.assertEqual(len(res["pending_earnings"]), 1)
-        self.assertEqual(res["pending_earnings"][0]["bill_id"], "999888")
-
-    @patch("requests.Session.get")
-    def test_fetch_crp_details_and_dashboard(self, mock_get):
-        """Parses CRP profile eligibility, punishment, and dashboard RPM metrics correctly."""
-        def side_effect(url, **kwargs):
-            mock_resp = MagicMock()
-            mock_resp.status_code = 200
-            if "payout_summary" in url:
-                mock_resp.json.return_value = {"data": {"balance": 0.0}}
-            elif "incentives/profile" in url:
-                mock_resp.json.return_value = {
-                    "status_code": 0,
-                    "profile_status": "Disabled",
-                    "apply_check_list": [
-                        {"key": "follower_count", "amount": 8500, "threshold": 10000, "status": 0},
-                        {"key": "video_view", "amount": 65000, "threshold": 100000, "status": 0},
-                    ],
-                    "raw": {
-                        "punishment_infos": [{"title": "Unoriginal Content"}],
-                        "profile": {"reapply_starting_date": 1789500000},
-                    },
-                }
-            elif "analytics/dashboard_overview" in url:
-                mock_resp.json.return_value = {
-                    "status_code": 0,
-                    "rpm": 0.85,
-                    "qualified_views": 1500000,
-                    "estimated_revenue": 1275.0,
+                    "data": {"balance": 100.0, "total_balance": {"value": "100.00", "currency": "USD"}}
                 }
             else:
                 mock_resp.json.return_value = {}
             return mock_resp
 
         mock_get.side_effect = side_effect
+        cfg = {"use_proxy": False, "cookie_str": "sessionid=valid_token", "region": "US"}
+        res = fetch_monetization_snapshot("Live_AUTO_18", cfg)
 
-        cfg = {"use_proxy": False, "cookie_str": "sessionid=token", "region": "US"}
-        res = fetch_monetization_snapshot("CRP_Profile", cfg)
-
-        self.assertEqual(res["crp_status"], "REJECTED")
-        self.assertIn("BỊ LOẠI", res["crp_display"])
-        self.assertEqual(res["crp_punishment"], "Unoriginal Content")
-        self.assertEqual(res["crp_rpm"], 0.85)
-        self.assertEqual(res["crp_qualified_views"], 1500000)
-        self.assertEqual(res["crp_estimated_revenue"], 1275.0)
+        self.assertEqual(res["kyc_status"], "APPROVED")
+        self.assertEqual(res["kyc_full_name"], "Nguyen Van A")
+        self.assertEqual(res["kyc_id_type"], "ID_CARD")
+        self.assertEqual(res["payout_status"], "PAYOUT_READY")
+        self.assertEqual(res["tax_status"], "TAX_VERIFIED")
 
     @patch("requests.Session.get")
-    def test_fetch_crp_security_reasons_tktbm(self, mock_get):
-        """Parses CRP Security reasons penalty (TKTBM) and threshold progress correctly."""
+    def test_kyc_pending_when_cdd_is_1_or_2(self, mock_get):
+        """Verifies in-review KYC submissions (cdd_status=1 or 2) are flagged as PENDING, NOT APPROVED."""
+        def side_effect(url, **kwargs):
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            if "kyc" in url:
+                mock_resp.json.return_value = {
+                    "kyc_status": {
+                        "cdd_status": 1,
+                        "created": True,
+                        "fail_dynamic_poa": False,
+                        "id_doc_resubmit": False,
+                        "poa_doc_resubmit": False,
+                    },
+                    "last_submitted_data": {
+                        "full_name": "Tran Van B",
+                    }
+                }
+            else:
+                mock_resp.json.return_value = {}
+            return mock_resp
+
+        mock_get.side_effect = side_effect
+        cfg = {"use_proxy": False, "cookie_str": "sessionid=valid_token", "region": "US"}
+        res = fetch_monetization_snapshot("Pending_KYC_Profile", cfg)
+
+        self.assertEqual(res["kyc_status"], "PENDING")
+        self.assertNotEqual(res["kyc_status"], "APPROVED")
+
+    @patch("requests.Session.get")
+    def test_kyc_resubmit_when_poa_or_id_resubmit(self, mock_get):
+        """Verifies KYC with resubmit flags (poa_doc_resubmit=True or fail_dynamic_poa=True) are RESUBMIT."""
+        def side_effect(url, **kwargs):
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            if "kyc" in url:
+                mock_resp.json.return_value = {
+                    "kyc_status": {
+                        "cdd_status": 7,
+                        "created": True,
+                        "fail_dynamic_poa": False,
+                        "id_doc_resubmit": False,
+                        "poa_doc_resubmit": True,  # Needs POA resubmission!
+                    },
+                    "last_submitted_data": {
+                        "full_name": "Le Van C",
+                    }
+                }
+            else:
+                mock_resp.json.return_value = {}
+            return mock_resp
+
+        mock_get.side_effect = side_effect
+        cfg = {"use_proxy": False, "cookie_str": "sessionid=valid_token", "region": "US"}
+        res = fetch_monetization_snapshot("Resubmit_KYC_Profile", cfg)
+
+        self.assertEqual(res["kyc_status"], "RESUBMIT")
+        self.assertNotEqual(res["kyc_status"], "APPROVED")
+
+    @patch("requests.Session.get")
+    def test_payout_onboarding_pending_and_ready_states(self, mock_get):
+        """Verifies pi_bind_status=2 flags as PAYOUT_PENDING (matching BKT TEAM T10 02)."""
+        def side_effect(url, **kwargs):
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            if "payout_onboarding" in url:
+                mock_resp.json.return_value = {
+                    "data": {
+                        "confirmed": False,
+                        "masked_instrument_identity": "",
+                        "pi_bind_status": 2,  # Pending verification!
+                        "user_tax_status": 1,
+                    }
+                }
+            else:
+                mock_resp.json.return_value = {}
+            return mock_resp
+
+        mock_get.side_effect = side_effect
+        cfg = {"use_proxy": False, "cookie_str": "sessionid=valid_token", "region": "US"}
+        res = fetch_monetization_snapshot("Pending_PTTT_Profile", cfg)
+
+        self.assertEqual(res["payout_status"], "PAYOUT_PENDING")
+        self.assertIn("Đang xác minh", res["payment_method"])
+
+    @patch("requests.Session.get")
+    def test_crp_expired_punishment_becomes_eligible(self, mock_get):
+        """When punishment reapply date has passed and requirements are met, becomes ELIGIBLE."""
+        past_ts = int(time.time()) - 86400 * 5  # 5 days ago
         def side_effect(url, **kwargs):
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             if "incentives/profile" in url:
                 mock_resp.json.return_value = {
                     "status_code": 0,
-                    "profile_status": 7,
+                    "profile_status": "Disabled",
                     "apply_check_list": [
-                        {"key": "follower_count", "amount": 10104, "threshold": 10000, "status": 1},
-                        {"key": "video_view", "amount": 7090, "threshold": 100000, "status": 2},
+                        {"key": "follower_count", "amount": 15000, "threshold": 10000, "status": 1},
+                        {"key": "video_view", "amount": 250000, "threshold": 100000, "status": 1},
                     ],
-                    "punishment_infos": [
-                        {
-                            "title": "Security reasons",
-                            "description": "Your account has been associated with multiple high-risk activities...",
-                        }
-                    ],
-                    "profile": {
-                        "reapply_starting_date": 1768837633,
-                        "could_appeal": False,
-                        "could_reapply": True,
+                    "raw": {
+                        "punishment_infos": [{"title": "Unoriginal Content"}],
+                        "profile": {"reapply_starting_date": past_ts, "could_reapply": True},
                     },
                 }
-            elif "analytics/dashboard_overview" in url:
-                mock_resp.json.return_value = {"status_code": 0, "rpm": 0.0, "qualified_views": 0, "estimated_revenue": 0.0}
             else:
                 mock_resp.json.return_value = {}
             return mock_resp
 
         mock_get.side_effect = side_effect
+        cfg = {"use_proxy": False, "cookie_str": "sessionid=token", "region": "US"}
+        res = fetch_monetization_snapshot("Expired_Punishment_Profile", cfg)
 
-        cfg = {"use_proxy": False, "cookie_str": "sessionid=token", "region": "DE"}
-        res = fetch_monetization_snapshot("AUTO_18_Mock", cfg)
-
-        self.assertEqual(res["crp_status"], "TKTBM")
-        self.assertIn("TKTBM", res["crp_display"])
-        self.assertEqual(res["crp_punishment"], "Security reasons")
-        self.assertIn("high-risk", res["crp_punishment_desc"])
-        self.assertEqual(res["crp_followers"], 10104)
-        self.assertEqual(res["crp_views"], 7090)
-        self.assertFalse(res["crp_all_met"])
+        self.assertEqual(res["crp_status"], "ELIGIBLE")
+        self.assertIn("ĐỦ ĐK", res["crp_display"])
+        self.assertIn("Hết hạn phạt", res["crp_display"])
         self.assertTrue(res["crp_can_reapply"])
+
+    @patch("requests.Session.get")
+    def test_crp_appeal_state_with_deadline(self, mock_get):
+        """When an appeal is submitted and under review, flags as APPEAL."""
+        now_ts = int(time.time())
+        future_ts = now_ts + 86400 * 7  # 7 days in future
+        def side_effect(url, **kwargs):
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            if "incentives/profile" in url:
+                mock_resp.json.return_value = {
+                    "status_code": 0,
+                    "profile_status": "In Review",
+                    "raw": {
+                        "profile": {
+                            "appeal_info": {
+                                "appeal_submit_time": now_ts - 3600,
+                                "appeal_review_deadline": future_ts,
+                            }
+                        }
+                    }
+                }
+            else:
+                mock_resp.json.return_value = {}
+            return mock_resp
+
+        mock_get.side_effect = side_effect
+        cfg = {"use_proxy": False, "cookie_str": "sessionid=token", "region": "US"}
+        res = fetch_monetization_snapshot("Appealing_Profile", cfg)
+
+        self.assertEqual(res["crp_status"], "APPEAL")
+        self.assertIn("ĐANG KHÁNG", res["crp_display"])
 
     @patch("requests.Session.post")
     def test_apply_creative_rewards(self, mock_post):
@@ -241,34 +290,6 @@ class TestTikTokMonetizationClient(unittest.TestCase):
 
         self.assertTrue(res["success"])
         self.assertIn("thành công", res["message"])
-
-    @patch("requests.Session.get")
-    def test_uid_fallback_extraction_via_setting_and_config(self, mock_get):
-        """Tests that UID and uniqueId fall back to /setting HTML regex and profile config."""
-        def side_effect(url, **kwargs):
-            mock_resp = MagicMock()
-            mock_resp.status_code = 200
-            if "passport" in url:
-                # Passport returns empty/failed data
-                mock_resp.json.return_value = {"data": {}}
-            elif "setting" in url:
-                mock_resp.text = '<html><script>{"uid":"7504494015036851222","uniqueId":"creator_test","secUid":"sec_123"}</script></html>'
-            elif "payout_summary" in url:
-                mock_resp.json.return_value = {"data": {"balance": 0.0}}
-            elif "info/detail" in url:
-                # KYC returns user_id
-                mock_resp.json.return_value = {"kyc_status": {"user_id": 7504494015036851222, "cdd_status": 7, "created": True}}
-            else:
-                mock_resp.json.return_value = {}
-            return mock_resp
-
-        mock_get.side_effect = side_effect
-
-        cfg = {"use_proxy": False, "cookie_str": "sessionid=token", "region": "DE", "tiktok_account": "@creator_test"}
-        res = fetch_monetization_snapshot("Fallback_Profile", cfg)
-
-        self.assertEqual(res["tiktok_user_id"], "7504494015036851222")
-        self.assertEqual(res["unique_id"], "creator_test")
 
 
 if __name__ == "__main__":

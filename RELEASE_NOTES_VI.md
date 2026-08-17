@@ -1,3 +1,21 @@
+# Phiên bản 1.0.19
+
+## Điểm mới
+- Bổ sung tính năng Xóa hồ sơ: xóa nhiều hồ sơ cùng lúc, tùy chọn xóa cả dữ liệu trên đĩa, và phím tắt Delete trên bảng profile.
+- Bổ sung tự động tải và cài đặt ngrok.exe từ nguồn chính thức khi thiếu, không còn phụ thuộc tải tay.
+- Nâng cấp VIBE Stealth Engine: cải thiện giả lập fingerprint và các chỉ số chống phát hiện cho browser.
+- Cải tiến engine cấu hình profile với quy tắc mặc định và tùy chọn cấu hình rõ ràng hơn.
+
+## Cải thiện
+- Xóa hồ sơ an toàn hơn: chặn xóa khi hồ sơ đang chạy và cảnh báo rõ ràng khi xóa dữ liệu trên đĩa.
+- Ngrok được tìm kiếm tại nhiều vị trí (thư mục ứng dụng, _internal, cache pyngrok, System PATH) trước khi tải mới.
+- Cải thiện bảng Monetization và dữ liệu thu nhập, thông tin KYC hiển thị chính xác hơn.
+- Dọn dẹp các tài nguyên không còn tải tự động (ngrok, service_account.json) khỏi danh sách tài nguyên GitHub.
+
+## Sửa lỗi
+- Khắc phục luồng kiểm tra tài nguyên lần chạy đầu khi ngrok thiếu không gây lỗi khởi động.
+- Sửa một số trường hợp xác định tài khoản và cấu hình profile không nhất quán.
+
 # Phiên bản 1.0.18
 
 ## Điểm mới

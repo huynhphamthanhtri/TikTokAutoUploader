@@ -1767,11 +1767,11 @@ def subscribe_websub(channel_id, callback_url):
         log(f"[WebSub] Subscribe lỗi {channel_id}: {e}")
 
 
+from . import ngrok_helper
+
+
 def _ngrok_bin_path():
-    for path in (NGROK_BINARY, Path(_bundled_root()) / "ngrok.exe"):
-        if path.exists():
-            return str(path)
-    return None
+    return ngrok_helper.get_ngrok_bin_path()
 
 
 def _start_callback_server(preferred_port):
@@ -1871,6 +1871,12 @@ def _start_ngrok(port):
         except Exception as e:
             log(f"[Ngrok] Token lỗi: {e}")
     ng_bin = _ngrok_bin_path()
+    if not ng_bin:
+        ok, msg = ngrok_helper.ensure_ngrok()
+        if ok:
+            ng_bin = _ngrok_bin_path()
+        else:
+            log(f"[Ngrok] Tự động tải ngrok lỗi: {msg}")
     ngcfg = ngconf.PyngrokConfig(ngrok_path=ng_bin) if ng_bin else ngconf.get_default()
     tunnel = ngrok.connect(port, "http", pyngrok_config=ngcfg)
     ngrok_url = tunnel.public_url.rstrip("/")

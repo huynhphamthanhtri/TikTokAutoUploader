@@ -42,6 +42,7 @@ class BrowserSessionConfig:
     proxy: Mapping[str, str] | None = None
     account_uuid: str | None = None
     profile_name: str | None = None
+    stealth_config: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not str(self.profile_path).strip():
@@ -53,6 +54,8 @@ class BrowserSessionConfig:
         if self.mode is SessionMode.MANUAL and not self.headed:
             object.__setattr__(self, "headed", True)
         object.__setattr__(self, "args", tuple(str(arg) for arg in self.args))
+        if self.stealth_config is not None:
+            object.__setattr__(self, "stealth_config", MappingProxyType(dict(self.stealth_config)))
         if self.viewport is not None:
             width, height = self.viewport
             if width <= 0 or height <= 0:
@@ -302,39 +305,30 @@ class PatchrightBrowser:
             if config.proxy is not None:
                 kwargs["proxy"] = dict(config.proxy)
 
-            # Ensure native Orbita anti-detect configuration is present
-            data_orbita_path = os.path.join(profile, "data.orbita")
-            if not os.path.exists(data_orbita_path):
-                try:
-                    from profile_config_engine import (
-                        generate_orbita_profile_config,
-                        write_profile_config_files,
-                    )
-                    cfg = generate_orbita_profile_config(
-                        account_uuid=Path(profile).name,
-                        proxy_info=dict(config.proxy) if config.proxy else None,
-                        geoip_info={
-                            "timezone": config.timezone_id,
-                            "latitude": config.geolocation.get("latitude") if config.geolocation else None,
-                            "longitude": config.geolocation.get("longitude") if config.geolocation else None,
-                        } if (config.timezone_id or config.geolocation) else None,
-                    )
-                    write_profile_config_files(profile, cfg)
-                except Exception:
-                    pass
-
             context = await playwright.chromium.launch_persistent_context(**kwargs)
 
-            # Inject VIBE Independent Stealth Engine at Context Level
+            # Inject Native Stealth Engine at Context Level
             try:
                 from vibe_stealth_engine import generate_stealth_js
-                resolved_id = str(config.account_uuid or config.profile_name or Path(profile).parent.name or Path(profile).name)
-                stealth_js = generate_stealth_js({
-                    "account_uuid": resolved_id,
-                    "profile_name": str(config.profile_name or Path(profile).parent.name),
-                    "hardware_concurrency": 8,
-                    "device_memory": 8,
-                })
+                from profile_config_engine import generate_stealth_profile_config
+
+                resolved_id = str(
+                    config.account_uuid
+                    or config.profile_name
+                    or Path(profile).parent.name
+                    or Path(profile).name
+                )
+                stealth_cfg = dict(config.stealth_config) if config.stealth_config else generate_stealth_profile_config(
+                    account_uuid=resolved_id,
+                    proxy_info=dict(config.proxy) if config.proxy else None,
+                    geoip_info={
+                        "timezone": config.timezone_id,
+                        "latitude": config.geolocation.get("latitude") if config.geolocation else None,
+                        "longitude": config.geolocation.get("longitude") if config.geolocation else None,
+                    } if (config.timezone_id or config.geolocation) else None,
+                    profile_name=str(config.profile_name or Path(profile).parent.name),
+                )
+                stealth_js = generate_stealth_js(stealth_cfg)
                 await context.add_init_script(stealth_js)
             except Exception:
                 pass

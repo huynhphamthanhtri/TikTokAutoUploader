@@ -1731,7 +1731,16 @@ class InspectionDialog:
             bal_str = f"{sym}{bal:.2f}"
 
             crp_str = data.get('crp_display', '⚪ Chưa bật')
-            kyc_str = "🟢 Đã KYC" if data.get('kyc_status') == "APPROVED" else ("🟡 Chờ" if data.get('kyc_status') == "PENDING" else "⚪ Chưa")
+            if data.get('kyc_status') == "APPROVED":
+                kyc_str = "🟢 Đã KYC"
+            elif data.get('kyc_status') == "PENDING":
+                kyc_str = "🟡 Đang chờ"
+            elif data.get('kyc_status') in ("RESUBMIT", "WARNING"):
+                kyc_str = "🔴 Nộp lại"
+            elif data.get('kyc_status') == "REJECTED":
+                kyc_str = "🔴 Từ chối"
+            else:
+                kyc_str = "⚪ Chưa"
             tax_str = "🟢 Đã thuế" if data.get('tax_status') == "TAX_VERIFIED" else "⚪ Chưa"
             pay_str = data.get('payment_method', 'Chưa liên kết')
             time_str = data.get('checked_at', '')
@@ -3541,9 +3550,12 @@ def _refresh_status_bar():
     total = sum(1 for _ in tree.get_children(''))
     running = 0
     for iid in tree.get_children(''):
-        name = tree.item(iid, 'values')[0]
-        if profiles.get(name, {}).get('running'):
-            running += 1
+        item_data = tree.item(iid)
+        vals = item_data.get('values', ()) if isinstance(item_data, dict) else item_data
+        if isinstance(vals, (list, tuple)) and len(vals) > 0:
+            name = vals[0]
+            if profiles.get(name, {}).get('running'):
+                running += 1
     status_count_label.configure(text=f"Hồ sơ: {total} | Đang chạy: {running}")
     clock_label.configure(text=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     try:
@@ -3577,8 +3589,10 @@ def _refresh_status_bar():
         pass
 
 def _first_run_download_check():
-    """Kiểm tra và tải tài nguyên thiếu (Browser, ngrok.exe, service_account.json, FFmpeg)."""
+    """Kiểm tra và tải tài nguyên thiếu (Browser, FFmpeg, ngrok.exe)."""
     from version import RESOURCE_ASSETS, RESOURCE_RELEASE_VERSION
+    import youtube_monitor.ffmpeg_helper as fh
+    import youtube_monitor.ngrok_helper as nh
 
     missing = {}
     for local_name, info in RESOURCE_ASSETS.items():
@@ -3586,16 +3600,20 @@ def _first_run_download_check():
         if not path.exists():
             missing[local_name] = info
 
-    import youtube_monitor.ffmpeg_helper as fh
     ffmpeg_ok, ffmpeg_msg, ffmpeg_src = fh.check_ffmpeg()
     ffmpeg_needed = not ffmpeg_ok
 
-    if not missing and not ffmpeg_needed:
+    ngrok_ok, ngrok_msg, ngrok_src = nh.check_ngrok()
+    ngrok_needed = not ngrok_ok
+
+    if not missing and not ffmpeg_needed and not ngrok_needed:
         return
 
     items_list = [f"- {name}" for name in missing]
     if ffmpeg_needed:
         items_list.append("- FFmpeg")
+    if ngrok_needed:
+        items_list.append("- ngrok.exe (Tunnel WebSub YouTube)")
     if "Browser" in missing:
         items_list.append("  (Browser ~150 MB; tải về sẽ giải nén và xác minh)")
     popup_msg = "Cần tải tài nguyên lần đầu:\n" + "\n".join(items_list) + "\n\nTiếp tục?"
@@ -3644,7 +3662,7 @@ def _first_run_download_check():
             except Exception:
                 pass
         try:
-            total = len(missing) + (1 if ffmpeg_needed else 0)
+            total = len(missing) + (1 if ffmpeg_needed else 0) + (1 if ngrok_needed else 0)
             i = 0
             resource_tag = f"v{RESOURCE_RELEASE_VERSION}"
             base_url = f"https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/download/{resource_tag}"
@@ -3746,6 +3764,16 @@ def _first_run_download_check():
                 if not ff_ok:
                     raise RuntimeError(f"FFmpeg: {ff_msg}")
                 _update_status("Đã tải FFmpeg.", i / total)
+
+            if ngrok_needed:
+                i += 1
+                _update_status("Đang tải ngrok.exe...", (i - 0.9) / total)
+                def _ng_progress(text, pct):
+                    _update_status(text, (i - 1 + pct) / total)
+                ng_ok, ng_msg = nh.ensure_ngrok(progress_callback=_ng_progress)
+                if not ng_ok:
+                    raise RuntimeError(f"Ngrok: {ng_msg}")
+                _update_status("Đã tải ngrok.exe.", i / total)
 
             root.after(500, lambda: _done(True, ""))
         except requests.RequestException as e:
@@ -6111,6 +6139,7 @@ def rename_profile():
         except Exception as error:
             update_status(f"[UI] Không đồng bộ channel khi đổi tên: {error}")
         save_configs()
+        update_profile_list()
         dlg.destroy()
     ctk.CTkButton(dlg, text="Lưu", command=save).pack(pady=10)
 
@@ -6118,34 +6147,92 @@ def delete_profile():
     if not _license_guard(): return
     sel = tree.selection()
     if not sel: return
-    nm = tree.item(sel[0])['values'][0]
-    if profiles[nm]['running'] or profiles[nm].get('session_busy') or _browser_session_valid(profiles[nm].get('manual_driver')) or get_lifecycle(nm).has_active_driver():
-        messagebox.showerror("Lỗi", "Hãy dừng hồ sơ và đóng browser trước")
+
+    # Collect all selected profile names
+    selected_names = []
+    for s in sel:
+        vals = tree.item(s).get('values')
+        if vals and len(vals) > 0:
+            nm = str(vals[0])
+            if nm in profiles and nm not in selected_names:
+                selected_names.append(nm)
+
+    if not selected_names:
         return
-    ok = messagebox.askyesno("Xác nhận xoá hồ sơ",
-        f"Bạn có chắc muốn xoá hồ sơ '{nm}' khỏi cấu hình?\n\n"
-        "Thao tác này chỉ xoá hồ sơ khỏi danh sách app.\n"
-        "Không xoá thư mục video, Chrome profile hoặc dữ liệu trên ổ đĩa.")
+
+    # Check if any profile is currently running or browser is open
+    running_profiles = [
+        nm for nm in selected_names
+        if profiles[nm].get('running') or profiles[nm].get('session_busy')
+        or _browser_session_valid(profiles[nm].get('manual_driver'))
+        or get_lifecycle(nm).has_active_driver()
+    ]
+    if running_profiles:
+        messagebox.showerror(
+            "Lỗi",
+            f"Các hồ sơ sau đang chạy hoặc đang mở trình duyệt:\n\n"
+            f"{', '.join(running_profiles[:5])}{'...' if len(running_profiles) > 5 else ''}\n\n"
+            "Vui lòng dừng hồ sơ và đóng browser trước khi xoá."
+        )
+        return
+
+    count = len(selected_names)
+    if count == 1:
+        nm = selected_names[0]
+        msg = f"Bạn có chắc muốn xoá hồ sơ '{nm}' khỏi cấu hình?"
+    else:
+        msg = f"Bạn có chắc muốn xoá {count} hồ sơ đã chọn khỏi cấu hình?"
+
+    ok = messagebox.askyesno("Xác nhận xoá hồ sơ", msg)
     if not ok: return
+
+    # Check YouTube channel links
+    total_linked_channels = 0
     try:
-        channel_count = youtube_monitor.channel_count_for_profile(nm)
-        if channel_count > 0:
+        for nm in selected_names:
+            total_linked_channels += youtube_monitor.channel_count_for_profile(nm)
+        if total_linked_channels > 0:
             ok_channels = messagebox.askyesno(
                 "Cảnh báo channel",
-                f"Hồ sơ '{nm}' đang được {channel_count} channel YouTube sử dụng.\n\n"
+                f"Có {total_linked_channels} channel YouTube đang liên kết với các hồ sơ này.\n\n"
                 "Các channel này sẽ trở thành orphan và cần chọn lại profile TikTok.\n"
-                "Bạn có chắc muốn xoá hồ sơ này?",
+                "Bạn có chắc chắn muốn tiếp tục xoá?",
             )
             if not ok_channels: return
     except Exception:
         pass
-    p = profiles[nm].get('project')
-    if p in projects: projects[p].discard(nm)
-    del profiles[nm]
-    remove_lifecycle(nm)
-    profile_operation_locks.pop(nm, None)
+
+    # Prompt for disk cleanup option
+    delete_disk = messagebox.askyesno(
+        "Xóa dữ liệu ổ đĩa",
+        f"Bạn có muốn XÓA LUÔN thư mục dữ liệu trình duyệt trên ổ đĩa của {count} hồ sơ này để giải phóng dung lượng không?\n\n"
+        "• Chọn 'Yes' (Có): Xoá hồ sơ và dọn sạch dữ liệu trình duyệt trên ổ cứng.\n"
+        "• Chọn 'No' (Không): Chỉ xoá khỏi danh sách quản lý, giữ lại dữ liệu trên ổ cứng."
+    )
+
+    deleted_count = 0
+    for nm in selected_names:
+        prof = profiles.get(nm, {})
+        if delete_disk:
+            try:
+                p_dir = browser_glue.active_profile_path(prof.get('config', {}))
+                if p_dir and os.path.isdir(p_dir):
+                    shutil.rmtree(p_dir, ignore_errors=True)
+            except Exception as e:
+                update_status(f"[{nm}] [WARN] Không thể xóa thư mục profile trên đĩa: {e}")
+
+        p = prof.get('project')
+        if p in projects:
+            projects[p].discard(nm)
+        profiles.pop(nm, None)
+        remove_lifecycle(nm)
+        profile_operation_locks.pop(nm, None)
+        monetization_cache.pop(nm, None)
+        deleted_count += 1
+
     save_configs()
-    update_status(f"[UI] Đã xoá hồ sơ '{nm}'.")
+    update_profile_list()
+    update_status(f"[UI] Đã xoá {deleted_count} hồ sơ thành công.")
 
 # =========================
 # Chi tiết tài khoản + Trợ giúp nhập/xuất
@@ -6998,6 +7085,8 @@ def _update_monetization_table(*_args):
 
         if p_status == 'PAYOUT_READY':
             p_display = "🟢 SẴN SÀNG"
+        elif p_status == 'PAYOUT_PENDING':
+            p_display = "🟡 ĐANG XÁC MINH"
         elif p_status == 'Cookie Die':
             p_display = "🔴 COOKIE DIE"
         elif p_status in ('Chưa có Cookie', 'NO_AUTH'):
@@ -7028,16 +7117,18 @@ def _update_monetization_table(*_args):
         # KYC Status formatting
         if k_status == 'APPROVED':
             k_display = "🟢 ĐÃ KYC"
+        elif k_status == 'PENDING':
+            k_display = "🟡 ĐANG CHỜ"
+        elif k_status in ('RESUBMIT', 'WARNING'):
+            k_display = "🔴 NỘP LẠI"
+        elif k_status == 'REJECTED':
+            k_display = "🔴 BỊ TỪ CHỐI"
         elif k_status == 'Cookie Die':
             k_display = "🔴 COOKIE DIE"
         elif k_status in ('Chưa có Cookie', 'NO_AUTH'):
             k_display = "⚪ CHƯA CÓ COOKIE"
         elif k_status == 'NOT_STARTED':
             k_display = "⚪ CHƯA KYC"
-        elif k_status == 'PENDING':
-            k_display = "🟡 ĐANG CHỜ"
-        elif k_status == 'REJECTED':
-            k_display = "🔴 BỊ TỪ CHỐI"
         else:
             k_display = str(k_status)
 
@@ -7492,6 +7583,7 @@ def _on_tree_right_click(event):
 tree.bind("<Button-3>", _on_tree_right_click)
 tree.bind("<Double-1>", lambda _event: view_profile_details())
 tree.bind("<<TreeviewSelect>>", _update_action_buttons)
+tree.bind("<Delete>", lambda _event: delete_profile())
 
 def _tick():
     # Cập nhật UI

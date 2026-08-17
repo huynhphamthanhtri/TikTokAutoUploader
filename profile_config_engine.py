@@ -1,14 +1,14 @@
 """
-profile_config_engine.py - Sinh cấu hình Anti-Detect Native cho Orbita Browser Core.
+profile_config_engine.py - Sinh cấu hình Anti-Detect fingerprint cho từng profile.
 
-Module tạo file cấu hình `data.orbita` và `data.huynhthang` cho từng profile Chromium / Orbita
-được nạp tự động qua C++ binary hooks (Canvas noise, Audio noise, WebGL renderer, WebRTC fake public IP).
+Module tạo dict cấu hình fingerprint đầy đủ (Canvas noise, Audio noise, WebGL params,
+WebRTC fake IP, Client Hints, Plugins, v.v.) để truyền cho stealth JS engine inject
+qua CDP tại runtime. Không ghi file ra đĩa.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 from typing import Any, Dict, Optional
 
@@ -25,7 +25,145 @@ def generate_deterministic_seed(account_uuid: str, salt: str = "") -> int:
     return int(digest[:8], 16) % 2147483647
 
 
-def generate_orbita_profile_config(
+# Chrome version constants — update when bundled chrome-win64 is upgraded
+CHROME_MAJOR = "149"
+CHROME_FULL_VERSION = "149.0.7827.55"
+CHROME_UA_TOKEN = "Chrome/149.0.0.0"
+
+
+_PDF_MIMETYPE = {
+    "description": "Portable Document Format",
+    "suffixes": ["pdf"],
+    "type": "application/pdf",
+}
+_PDF_MIMETYPE_TEXT = {
+    "description": "Portable Document Format",
+    "suffixes": ["pdf"],
+    "type": "text/pdf",
+}
+
+# 5 standard Chrome PDF plugins matching real Chrome output
+DEFAULT_PLUGINS = [
+    {
+        "name": "PDF Viewer",
+        "filename": "internal-pdf-viewer",
+        "description": "Portable Document Format",
+        "mimeTypes": [_PDF_MIMETYPE, _PDF_MIMETYPE_TEXT],
+    },
+    {
+        "name": "Chrome PDF Viewer",
+        "filename": "internal-pdf-viewer",
+        "description": "Portable Document Format",
+        "mimeTypes": [_PDF_MIMETYPE, _PDF_MIMETYPE_TEXT],
+    },
+    {
+        "name": "Chromium PDF Viewer",
+        "filename": "internal-pdf-viewer",
+        "description": "Portable Document Format",
+        "mimeTypes": [_PDF_MIMETYPE, _PDF_MIMETYPE_TEXT],
+    },
+    {
+        "name": "Microsoft Edge PDF Viewer",
+        "filename": "internal-pdf-viewer",
+        "description": "Portable Document Format",
+        "mimeTypes": [_PDF_MIMETYPE, _PDF_MIMETYPE_TEXT],
+    },
+    {
+        "name": "WebKit built-in PDF",
+        "filename": "internal-pdf-viewer",
+        "description": "Portable Document Format",
+        "mimeTypes": [_PDF_MIMETYPE, _PDF_MIMETYPE_TEXT],
+    },
+]
+
+# 34 WebGL extensions matching real Chrome NVIDIA output
+DEFAULT_WEBGL_EXTENSIONS = [
+    "ANGLE_instanced_arrays",
+    "EXT_blend_minmax",
+    "EXT_color_buffer_half_float",
+    "EXT_disjoint_timer_query",
+    "EXT_float_blend",
+    "EXT_frag_depth",
+    "EXT_shader_texture_lod",
+    "EXT_texture_compression_bptc",
+    "EXT_texture_compression_rgtc",
+    "EXT_texture_filter_anisotropic",
+    "EXT_sRGB",
+    "KHR_parallel_shader_compile",
+    "OES_element_index_uint",
+    "OES_fbo_render_mipmap",
+    "OES_standard_derivatives",
+    "OES_texture_float",
+    "OES_texture_float_linear",
+    "OES_texture_half_float",
+    "OES_texture_half_float_linear",
+    "OES_vertex_array_object",
+    "WEBGL_color_buffer_float",
+    "WEBGL_compressed_texture_s3tc",
+    "WEBGL_compressed_texture_s3tc_srgb",
+    "WEBGL_debug_renderer_info",
+    "WEBGL_debug_shaders",
+    "WEBGL_depth_texture",
+    "WEBGL_draw_buffers",
+    "WEBGL_lose_context",
+    "WEBGL_multi_draw",
+    # WebGL2-specific extensions
+    "EXT_color_buffer_float",
+    "EXT_disjoint_timer_query_webgl2",
+    "EXT_texture_norm16",
+    "OES_draw_buffers_indexed",
+    "OVR_multiview2",
+]
+
+# 42 WebGL parameter values matching real NVIDIA GTX 750 / RTX 3060 output
+DEFAULT_GL_PARAM_VALUES = [
+    {"name": "ALPHA_BITS", "value": 8},
+    {"name": "BLUE_BITS", "value": 8},
+    {"name": "DEPTH_BITS", "value": 24},
+    {"name": "GREEN_BITS", "value": 8},
+    {"name": "RED_BITS", "value": 8},
+    {"name": "STENCIL_BITS", "value": 8},
+    {"name": "MAX_3D_TEXTURE_SIZE", "value": 2048},
+    {"name": "MAX_ARRAY_TEXTURE_LAYERS", "value": 2048},
+    {"name": "MAX_COLOR_ATTACHMENTS", "value": 8},
+    {"name": "MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS", "value": 200704},
+    {"name": "MAX_COMBINED_TEXTURE_IMAGE_UNITS", "value": 32},
+    {"name": "MAX_COMBINED_UNIFORM_BLOCKS", "value": 24},
+    {"name": "MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS", "value": 212992},
+    {"name": "MAX_CUBE_MAP_TEXTURE_SIZE", "value": 16384},
+    {"name": "MAX_DRAW_BUFFERS", "value": 8},
+    {"name": "MAX_FRAGMENT_INPUT_COMPONENTS", "value": 120},
+    {"name": "MAX_FRAGMENT_UNIFORM_BLOCKS", "value": 12},
+    {"name": "MAX_FRAGMENT_UNIFORM_COMPONENTS", "value": 4096},
+    {"name": "MAX_FRAGMENT_UNIFORM_VECTORS", "value": 1024},
+    {"name": "MAX_PROGRAM_TEXEL_OFFSET", "value": 7},
+    {"name": "MAX_RENDERBUFFER_SIZE", "value": 16384},
+    {"name": "MAX_SAMPLES", "value": 8},
+    {"name": "MAX_TEXTURE_IMAGE_UNITS", "value": 16},
+    {"name": "MAX_TEXTURE_LOD_BIAS", "value": 2},
+    {"name": "MAX_TEXTURE_SIZE", "value": 16384},
+    {"name": "MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS", "value": 120},
+    {"name": "MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS", "value": 4},
+    {"name": "MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS", "value": 4},
+    {"name": "MAX_UNIFORM_BLOCK_SIZE", "value": 65536},
+    {"name": "MAX_UNIFORM_BUFFER_BINDINGS", "value": 24},
+    {"name": "MAX_VARYING_COMPONENTS", "value": 120},
+    {"name": "MAX_VARYING_VECTORS", "value": 30},
+    {"name": "MAX_VERTEX_ATTRIBS", "value": 16},
+    {"name": "MAX_VERTEX_OUTPUT_COMPONENTS", "value": 120},
+    {"name": "MAX_VERTEX_TEXTURE_IMAGE_UNITS", "value": 16},
+    {"name": "MAX_VERTEX_UNIFORM_BLOCKS", "value": 12},
+    {"name": "MAX_VERTEX_UNIFORM_COMPONENTS", "value": 16384},
+    {"name": "MAX_VERTEX_UNIFORM_VECTORS", "value": 4096},
+    {"name": "MAX_VIEWPORT_DIMS", "value": {"0": 32768, "1": 32768}},
+    {"name": "MIN_PROGRAM_TEXEL_OFFSET", "value": -8},
+    {"name": "UNIFORM_BUFFER_OFFSET_ALIGNMENT", "value": 256},
+    {"name": "ALIASED_LINE_WIDTH_RANGE", "value": {"0": 1, "1": 1}},
+    {"name": "ALIASED_POINT_SIZE_RANGE", "value": {"0": 1, "1": 1024}},
+]
+
+
+def generate_stealth_profile_config(
     account_uuid: str,
     proxy_info: Optional[Dict[str, Any]] = None,
     geoip_info: Optional[Dict[str, Any]] = None,
@@ -34,14 +172,18 @@ def generate_orbita_profile_config(
     device_memory: int = 8,
     profile_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Tạo cấu trúc cấu hình đầy đủ chuẩn Orbita 144 / data.huynhthang."""
+    """Tạo cấu trúc cấu hình fingerprint đầy đủ cho stealth JS engine.
+
+    Dict trả về được truyền cho ``vibe_stealth_engine.generate_stealth_js()``
+    để inject vào browser context qua CDP ``add_init_script``.
+    """
     canvas_seed = generate_deterministic_seed(account_uuid, "canvas")
     audio_seed = generate_deterministic_seed(account_uuid, "audio")
     
     # Mặc định thông số vị trí từ GeoIP hoặc fallback
     tz_name = "America/New_York"
     lat, lon = 40.7128, -74.0060
-    fake_ip = "127.0.0.1"
+    fake_ip = ""
     
     if geoip_info:
         tz_name = geoip_info.get("timezone", tz_name) or tz_name
@@ -57,15 +199,22 @@ def generate_orbita_profile_config(
             pass
         fake_ip = geoip_info.get("ip", fake_ip) or fake_ip
 
+    # Auto-detect proxy IP for WebRTC fake
+    if not fake_ip and proxy_info:
+        server = proxy_info.get("server", "")
+        if "://" in server:
+            host_port = server.split("://", 1)[1]
+            fake_ip = host_port.rsplit(":", 1)[0] if ":" in host_port else host_port
+
     ua = user_agent or (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/144.0.0.0 Safari/537.36"
+        f"{CHROME_UA_TOKEN} Safari/537.36"
     )
 
     config: Dict[str, Any] = {
-        "profile_name": str(account_uuid),
-        "license_key": "ORBITA_CORE_ENABLED",
+        "profile_name": str(profile_name or account_uuid),
+        "account_uuid": str(account_uuid),
         "canvas": {
             "noiseEnabled": True,
             "noiseSeed": canvas_seed,
@@ -81,54 +230,40 @@ def generate_orbita_profile_config(
             "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
             "maxAnisotropy": 16,
             "maxTextureSize": 16384,
-            "maxViewportDims": [16384, 16384],
-            "glParamValues": [
-                {"name": "ALPHA_BITS", "value": 8},
-                {"name": "BLUE_BITS", "value": 8},
-                {"name": "DEPTH_BITS", "value": 24},
-                {"name": "GREEN_BITS", "value": 8},
-                {"name": "RED_BITS", "value": 8},
-                {"name": "STENCIL_BITS", "value": 8},
-                {"name": "MAX_TEXTURE_SIZE", "value": 16384},
-            ],
-            "extensions": [
-                "ANGLE_instanced_arrays",
-                "EXT_blend_minmax",
-                "EXT_color_buffer_half_float",
-                "EXT_float_blend",
-                "EXT_frag_depth",
-                "EXT_shader_texture_lod",
-                "EXT_texture_compression_bptc",
-                "EXT_texture_compression_rgtc",
-                "EXT_texture_filter_anisotropic",
-                "OES_element_index_uint",
-                "OES_fbo_render_mipmap",
-                "OES_standard_derivatives",
-                "OES_texture_float",
-                "OES_texture_float_linear",
-                "OES_texture_half_float",
-                "OES_texture_half_float_linear",
-                "OES_vertex_array_object",
-                "WEBGL_color_buffer_float",
-                "WEBGL_compressed_texture_s3tc",
-                "WEBGL_debug_renderer_info",
-                "WEBGL_debug_shaders",
-                "WEBGL_depth_texture",
-                "WEBGL_draw_buffers",
-                "WEBGL_lose_context",
-                "WEBGL_multi_draw",
-            ],
+            "maxViewportDims": [32768, 32768],
+            "glParamValues": list(DEFAULT_GL_PARAM_VALUES),
+            "extensions": list(DEFAULT_WEBGL_EXTENSIONS),
         },
         "webGpu": {
             "enabled": True,
             "adapterInfo": {
                 "vendor": "nvidia",
                 "architecture": "ampere",
-                "device": "RTX 3060",
+                "device": "0x0000",
+                "driver": "32.0.15.6614",
+                "isFallbackAdapter": False,
                 "description": "NVIDIA GeForce RTX 3060",
             },
-            "features": [],
-            "limits": {},
+            "features": [
+                "depth-clip-control",
+                "timestamp-query",
+                "texture-compression-bc",
+                "shader-f16",
+            ],
+            "limits": {
+                "maxBindGroups": 4,
+                "maxBindingsPerBindGroup": 1000,
+                "maxBufferSize": 268435456,
+                "maxComputeWorkgroupSizeX": 256,
+                "maxComputeWorkgroupSizeY": 256,
+                "maxComputeWorkgroupSizeZ": 64,
+                "maxTextureArrayLayers": 2048,
+                "maxTextureDimension1D": 16384,
+                "maxTextureDimension2D": 16384,
+                "maxTextureDimension3D": 2048,
+                "maxVertexAttributes": 16,
+                "maxVertexBuffers": 8,
+            },
         },
         "webrtc": {
             "disableWebRTC": False,
@@ -136,18 +271,19 @@ def generate_orbita_profile_config(
         },
         "clientHints": {
             "brands": [
-                {"brand": "Chromium", "version": "144"},
-                {"brand": "Google Chrome", "version": "144"},
-                {"brand": "Not-A.Brand", "version": "24"},
+                {"brand": "Not/A)Brand", "version": "8"},
+                {"brand": "Chromium", "version": CHROME_MAJOR},
+                {"brand": "Google Chrome", "version": CHROME_MAJOR},
             ],
-            "fullVersion": "144.0.7559.96",
+            "formFactors": ["Desktop"],
+            "fullVersion": CHROME_FULL_VERSION,
             "fullVersionList": [
-                {"brand": "Chromium", "version": "144.0.7559.96"},
-                {"brand": "Google Chrome", "version": "144.0.7559.96"},
-                {"brand": "Not-A.Brand", "version": "24.0.0.0"},
+                {"brand": "Not/A)Brand", "version": "8.0.0.0"},
+                {"brand": "Chromium", "version": CHROME_FULL_VERSION},
+                {"brand": "Google Chrome", "version": CHROME_FULL_VERSION},
             ],
             "platform": "Windows",
-            "platformVersion": "15.0.0",
+            "platformVersion": "19.0.0",
             "architecture": "x86",
             "bitness": "64",
             "model": "",
@@ -174,7 +310,7 @@ def generate_orbita_profile_config(
             "pixelDepth": 24,
             "devicePixelRatio": 1,
             "isExtended": False,
-            "isExtendedOverride": False,
+            "isExtendedOverride": True,
         },
         "timezone": {
             "name": tz_name,
@@ -208,30 +344,15 @@ def generate_orbita_profile_config(
         },
         "plugins": {
             "override": True,
-            "list": [
-                {"name": "PDF Viewer", "filename": "internal-pdf-viewer", "description": "Portable Document Format"}
-            ],
+            "list": list(DEFAULT_PLUGINS),
         },
         "license_key": os.environ.get("VIBE_ORBITA_LICENSE_KEY", ""),
-        "profile_name": str(profile_name or account_uuid),
+        "hardware_concurrency": hardware_concurrency,
+        "device_memory": device_memory,
         "proxy": proxy_info or {},
     }
     return config
 
 
-def write_profile_config_files(profile_dir: str, config: Dict[str, Any]) -> None:
-    """Ghi cấu hình profile vào thư mục Profile.
-    
-    Ghi đồng thời `data.huynhthang` và `data.orbita` để tương thích với các phiên bản
-    Orbita/Chromium patched core khác nhau.
-    """
-    if not profile_dir:
-        return
-    os.makedirs(profile_dir, exist_ok=True)
-    for filename in ("data.huynhthang", "data.orbita"):
-        target_path = os.path.join(profile_dir, filename)
-        try:
-            with open(target_path, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
-        except OSError:
-            pass
+# Backward-compatibility alias
+generate_orbita_profile_config = generate_stealth_profile_config

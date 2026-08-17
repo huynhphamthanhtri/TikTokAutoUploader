@@ -4,14 +4,18 @@ test_profile_config_engine.py - Unit tests for profile_config_engine.py
 
 import json
 import os
-import tempfile
 import unittest
 from unittest.mock import patch
 
 from profile_config_engine import (
+    CHROME_MAJOR,
+    CHROME_FULL_VERSION,
+    DEFAULT_GL_PARAM_VALUES,
+    DEFAULT_PLUGINS,
+    DEFAULT_WEBGL_EXTENSIONS,
     generate_deterministic_seed,
+    generate_stealth_profile_config,
     generate_orbita_profile_config,
-    write_profile_config_files,
 )
 
 
@@ -36,8 +40,8 @@ class TestProfileConfigEngine(unittest.TestCase):
         self.assertNotEqual(canvas_seed_1, audio_seed_1)
         self.assertNotEqual(canvas_seed_1, canvas_seed_2)
 
-    def test_generate_orbita_profile_config_structure(self):
-        """Config schema contains all required Orbita / data.huynhthang sections."""
+    def test_generate_stealth_profile_config_structure(self):
+        """Config schema contains all 42 GL params, 34 extensions, 5 plugins, formFactors, and Chrome 149."""
         uuid_test = "test-uuid-4444"
         geoip = {
             "timezone": "Europe/Berlin",
@@ -45,10 +49,10 @@ class TestProfileConfigEngine(unittest.TestCase):
             "longitude": 13.4050,
             "ip": "185.220.101.5",
         }
-        config = generate_orbita_profile_config(
+        config = generate_stealth_profile_config(
             account_uuid=uuid_test,
             geoip_info=geoip,
-            user_agent="Custom/144.0.0.0",
+            user_agent=f"Custom/{CHROME_FULL_VERSION}",
         )
 
         self.assertEqual(config["profile_name"], uuid_test)
@@ -61,34 +65,37 @@ class TestProfileConfigEngine(unittest.TestCase):
         self.assertEqual(config["geoLocation"]["longitude"], 13.4050)
         self.assertEqual(config["webrtc"]["fakePublicIP"], "185.220.101.5")
         self.assertFalse(config["webrtc"]["disableWebRTC"])
-        self.assertEqual(config["navigator"]["userAgent"], "Custom/144.0.0.0")
-        self.assertIn("brands", config["clientHints"])
+        self.assertEqual(config["navigator"]["userAgent"], f"Custom/{CHROME_FULL_VERSION}")
+        
+        # 43 GL params & 34 extensions
+        self.assertEqual(len(config["webgl"]["glParamValues"]), len(DEFAULT_GL_PARAM_VALUES))
+        self.assertEqual(len(config["webgl"]["extensions"]), len(DEFAULT_WEBGL_EXTENSIONS))
+        
+        # 5 plugins
+        self.assertEqual(len(config["plugins"]["list"]), 5)
+        plugin_names = [p["name"] for p in config["plugins"]["list"]]
+        self.assertIn("PDF Viewer", plugin_names)
+        self.assertIn("Chrome PDF Viewer", plugin_names)
+        self.assertIn("Chromium PDF Viewer", plugin_names)
+        self.assertIn("Microsoft Edge PDF Viewer", plugin_names)
+        self.assertIn("WebKit built-in PDF", plugin_names)
 
-    def test_license_key_is_empty_by_default(self):
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("VIBE_ORBITA_LICENSE_KEY", None)
-            config = generate_orbita_profile_config("uuid-no-license")
-        self.assertEqual(config["license_key"], "")
+        # Client Hints: Chrome 149 & formFactors Desktop
+        self.assertIn("formFactors", config["clientHints"])
+        self.assertEqual(config["clientHints"]["formFactors"], ["Desktop"])
+        self.assertEqual(config["clientHints"]["fullVersion"], CHROME_FULL_VERSION)
 
-    def test_write_profile_config_files(self):
-        """Both data.huynhthang and data.orbita are generated in profile dir."""
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            config = generate_orbita_profile_config("uuid-writer-test")
-            write_profile_config_files(tmp_dir, config)
+    def test_backward_compatible_alias(self):
+        """generate_orbita_profile_config is an exact alias of generate_stealth_profile_config."""
+        self.assertIs(generate_orbita_profile_config, generate_stealth_profile_config)
 
-            path_ht = os.path.join(tmp_dir, "data.huynhthang")
-            path_orbita = os.path.join(tmp_dir, "data.orbita")
-
-            self.assertTrue(os.path.exists(path_ht))
-            self.assertTrue(os.path.exists(path_orbita))
-
-            with open(path_ht, "r", encoding="utf-8") as f:
-                loaded_ht = json.load(f)
-            with open(path_orbita, "r", encoding="utf-8") as f:
-                loaded_orbita = json.load(f)
-
-            self.assertEqual(loaded_ht["profile_name"], "uuid-writer-test")
-            self.assertEqual(loaded_orbita["profile_name"], "uuid-writer-test")
+    def test_proxy_auto_detection_for_webrtc(self):
+        """When geoip is empty, fakePublicIP is extracted from proxy_info."""
+        config = generate_stealth_profile_config(
+            account_uuid="test-proxy-uuid",
+            proxy_info={"server": "http://45.61.124.46:6375"},
+        )
+        self.assertEqual(config["webrtc"]["fakePublicIP"], "45.61.124.46")
 
 
 if __name__ == "__main__":

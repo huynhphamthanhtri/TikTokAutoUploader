@@ -610,6 +610,25 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
             self.assertFalse(code_cache_dir.exists())
             self.assertTrue(cookies_file.exists())
 
+    def test_build_session_config_stealth_and_no_dead_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = {
+                "browser_profile_path": temp_dir,
+                "browser_executable": r"C:\browser\chrome.exe",
+                "account_uuid": "test-uuid-stealth",
+            }
+            session = glue.build_session_config(config)
+            self.assertIsNotNone(session.stealth_config)
+            self.assertEqual(len(session.stealth_config["webgl"]["glParamValues"]), 43)
+            self.assertEqual(len(session.stealth_config["webgl"]["extensions"]), 34)
+            self.assertEqual(len(session.stealth_config["plugins"]["list"]), 5)
+            self.assertEqual(session.stealth_config["clientHints"]["formFactors"], ["Desktop"])
+
+            # Verify NO dead config files were written to disk
+            p = Path(temp_dir)
+            self.assertFalse((p / "data.huynhthang").exists())
+            self.assertFalse((p / "data.orbita").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -361,8 +361,20 @@ class MonetizationDetailModal(ctk.CTkToplevel):
         else:
             tax_label = "⚪ CHƯA KHAI THUẾ"
 
+        p_st = str(self.data.get("payout_status", "N/A"))
+        if p_st == "PAYOUT_READY":
+            p_label = "🟢 SẴN SÀNG (PAYOUT READY)"
+        elif p_st == "PAYOUT_PENDING":
+            p_label = "🟡 ĐANG XÁC MINH (PENDING)"
+        elif p_st == "PAYOUT_NOT_LINKED":
+            p_label = "⚪ CHƯA LIÊN KẾT (NOT LINKED)"
+        elif p_st == "Cookie Die":
+            p_label = "🔴 Cookie Die"
+        else:
+            p_label = p_st
+
         pay_rows = [
-            ("Trạng Thái Payout:", str(self.data.get("payout_status", "N/A"))),
+            ("Trạng Thái Payout:", p_label),
             ("Phương Thức Thanh Toán:", str(self.data.get("payment_method", "N/A"))),
             ("Khai Báo Thuế (Tax):", tax_label),
             ("Cập Nhật Lần Cuối:", str(self.data.get("checked_at", "N/A"))),
@@ -387,9 +399,13 @@ class MonetizationDetailModal(ctk.CTkToplevel):
         if k_st == "APPROVED":
             k_display_str = "🟢 ĐÃ KYC (APPROVED)"
         elif k_st == "PENDING":
-            k_display_str = "🟡 ĐANG CHỜ DUYỆT"
+            k_display_str = "🟡 ĐANG CHỜ DUYỆT (In Review)"
+        elif k_st == "RESUBMIT":
+            k_display_str = "🔴 CẦN NỘP LẠI (Lỗi Giấy Tờ / POA)"
+        elif k_st == "WARNING":
+            k_display_str = "🟠 CẦN KIỂM TRA (Warning)"
         elif k_st == "REJECTED":
-            k_display_str = "🔴 BỊ TỪ CHỐI (Cần nộp lại)"
+            k_display_str = "🔴 BỊ TỪ CHỐI"
         elif k_st == "Cookie Die":
             k_display_str = "🔴 Cookie Die"
         else:

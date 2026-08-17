@@ -1,4 +1,4 @@
-__version__ = "1.0.18"
+__version__ = "1.0.19"
 RESOURCE_RELEASE_VERSION = "1.0.8"
 APP_NAME = "TikTokAutoUploader"
 RELEASE_ASSET_PREFIX = "DONGLAO-TIKTOK-v"
@@ -13,13 +13,5 @@ RESOURCE_ASSETS = {
         "validate": [
             "Browser/chrome-win64/chrome.exe",
         ],
-    },
-    "ngrok.exe": {
-        "asset": "ngrok.exe",
-        "type": "file",
-    },
-    "service_account.json": {
-        "asset": "service_account.json",
-        "type": "file",
     },
 }
