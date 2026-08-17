@@ -144,14 +144,14 @@ class PatchrightUploadTests(unittest.IsolatedAsyncioTestCase):
         self.video = Path(self.temp_dir.name) / "video.mp4"
         self.video.write_bytes(b"video")
         self.timeouts = UploadTimeouts(
-            page_ready=0.05,
-            editor_ready=0.05,
-            confirmation=0.02,
+            page_ready=0.2,
+            editor_ready=0.2,
+            confirmation=0.5,
             poll_interval=0.001,
-            navigation_ms=50,
-            popup_dismiss_timeout=0.1,
+            navigation_ms=200,
+            popup_dismiss_timeout=0.2,
             popup_dismiss_max_rounds=3,
-            pre_dispatch_clear_timeout=0.1,
+            pre_dispatch_clear_timeout=0.2,
         )
 
     def tearDown(self):

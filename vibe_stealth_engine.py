@@ -1,5 +1,5 @@
 """
-vibe_stealth_engine.py - VIBE Independent Anti-Detect & Stealth Injection Engine.
+stealth_engine.py - DONGLAO-TIKTOK Native Anti-Detect & Stealth Injection Engine.
 
 Engine anti-detect thuần JavaScript / CDP không phụ thuộc vào bất kỳ thư viện DRM
 hoặc binary C++ bên thứ 3 nào. Tự động giả lập Canvas, Audio, WebGL, Client Hints,
@@ -32,7 +32,7 @@ def generate_stealth_js(config: Optional[Dict[str, Any]] = None) -> str:
     - Giả lập window.chrome và Permissions API.
     """
     config = config or {}
-    account_uuid = str(config.get("account_uuid") or config.get("profile_name") or "default_vibe_profile")
+    account_uuid = str(config.get("account_uuid") or config.get("profile_name") or "default_profile")
     
     canvas_seed = generate_deterministic_seed(account_uuid, "canvas")
     audio_seed = generate_deterministic_seed(account_uuid, "audio")
@@ -48,8 +48,8 @@ def generate_stealth_js(config: Optional[Dict[str, Any]] = None) -> str:
 
     js_template = f"""
 (() => {{
-    if (window.__vibe_stealth_applied__) return;
-    window.__vibe_stealth_applied__ = true;
+    if (window.__donglao_stealth_applied__) return;
+    window.__donglao_stealth_applied__ = true;
 
     // 1. Loại bỏ navigator.webdriver
     try {{

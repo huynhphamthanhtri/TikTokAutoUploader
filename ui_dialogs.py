@@ -211,8 +211,8 @@ class MonetizationDetailModal(ctk.CTkToplevel):
     def __init__(self, parent: Any, profile_name: str, snapshot_data: Dict[str, Any]):
         super().__init__(parent)
         self.title(f"Chi Tiết Thu Nhập & Payout: {profile_name}")
-        self.geometry("540x580")
-        self.minsize(480, 480)
+        self.geometry("640x740")
+        self.minsize(580, 580)
         self.transient(parent)
         self.grab_set()
 
@@ -220,11 +220,11 @@ class MonetizationDetailModal(ctk.CTkToplevel):
         self.data = snapshot_data or {}
 
         container = ctk.CTkFrame(self, fg_color="transparent")
-        container.pack(fill="both", expand=True, padx=16, pady=14)
+        container.pack(fill="both", expand=True, padx=14, pady=12)
 
         # Header Title
         head = ctk.CTkFrame(container, fg_color="transparent")
-        head.pack(fill="x", pady=(0, 10))
+        head.pack(fill="x", pady=(0, 8))
 
         ctk.CTkLabel(
             head,
@@ -244,48 +244,186 @@ class MonetizationDetailModal(ctk.CTkToplevel):
 
         # Scrollable content area
         scroll = ctk.CTkScrollableFrame(container, fg_color="transparent")
-        scroll.pack(fill="both", expand=True, pady=(0, 10))
+        scroll.pack(fill="both", expand=True, pady=(0, 8))
+
+        # Banner alert if Cookie Die / Error
+        if self.data.get("status") == "COOKIE_EXPIRED" or "cookie die" in str(self.data.get("payout_status", "")).lower():
+            err_box = ctk.CTkFrame(scroll, corner_radius=8, fg_color="#fef2f2", border_width=1, border_color="#f87171")
+            err_box.pack(fill="x", pady=(0, 8))
+            ctk.CTkLabel(
+                err_box,
+                text="🔴 CẢNH BÁO: Cookie phiên làm việc đã hết hạn (Cookie Die)!\nKhông thể kết nối máy chủ TikTok. Vui lòng mở trình duyệt và đăng nhập lại TikTok Studio.",
+                font=UIThemeTokens.FONT_BODY,
+                text_color="#b91c1c",
+                justify="left",
+            ).pack(padx=12, pady=8, anchor="w")
 
         # 1. Hero Card: Balance & Next Payout Date
         hero = ctk.CTkFrame(scroll, corner_radius=10, fg_color=UIThemeTokens.BG_CARD, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
         hero.pack(fill="x", pady=(0, 8))
 
         hero_inner = ctk.CTkFrame(hero, fg_color="transparent")
-        hero_inner.pack(fill="x", padx=14, pady=12)
+        hero_inner.pack(fill="x", padx=14, pady=10)
 
         ctk.CTkLabel(hero_inner, text="Số Dư Khả Dụng (Estimated Amount):", font=UIThemeTokens.FONT_SUBTITLE, text_color=UIThemeTokens.TEXT_MUTED).pack(anchor="w")
 
-        bal_val = self.data.get("balance", 0.0)
+        bal_val = float(self.data.get("balance", 0.0) or 0.0)
         sym = self.data.get("currency_symbol", "$")
-        ctk.CTkLabel(hero_inner, text=f"{sym}{bal_val:,.2f}", font=("Segoe UI Semibold", 26), text_color=UIThemeTokens.STATUS_LIVE).pack(anchor="w", pady=(2, 4))
+        ctk.CTkLabel(hero_inner, text=f"{sym}{bal_val:,.2f}", font=("Segoe UI Semibold", 24), text_color=UIThemeTokens.STATUS_LIVE).pack(anchor="w", pady=(2, 4))
 
         meta_row = ctk.CTkFrame(hero_inner, fg_color="transparent")
         meta_row.pack(fill="x")
         next_date = self.data.get("next_payout_date", "N/A")
+        rew_est = self.data.get("rewards_estimated", "$0.00")
         ctk.CTkLabel(meta_row, text=f"📅 Ngày Payout kế tiếp: {next_date}", font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_MUTED).pack(side="left")
+        ctk.CTkLabel(meta_row, text=f"🎁 Quỹ tác giả: {rew_est}", font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_MUTED).pack(side="right")
 
-        # 2. General / KYC / PTTT Summary Card
-        sec_info = ctk.CTkFrame(scroll, corner_radius=10, fg_color=UIThemeTokens.BG_CARD, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
-        sec_info.pack(fill="x", pady=(0, 8))
+        # 2. Quỹ Tác Giả & Tình Trạng Kiếm Tiền (CRP)
+        sec_crp = ctk.CTkFrame(scroll, corner_radius=10, fg_color=UIThemeTokens.BG_CARD, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+        sec_crp.pack(fill="x", pady=(0, 8))
 
-        info_inner = ctk.CTkFrame(sec_info, fg_color="transparent")
-        info_inner.pack(fill="x", padx=14, pady=10)
+        crp_inner = ctk.CTkFrame(sec_crp, fg_color="transparent")
+        crp_inner.pack(fill="x", padx=14, pady=10)
 
-        rows = [
-            ("Trạng Thái Payout:", str(self.data.get("payout_status", "N/A"))),
-            ("Phương Thức Thanh Toán:", str(self.data.get("payment_method", "N/A"))),
-            ("Xác Minh Thuế / KYC:", str(self.data.get("kyc_status", "N/A"))),
-            ("Quỹ Tác Giả (Creative Rewards):", str(self.data.get("rewards_estimated", "N/A"))),
-            ("Cập Nhật Gần Nhất:", str(self.data.get("checked_at", "N/A"))),
+        ctk.CTkLabel(crp_inner, text="🌟 Quỹ Tác Giả & Tình Trạng Kiếm Tiền (Creator Rewards - CRP):", font=UIThemeTokens.FONT_BUTTON, text_color=UIThemeTokens.TEXT_PRIMARY).pack(anchor="w", pady=(0, 4))
+
+        crp_st = self.data.get("crp_status", "NOT_STARTED")
+        crp_display = self.data.get("crp_display", "Chưa kiểm tra")
+        f_cnt = int(self.data.get("crp_followers", 0) or 0)
+        f_th = int(self.data.get("crp_followers_threshold", 10000) or 10000)
+        v_cnt = int(self.data.get("crp_views", 0) or 0)
+        v_th = int(self.data.get("crp_views_threshold", 100000) or 100000)
+        all_met = bool(self.data.get("crp_all_met", False))
+
+        f_icon = "✅ Đạt" if f_cnt >= f_th > 0 else "❌ Chưa đủ"
+        v_icon = "✅ Đạt" if v_cnt >= v_th > 0 else "❌ Chưa đủ"
+        can_apply_str = "🟢 Đủ điều kiện (Có thể gửi đơn)" if all_met else "Chưa đủ điều kiện"
+
+        st_label = crp_display
+        if crp_st == "TKTBM":
+            st_label = "🔴 TKTBM (Tắt Kiếm Tiền Bảo Mật)"
+
+        crp_rows = [
+            ("Tình Trạng Hiện Tại:", st_label),
+            ("Số Follower Hợp Lệ:", f"{f_cnt:,} / {f_th:,} ({f_icon})"),
+            ("Số View Hợp Lệ (30 ngày):", f"{v_cnt:,} / {v_th:,} ({v_icon})"),
+            ("Có Thể Gửi Đơn Duyệt:", can_apply_str),
         ]
 
-        for label, val in rows:
-            r = ctk.CTkFrame(info_inner, fg_color="transparent")
-            r.pack(fill="x", pady=2)
-            ctk.CTkLabel(r, text=label, font=UIThemeTokens.FONT_BUTTON, text_color=UIThemeTokens.TEXT_MUTED, width=190, anchor="w").pack(side="left")
-            ctk.CTkLabel(r, text=val, font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_PRIMARY, anchor="w").pack(side="left", fill="x", expand=True)
+        if self.data.get("crp_punishment"):
+            crp_rows.append(("Tiêu Đề Vi Phạm:", str(self.data.get("crp_punishment"))))
 
-        # 3. Pending Earnings (Nếu có)
+        if self.data.get("crp_reapply_date"):
+            crp_rows.append(("Ngày Được Đăng Ký Lại:", str(self.data.get("crp_reapply_date"))))
+
+        rpm_val = float(self.data.get("crp_rpm", 0.0) or 0.0)
+        qviews_val = int(self.data.get("crp_qualified_views", 0) or 0)
+        if rpm_val > 0 or qviews_val > 0:
+            crp_rows.append(("Chỉ Số RPM:", f"${rpm_val:.2f}"))
+            crp_rows.append(("Lượt Xem Tính Tiền:", f"{qviews_val:,}"))
+
+        for label, val in crp_rows:
+            r = ctk.CTkFrame(crp_inner, fg_color="transparent")
+            r.pack(fill="x", pady=1)
+            ctk.CTkLabel(r, text=label, font=UIThemeTokens.FONT_BUTTON, text_color=UIThemeTokens.TEXT_MUTED, width=195, anchor="w").pack(side="left")
+            ctk.CTkLabel(r, text=str(val), font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_PRIMARY, anchor="w").pack(side="left", fill="x", expand=True)
+
+        # Punishment description alert box
+        p_desc = self.data.get("crp_punishment_desc")
+        if p_desc:
+            p_box = ctk.CTkFrame(crp_inner, fg_color="#fff1f2", corner_radius=6, border_width=1, border_color="#fda4af")
+            p_box.pack(fill="x", pady=(6, 2))
+            ctk.CTkLabel(
+                p_box,
+                text=f"⚠️ Chi Tiết Vi Phạm:\n{p_desc}",
+                font=UIThemeTokens.FONT_BODY,
+                text_color="#9f1239",
+                justify="left",
+                wraplength=560,
+            ).pack(padx=10, pady=6, anchor="w")
+
+        # 3. Phương Thức Thanh Toán (PTTT) & Khai Báo Thuế (Tax)
+        sec_pay_tax = ctk.CTkFrame(scroll, corner_radius=10, fg_color=UIThemeTokens.BG_CARD, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+        sec_pay_tax.pack(fill="x", pady=(0, 8))
+
+        pt_inner = ctk.CTkFrame(sec_pay_tax, fg_color="transparent")
+        pt_inner.pack(fill="x", padx=14, pady=10)
+
+        ctk.CTkLabel(pt_inner, text="💳 Thanh Toán & Khai Báo Thuế (Payout & Tax Compliance):", font=UIThemeTokens.FONT_BUTTON, text_color=UIThemeTokens.TEXT_PRIMARY).pack(anchor="w", pady=(0, 4))
+
+        tax_st = str(self.data.get("tax_status", "NOT_STARTED"))
+        if tax_st in ("TAX_VERIFIED", "APPROVED"):
+            tax_label = "🟢 ĐÃ KHAI THUẾ (Tax Verified)"
+        elif tax_st in ("TAX_PENDING", "PENDING"):
+            tax_label = "🟡 ĐANG XÉT DUYỆT THUẾ"
+        elif tax_st == "Cookie Die":
+            tax_label = "🔴 Cookie Die"
+        else:
+            tax_label = "⚪ CHƯA KHAI THUẾ"
+
+        pay_rows = [
+            ("Trạng Thái Payout:", str(self.data.get("payout_status", "N/A"))),
+            ("Phương Thức Thanh Toán:", str(self.data.get("payment_method", "N/A"))),
+            ("Khai Báo Thuế (Tax):", tax_label),
+            ("Cập Nhật Lần Cuối:", str(self.data.get("checked_at", "N/A"))),
+        ]
+
+        for label, val in pay_rows:
+            r = ctk.CTkFrame(pt_inner, fg_color="transparent")
+            r.pack(fill="x", pady=1)
+            ctk.CTkLabel(r, text=label, font=UIThemeTokens.FONT_BUTTON, text_color=UIThemeTokens.TEXT_MUTED, width=195, anchor="w").pack(side="left")
+            ctk.CTkLabel(r, text=str(val), font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_PRIMARY, anchor="w").pack(side="left", fill="x", expand=True)
+
+        # 4. Xác Minh Danh Tính (KYC Identity Compliance)
+        sec_kyc = ctk.CTkFrame(scroll, corner_radius=10, fg_color=UIThemeTokens.BG_CARD, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+        sec_kyc.pack(fill="x", pady=(0, 8))
+
+        kyc_inner = ctk.CTkFrame(sec_kyc, fg_color="transparent")
+        kyc_inner.pack(fill="x", padx=14, pady=10)
+
+        ctk.CTkLabel(kyc_inner, text="🪪 Xác Minh Danh Tính (KYC Identity):", font=UIThemeTokens.FONT_BUTTON, text_color=UIThemeTokens.TEXT_PRIMARY).pack(anchor="w", pady=(0, 4))
+
+        k_st = str(self.data.get("kyc_status", "NOT_STARTED"))
+        if k_st == "APPROVED":
+            k_display_str = "🟢 ĐÃ KYC (APPROVED)"
+        elif k_st == "PENDING":
+            k_display_str = "🟡 ĐANG CHỜ DUYỆT"
+        elif k_st == "REJECTED":
+            k_display_str = "🔴 BỊ TỪ CHỐI (Cần nộp lại)"
+        elif k_st == "Cookie Die":
+            k_display_str = "🔴 Cookie Die"
+        else:
+            k_display_str = "⚪ CHƯA KYC"
+
+        kyc_rows = [
+            ("Trạng Thái KYC:", k_display_str),
+        ]
+
+        if self.data.get("kyc_full_name"):
+            kyc_rows.append(("Họ Tên Trên Giấy Tờ:", str(self.data.get("kyc_full_name"))))
+
+        if self.data.get("kyc_id_type"):
+            id_t = str(self.data.get("kyc_id_type"))
+            id_c = str(self.data.get("kyc_id_country", ""))
+            id_str = f"{id_t} (Quốc gia: {id_c})" if id_c else id_t
+            kyc_rows.append(("Loại Giấy Tờ:", id_str))
+
+        if self.data.get("kyc_birthday") and str(self.data.get("kyc_birthday")) != "0001-01-01":
+            kyc_rows.append(("Ngày Sinh:", str(self.data.get("kyc_birthday"))))
+
+        if self.data.get("unique_id"):
+            kyc_rows.append(("TikTok Username (@):", f"@{self.data.get('unique_id')}"))
+
+        if self.data.get("tiktok_user_id"):
+            kyc_rows.append(("TikTok User ID (UID):", str(self.data.get("tiktok_user_id"))))
+
+        for label, val in kyc_rows:
+            r = ctk.CTkFrame(kyc_inner, fg_color="transparent")
+            r.pack(fill="x", pady=1)
+            ctk.CTkLabel(r, text=label, font=UIThemeTokens.FONT_BUTTON, text_color=UIThemeTokens.TEXT_MUTED, width=195, anchor="w").pack(side="left")
+            ctk.CTkLabel(r, text=str(val), font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_PRIMARY, anchor="w").pack(side="left", fill="x", expand=True)
+
+        # 4. Pending Earnings (Nếu có)
         pending_list = self.data.get("pending_earnings", [])
         if pending_list:
             sec_pending = ctk.CTkFrame(scroll, corner_radius=10, fg_color=UIThemeTokens.BG_CARD, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)

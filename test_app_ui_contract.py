@@ -107,8 +107,8 @@ class TestAppUIContract(unittest.TestCase):
         # Check Treeview columns
         tree = widgets["tree"]
         expected_columns = (
-            'name', 'activity', 'browser', 'status', 'tiktok', 'proxy',
-            'region', 'upload', 'last_error', 'folder', 'chrome', 'headless', 'limit'
+            'name', 'tiktok', 'cookie_st', 'activity', 'monetization',
+            'proxy_region', 'upload', 'folder', 'last_error'
         )
         self.assertEqual(tree["columns"], expected_columns)
 

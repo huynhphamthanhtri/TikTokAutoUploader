@@ -161,14 +161,14 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     logo_frame.pack(fill="x", padx=14, pady=(16, 12))
     ctk.CTkLabel(
         logo_frame,
-        text="🚀 VIBE AUTO UPLOAD",
+        text="DONGLAO-TIKTOK",
         font=("Segoe UI Semibold", 13),
         text_color="#38bdf8",
         anchor="w",
     ).pack(anchor="w")
     ctk.CTkLabel(
         logo_frame,
-        text="TikTok Studio Suite",
+        text="Automation & Studio Suite",
         font=("Segoe UI", 10),
         text_color="#64748b",
         anchor="w",
@@ -500,6 +500,51 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     btn_stop_all.pack(side="left", padx=3)
     widgets["btn_stop_all"] = btn_stop_all
 
+    # Filter Chips Row for Profiles
+    filter_chips_frame = ctk.CTkFrame(profiles_workspace, fg_color="transparent")
+    filter_chips_frame.pack(fill="x", pady=(0, 6))
+
+    active_chip_var = state.get("active_filter_chip", ctk.StringVar(value="ALL"))
+    state["active_filter_chip"] = active_chip_var
+
+    chip_buttons: Dict[str, ctk.CTkButton] = {}
+    chips = [
+        ("ALL", "Tất Cả"),
+        ("COOKIE_LIVE", "🟢 Cookie Sống"),
+        ("COOKIE_DIE", "🔴 Cookie Die"),
+        ("NO_COOKIE", "⚪ Chưa Có Cookie"),
+        ("KYC_OK", "🟢 Đã KYC"),
+        ("TAX_OK", "🟢 Đã Khai Thuế"),
+        ("TKTBM", "🔴 TKTBM (Bảo Mật)"),
+        ("RUNNING", "⚡ Đang Chạy"),
+    ]
+
+    def _select_filter_chip(chip_key: str) -> None:
+        active_chip_var.set(chip_key)
+        for key, btn in chip_buttons.items():
+            if key == chip_key:
+                btn.configure(fg_color="#2563eb", text_color="#ffffff")
+            else:
+                btn.configure(fg_color="#e2e8f0", text_color="#334155")
+        if "apply_filter_chip" in handlers:
+            handlers["apply_filter_chip"](chip_key)
+
+    for key, label in chips:
+        btn = ctk.CTkButton(
+            filter_chips_frame,
+            text=label,
+            height=26,
+            font=("Segoe UI Semibold", 9),
+            corner_radius=13,
+            fg_color="#2563eb" if key == "ALL" else "#e2e8f0",
+            text_color="#ffffff" if key == "ALL" else "#334155",
+            hover_color="#3b82f6" if key == "ALL" else "#cbd5e1",
+            command=lambda k=key: _select_filter_chip(k),
+        )
+        btn.pack(side="left", padx=2)
+        chip_buttons[key] = btn
+    widgets["filter_chip_buttons"] = chip_buttons
+
     # Profile Treeview Table Card (layout weight=78, weight=22)
     table_card = build_card(profiles_workspace, "Danh sách hồ sơ")
     table_card.pack(fill="both", expand=True, pady=(0, 6))
@@ -512,37 +557,29 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     tree = ttk.Treeview(
         table_frame,
         style="Modern.Treeview",
-        columns=('name', 'activity', 'browser', 'status', 'tiktok', 'proxy', 'region', 'upload', 'last_error', 'folder', 'chrome', 'headless', 'limit'),
+        columns=('name', 'tiktok', 'cookie_st', 'activity', 'monetization', 'proxy_region', 'upload', 'folder', 'last_error'),
         show="headings",
         selectmode="extended",
     )
-    tree.heading('name', text='Tên', command=lambda: handlers['sort_tree'](tree, 'name', False))
-    tree.heading('activity', text='Hoạt động', command=lambda: handlers['sort_tree'](tree, 'activity', False))
-    tree.heading('browser', text='Browser', command=lambda: handlers['sort_tree'](tree, 'browser', False))
-    tree.heading('status', text='Sức khỏe', command=lambda: handlers['sort_tree'](tree, 'status', False))
+    tree.heading('name', text='Tên Hồ Sơ', command=lambda: handlers['sort_tree'](tree, 'name', False))
     tree.heading('tiktok', text='TikTok ID', command=lambda: handlers['sort_tree'](tree, 'tiktok', False))
-    tree.heading('proxy', text='Proxy', command=lambda: handlers['sort_tree'](tree, 'proxy', False))
-    tree.heading('region', text='Khu vực', command=lambda: handlers['sort_tree'](tree, 'region', False))
-    tree.heading('upload', text='Đăng video', command=lambda: handlers['sort_tree'](tree, 'upload', False))
-    tree.heading('last_error', text='Lỗi gần nhất', command=lambda: handlers['sort_tree'](tree, 'last_error', False))
-    tree.heading('folder', text='Folder', command=lambda: handlers['sort_tree'](tree, 'folder', False))
-    tree.heading('chrome', text='User Data', command=lambda: handlers['sort_tree'](tree, 'chrome', False))
-    tree.heading('headless', text='Headless', command=lambda: handlers['sort_tree'](tree, 'headless', False))
-    tree.heading('limit', text='Limit', command=lambda: handlers['sort_tree'](tree, 'limit', False))
+    tree.heading('cookie_st', text='Cookie', command=lambda: handlers['sort_tree'](tree, 'cookie_st', False))
+    tree.heading('activity', text='Trạng Thái', command=lambda: handlers['sort_tree'](tree, 'activity', False))
+    tree.heading('monetization', text='Kiếm Tiền / KYC', command=lambda: handlers['sort_tree'](tree, 'monetization', False))
+    tree.heading('proxy_region', text='Proxy / Vùng', command=lambda: handlers['sort_tree'](tree, 'proxy_region', False))
+    tree.heading('upload', text='Tiến Độ Đăng', command=lambda: handlers['sort_tree'](tree, 'upload', False))
+    tree.heading('folder', text='Thư Mục Video', command=lambda: handlers['sort_tree'](tree, 'folder', False))
+    tree.heading('last_error', text='Chi Tiết Lỗi', command=lambda: handlers['sort_tree'](tree, 'last_error', False))
 
     tree.column('name', width=140, minwidth=100, stretch=False)
-    tree.column('activity', width=120, minwidth=105, anchor='center', stretch=False)
-    tree.column('browser', width=130, minwidth=115, anchor='center', stretch=False)
-    tree.column('status', width=120, minwidth=100, anchor='center', stretch=False)
-    tree.column('tiktok', width=110, minwidth=90, anchor='center', stretch=False)
-    tree.column('proxy', width=100, minwidth=85, anchor='center', stretch=False)
-    tree.column('region', width=80, minwidth=60, anchor='center', stretch=False)
-    tree.column('upload', width=115, minwidth=100, anchor='center', stretch=False)
-    tree.column('last_error', width=160, minwidth=120, stretch=False)
-    tree.column('folder', width=0, minwidth=0, stretch=False)
-    tree.column('chrome', width=0, minwidth=0, stretch=False)
-    tree.column('headless', width=0, minwidth=0, stretch=False)
-    tree.column('limit', width=0, minwidth=0, stretch=False)
+    tree.column('tiktok', width=125, minwidth=90, anchor='center', stretch=False)
+    tree.column('cookie_st', width=105, minwidth=85, anchor='center', stretch=False)
+    tree.column('activity', width=110, minwidth=95, anchor='center', stretch=False)
+    tree.column('monetization', width=130, minwidth=100, anchor='center', stretch=False)
+    tree.column('proxy_region', width=140, minwidth=100, anchor='center', stretch=False)
+    tree.column('upload', width=115, minwidth=95, anchor='center', stretch=False)
+    tree.column('folder', width=130, minwidth=80, stretch=False)
+    tree.column('last_error', width=170, minwidth=100, stretch=True)
 
     tree.grid(row=0, column=0, sticky="nsew")
     vsb = ttk.Scrollbar(table_frame, style='Vertical.TScrollbar', orient='vertical', command=tree.yview)
@@ -598,23 +635,41 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     monetization_workspace.grid(row=0, column=0, sticky="nsew")
     monetization_workspace.grid_remove()
 
-    # Monetization Summary Row (3 Cards)
+    # Monetization Summary Row (5 KPI Cards)
     mono_summary_row = ctk.CTkFrame(monetization_workspace, fg_color="transparent")
     mono_summary_row.pack(fill="x", pady=(0, 8))
-    mono_summary_row.grid_columnconfigure((0, 1, 2), weight=1, uniform="mono_stat")
+    mono_summary_row.grid_columnconfigure((0, 1, 2, 3, 4), weight=1, uniform="mono_stat")
 
     mono_total_balance_var = state.get("mono_total_balance_var", ctk.StringVar(value="$0.00"))
+    mono_crp_count_var = state.get("mono_crp_count_var", ctk.StringVar(value="0 Acc"))
+    mono_kyc_count_var = state.get("mono_kyc_count_var", ctk.StringVar(value="0 Acc"))
+    mono_tax_count_var = state.get("mono_tax_count_var", ctk.StringVar(value="0 Acc"))
+    mono_tktbm_count_var = state.get("mono_tktbm_count_var", ctk.StringVar(value="0 Acc"))
     mono_ready_count_var = state.get("mono_ready_count_var", ctk.StringVar(value="0"))
     mono_action_needed_var = state.get("mono_action_needed_var", ctk.StringVar(value="0"))
 
-    card_m_balance = SummaryCard(mono_summary_row, title="Tổng Số Dư Dàn ($)", value_var=mono_total_balance_var, accent_color=UIThemeTokens.STATUS_LIVE)
-    card_m_balance.grid(row=0, column=0, padx=(0, 4), sticky="nsew")
+    card_m_balance = SummaryCard(mono_summary_row, title="Tổng Số Dư Khả Dụng", value_var=mono_total_balance_var, accent_color="#10b981")
+    card_m_balance.grid(row=0, column=0, padx=(0, 3), sticky="nsew")
 
-    card_m_ready = SummaryCard(mono_summary_row, title="Sẵn Sàng Rút (Payout Ready)", value_var=mono_ready_count_var, accent_color=UIThemeTokens.ACCENT_PRIMARY)
-    card_m_ready.grid(row=0, column=1, padx=4, sticky="nsew")
+    card_m_crp = SummaryCard(mono_summary_row, title="Quỹ Kiếm Tiền (CRP)", value_var=mono_crp_count_var, accent_color="#3b82f6")
+    card_m_crp.grid(row=0, column=1, padx=3, sticky="nsew")
 
-    card_m_action = SummaryCard(mono_summary_row, title="Cần Xử Lý (Chưa KYC / PTTT)", value_var=mono_action_needed_var, accent_color=UIThemeTokens.STATUS_WARN)
-    card_m_action.grid(row=0, column=2, padx=(4, 0), sticky="nsew")
+    card_m_kyc = SummaryCard(mono_summary_row, title="Đã KYC Danh Tính", value_var=mono_kyc_count_var, accent_color="#8b5cf6")
+    card_m_kyc.grid(row=0, column=2, padx=3, sticky="nsew")
+
+    card_m_tax = SummaryCard(mono_summary_row, title="Đã Khai Báo Thuế", value_var=mono_tax_count_var, accent_color="#06b6d4")
+    card_m_tax.grid(row=0, column=3, padx=3, sticky="nsew")
+
+    card_m_tktbm = SummaryCard(mono_summary_row, title="TKTBM / Cảnh Báo", value_var=mono_tktbm_count_var, accent_color="#ef4444")
+    card_m_tktbm.grid(row=0, column=4, padx=(3, 0), sticky="nsew")
+
+    widgets["mono_summary_cards"] = {
+        "balance": card_m_balance,
+        "crp": card_m_crp,
+        "kyc": card_m_kyc,
+        "tax": card_m_tax,
+        "tktbm": card_m_tktbm,
+    }
 
     # Monetization Toolbar
     mono_toolbar = ctk.CTkFrame(monetization_workspace, corner_radius=10, fg_color=UIThemeTokens.BG_CARD, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
@@ -656,6 +711,69 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
         command=handlers.get('view_monetization_details', lambda: None),
     ).pack(side="left", padx=3)
 
+    ctk.CTkButton(
+        mono_tb_inner,
+        text="🚀 Gửi Duyệt CRP",
+        width=125,
+        height=32,
+        font=UIThemeTokens.FONT_BUTTON,
+        fg_color="#10b981",
+        hover_color="#059669",
+        command=handlers.get('apply_crp_selected', lambda: None),
+    ).pack(side="left", padx=3)
+
+    mono_status_var = state.get("mono_status_var", ctk.StringVar(value=""))
+    ctk.CTkLabel(
+        mono_tb_inner,
+        textvariable=mono_status_var,
+        font=UIThemeTokens.FONT_BODY,
+        text_color=UIThemeTokens.TEXT_MUTED,
+        anchor="e",
+    ).pack(side="right", padx=10)
+
+    # Monetization Filter Chips Row
+    mono_filter_chips_frame = ctk.CTkFrame(monetization_workspace, fg_color="transparent")
+    mono_filter_chips_frame.pack(fill="x", pady=(0, 6))
+
+    mono_active_chip_var = state.get("mono_active_filter_chip", ctk.StringVar(value="ALL"))
+    state["mono_active_filter_chip"] = mono_active_chip_var
+
+    mono_chip_buttons: Dict[str, ctk.CTkButton] = {}
+    mono_chips = [
+        ("ALL", "Tất Cả"),
+        ("PAYOUT_READY", "🟢 Sẵn Sàng Rút"),
+        ("CRP_ACTIVE", "🏆 Đang Kiếm Tiền"),
+        ("TAX_OK", "🟢 Đã Khai Thuế"),
+        ("KYC_OK", "🟢 Đã KYC"),
+        ("TKTBM", "🔴 TKTBM (Bảo Mật)"),
+    ]
+
+    def _select_mono_filter_chip(chip_key: str) -> None:
+        mono_active_chip_var.set(chip_key)
+        for key, btn in mono_chip_buttons.items():
+            if key == chip_key:
+                btn.configure(fg_color="#2563eb", text_color="#ffffff")
+            else:
+                btn.configure(fg_color="#e2e8f0", text_color="#334155")
+        if "apply_mono_filter_chip" in handlers:
+            handlers["apply_mono_filter_chip"](chip_key)
+
+    for key, label in mono_chips:
+        btn = ctk.CTkButton(
+            mono_filter_chips_frame,
+            text=label,
+            height=26,
+            font=("Segoe UI Semibold", 9),
+            corner_radius=13,
+            fg_color="#2563eb" if key == "ALL" else "#e2e8f0",
+            text_color="#ffffff" if key == "ALL" else "#334155",
+            hover_color="#3b82f6" if key == "ALL" else "#cbd5e1",
+            command=lambda k=key: _select_mono_filter_chip(k),
+        )
+        btn.pack(side="left", padx=2)
+        mono_chip_buttons[key] = btn
+    widgets["mono_filter_chip_buttons"] = mono_chip_buttons
+
     # Monetization Treeview Table Card
     mono_card = build_card(monetization_workspace, "Trung Tâm Thu Nhập & Payout (Monetization)")
     mono_card.pack(fill="both", expand=True, pady=(0, 6))
@@ -668,27 +786,31 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     mono_tree = ttk.Treeview(
         mono_body,
         style="Modern.Treeview",
-        columns=('name', 'tiktok', 'region', 'balance', 'payout_status', 'kyc_status', 'payment_method', 'freshness'),
+        columns=('name', 'tiktok', 'region', 'crp_status', 'balance', 'payout_status', 'tax_status', 'kyc_status', 'payment_method', 'freshness'),
         show="headings",
         selectmode="extended",
     )
     mono_tree.heading('name', text='Tên Profile')
     mono_tree.heading('tiktok', text='TikTok ID')
     mono_tree.heading('region', text='Khu Vực')
+    mono_tree.heading('crp_status', text='Quỹ Kiếm Tiền (CRP)')
     mono_tree.heading('balance', text='Số Dư ($)')
     mono_tree.heading('payout_status', text='Trạng Thái Payout')
+    mono_tree.heading('tax_status', text='Khai Báo Thuế')
     mono_tree.heading('kyc_status', text='Xác Minh KYC')
     mono_tree.heading('payment_method', text='Phương Thức PTTT')
-    mono_tree.heading('freshness', text='Lần Cập Nhật')
+    mono_tree.heading('freshness', text='Cập Nhật Lúc')
 
-    mono_tree.column('name', width=140, minwidth=100, stretch=False)
-    mono_tree.column('tiktok', width=120, minwidth=90, anchor='center', stretch=False)
-    mono_tree.column('region', width=80, minwidth=60, anchor='center', stretch=False)
-    mono_tree.column('balance', width=110, minwidth=90, anchor='center', stretch=False)
-    mono_tree.column('payout_status', width=130, minwidth=110, anchor='center', stretch=False)
-    mono_tree.column('kyc_status', width=120, minwidth=100, anchor='center', stretch=False)
-    mono_tree.column('payment_method', width=170, minwidth=120, stretch=False)
-    mono_tree.column('freshness', width=140, minwidth=110, anchor='center', stretch=False)
+    mono_tree.column('name', width=115, minwidth=85, anchor="w")
+    mono_tree.column('tiktok', width=115, minwidth=85, anchor="w")
+    mono_tree.column('region', width=60, minwidth=45, anchor="center")
+    mono_tree.column('crp_status', width=160, minwidth=110, anchor="center")
+    mono_tree.column('balance', width=80, minwidth=65, anchor="e")
+    mono_tree.column('payout_status', width=115, minwidth=85, anchor="center")
+    mono_tree.column('tax_status', width=115, minwidth=85, anchor="center")
+    mono_tree.column('kyc_status', width=115, minwidth=85, anchor="center")
+    mono_tree.column('payment_method', width=155, minwidth=100, anchor="w")
+    mono_tree.column('freshness', width=125, minwidth=85, anchor="center")
 
     mono_tree.grid(row=0, column=0, sticky="nsew")
     mono_vsb = ttk.Scrollbar(mono_body, style='Vertical.TScrollbar', orient='vertical', command=mono_tree.yview)
@@ -792,23 +914,41 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     status_text.tag_configure('ERROR', foreground='red')
     widgets['status_text'] = status_text
 
-    # Context Menu
+    # Super Context Menu for Profiles Tree
     ctx_menu = Menu(root, tearoff=0)
-    ctx_menu.add_command(label="Khởi động (Đã chọn)", command=handlers['start_selected_batch'])
-    ctx_menu.add_command(label="Dừng (Đã chọn)", command=handlers['stop_selected_batch'])
-    ctx_menu.add_separator()
-    ctx_menu.add_command(label="Copy Folder Video", command=handlers['copy_folder_path'])
-    ctx_menu.add_command(label="Copy Link Kênh", command=handlers['copy_channel_link'])
     ctx_menu.add_command(label="Mở trình duyệt", command=handlers['open_browser'])
     ctx_menu.add_command(label="Kiểm tra Cookie (Đã chọn)", command=handlers['check_cookie_live'])
     ctx_menu.add_command(label="Kiểm tra thông tin TikTok", command=handlers['inspect_tiktok_account'])
-    ctx_menu.add_command(label="Lấy Cookie TikTok", command=handlers['get_tiktok_cookies'])
-    ctx_menu.add_command(label="Reset Browser", command=handlers['clean_browser'])
-    ctx_menu.add_command(label="Xem chi tiết", command=handlers['view_profile_details'])
+    ctx_menu.add_command(label="💰 Kiểm tra Thu nhập / KYC / CRP", command=handlers.get('check_monetization_selected', handlers.get('refresh_selected_monetization', lambda: None)))
+    ctx_menu.add_separator()
     ctx_menu.add_command(label="Sửa", command=handlers['edit_profile'])
+    ctx_menu.add_command(label="Xem chi tiết", command=handlers['view_profile_details'])
+    ctx_menu.add_command(label="📂 Mở thư mục Profile (User Data)", command=handlers.get('open_profile_folder', lambda: None))
+    ctx_menu.add_command(label="Copy Folder Video", command=handlers['copy_folder_path'])
+    ctx_menu.add_command(label="Copy Link Kênh", command=handlers['copy_channel_link'])
+    ctx_menu.add_separator()
+    ctx_menu.add_command(label="📋 Sao chép TikTok UID", command=handlers.get('copy_tiktok_uid', lambda: None))
+    ctx_menu.add_command(label="📋 Sao chép Chuỗi Proxy", command=handlers.get('copy_proxy_string', lambda: None))
+    ctx_menu.add_command(label="Lấy Cookie TikTok", command=handlers['get_tiktok_cookies'])
+    ctx_menu.add_separator()
+    ctx_menu.add_command(label="Khởi động (Đã chọn)", command=handlers['start_selected_batch'])
+    ctx_menu.add_command(label="Dừng (Đã chọn)", command=handlers['stop_selected_batch'])
+    ctx_menu.add_separator()
+    ctx_menu.add_command(label="Reset Browser", command=handlers['clean_browser'])
     ctx_menu.add_command(label="Export tài khoản", command=handlers['export_profiles'])
     ctx_menu.add_command(label="Xoá", command=handlers['delete_profile'])
     widgets['ctx_menu'] = ctx_menu
+
+    # Super Context Menu for Monetization Tree
+    mono_ctx_menu = Menu(root, tearoff=0)
+    mono_ctx_menu.add_command(label="🔍 Xem Chi Tiết Toàn Diện (Monetization & KYC)", command=handlers.get('view_monetization_details', lambda: None))
+    mono_ctx_menu.add_command(label="🔄 Kiểm Tra Lại Tài Khoản Này", command=handlers.get('refresh_selected_monetization', lambda: None))
+    mono_ctx_menu.add_command(label="🚀 Gửi Duyệt Quỹ Kiếm Tiền (CRP)", command=handlers.get('apply_crp_selected', lambda: None))
+    mono_ctx_menu.add_separator()
+    mono_ctx_menu.add_command(label="📋 Sao chép TikTok UID", command=handlers.get('copy_tiktok_uid', lambda: None))
+    mono_ctx_menu.add_command(label="📋 Sao chép Phương Thức PTTT", command=handlers.get('copy_payout_method', lambda: None))
+    mono_ctx_menu.add_command(label="📂 Mở Thư Mục Profile", command=handlers.get('open_profile_folder', lambda: None))
+    widgets['mono_ctx_menu'] = mono_ctx_menu
 
     # Status Bar
     status_bar = ctk.CTkFrame(main_area, height=24, fg_color="#e2e8f0", corner_radius=0)

@@ -30,6 +30,7 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox, ttk, StringVar, Menu
 from tkinter.scrolledtext import ScrolledText
 from app_ui import configure_ttk_styles, build_dashboard, classify_log_message
+from ui_components import UIThemeTokens
 from core_helpers import (
     parse_proxy_string,
     parse_cookie,
@@ -83,10 +84,12 @@ from cookie_live_check import (
     CookieCheckState,
     CookieSource,
     CookieCheckResult,
+    CookieCheckMode,
     classify_login_state,
     primary_auth_cookie_names,
     build_summary,
     mask_detail,
+    check_cookie_fast_http,
 )
 import account_session_runner as session_runner
 from tiktok_account_inspection import (
@@ -811,14 +814,11 @@ def _commit_cookie_update(name, cfg, live_cookies, source_label):
         return False
 
 
-def _check_profile_cookie_live(name, claim_id=None, cancel_event=None):
+def _check_profile_cookie_live(name, claim_id=None, cancel_event=None, mode="BROWSER_FULL"):
     """Check live status for one account and keep a live fallback cookie.
 
-    Runs inside a worker thread; never touches Tk directly. Never logs or
-    returns cookie values / proxy credentials. Claims the operation slot
-    (preflight while IDLE) unless a claim_id is already provided, then opens a
-    verified browser session, prefers the persistent profile session, and only
-    imports the saved cookie as a fallback with rollback protection.
+    If mode == "HTTP_FAST": uses check_cookie_fast_http() via Webcast/Passport API with proxy.
+    If mode == "BROWSER_FULL": claims the operation slot, opens verified anti-detect browser session.
     """
     profile = profiles.get(name)
     if profile is None:
@@ -826,6 +826,22 @@ def _check_profile_cookie_live(name, claim_id=None, cancel_event=None):
     cfg = profile['config']
     uuid = ensure_account_uuid(cfg)
     checked_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    if mode == "HTTP_FAST":
+        cookie_raw = cfg.get('cookie_str', '')
+        state, detail, auth_names = check_cookie_fast_http(cookie_raw, proxy_cfg=cfg, timeout=8.0)
+        return CookieCheckResult(
+            account_uuid=uuid,
+            profile_name=name,
+            state=state,
+            source=CookieSource.SAVED_COOKIE,
+            mode=CookieCheckMode.HTTP_FAST,
+            auth_cookie_names=auth_names,
+            checked_at=checked_at,
+            detail=detail,
+            kept_cookies=(state == CookieCheckState.LIVE),
+        )
+
     token = None
     owned = False
     try:
@@ -923,7 +939,7 @@ def _check_profile_cookie_live(name, claim_id=None, cancel_event=None):
 
 
 class CookieCheckDialog:
-    """Batch live-cookie dialog. Runs checks sequentially on a daemon thread."""
+    """Batch live-cookie dialog. Supports Fast HTTP check, Full browser check, and parallel workers."""
 
     def __init__(self, targets):
         self.targets = targets
@@ -933,45 +949,172 @@ class CookieCheckDialog:
         self.cancel_event = threading.Event()
         self.dialog = ctk.CTkToplevel(root)
         self.dialog.title("Kiểm tra Live Cookie")
-        self.dialog.geometry("860x460")
+        self.dialog.geometry("920x520")
+        self.dialog.minsize(780, 420)
         self.dialog.resizable(True, True)
         self.dialog.transient(root)
-        self.summary_var = ctk.StringVar(value=f"Đã chọn: {len(targets)}")
+        self.dialog.configure(fg_color=UIThemeTokens.BG_ROOT)
+
+        self.mode_var = ctk.StringVar(value="HTTP_FAST")
+        self.workers_var = ctk.StringVar(value="3 luồng")
+        self.summary_var = ctk.StringVar(value=f"Đã chọn: {len(targets)} hồ sơ")
+
         self._build_ui()
         self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
         _cookie_check_batch['active'] = True
 
     def _build_ui(self):
-        summary = ctk.CTkLabel(self.dialog, textvariable=self.summary_var, font=("", 14, "bold"), anchor='w')
-        summary.pack(fill='x', padx=12, pady=(10, 6))
-        frame = ctk.CTkFrame(self.dialog, fg_color='transparent')
-        frame.pack(fill='both', expand=True, padx=12, pady=(0, 6))
-        columns = ('name', 'tiktok', 'state', 'source', 'auth', 'time', 'detail')
-        self.table = ttk.Treeview(frame, columns=columns, show='headings', height=14)
+        container = ctk.CTkFrame(self.dialog, fg_color="transparent")
+        container.pack(fill="both", expand=True, padx=14, pady=12)
+
+        # 1. Header Card
+        header_card = ctk.CTkFrame(container, fg_color=UIThemeTokens.BG_CARD, corner_radius=8, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+        header_card.pack(fill="x", pady=(0, 8))
+
+        h_inner = ctk.CTkFrame(header_card, fg_color="transparent")
+        h_inner.pack(fill="x", padx=14, pady=10)
+
+        ctk.CTkLabel(
+            h_inner,
+            text="🍪 Kiểm Tra Trạng Thái Cookie (Batch Live Check)",
+            font=UIThemeTokens.FONT_TITLE,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+            anchor="w",
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            h_inner,
+            text="Kiểm tra trạng thái đăng nhập TikTok siêu tốc qua HTTP API hoặc mô phỏng đầy đủ qua Trình duyệt.",
+            font=UIThemeTokens.FONT_SUBTITLE,
+            text_color=UIThemeTokens.TEXT_MUTED,
+            anchor="w",
+        ).pack(anchor="w", pady=(2, 0))
+
+        # 2. Options Control Bar
+        opt_card = ctk.CTkFrame(container, fg_color=UIThemeTokens.BG_CARD, corner_radius=8, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+        opt_card.pack(fill="x", pady=(0, 8))
+
+        opt_inner = ctk.CTkFrame(opt_card, fg_color="transparent")
+        opt_inner.pack(fill="x", padx=14, pady=8)
+
+        # Mode radio buttons
+        ctk.CTkLabel(opt_inner, text="Chế độ:", font=UIThemeTokens.FONT_BUTTON, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(0, 8))
+        
+        self.radio_fast = ctk.CTkRadioButton(
+            opt_inner,
+            text="⚡ Nhanh (HTTP API ~0.3s/acc)",
+            variable=self.mode_var,
+            value="HTTP_FAST",
+            font=UIThemeTokens.FONT_BODY,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+            command=self._on_mode_change,
+        )
+        self.radio_fast.pack(side="left", padx=(0, 14))
+
+        self.radio_full = ctk.CTkRadioButton(
+            opt_inner,
+            text="🌐 Đầy đủ (Trình duyệt Anti-detect)",
+            variable=self.mode_var,
+            value="BROWSER_FULL",
+            font=UIThemeTokens.FONT_BODY,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+            command=self._on_mode_change,
+        )
+        self.radio_full.pack(side="left", padx=(0, 20))
+
+        # Workers ComboBox
+        ctk.CTkLabel(opt_inner, text="Số luồng:", font=UIThemeTokens.FONT_BUTTON, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(0, 6))
+        self.workers_combo = ctk.CTkComboBox(
+            opt_inner,
+            values=["1 luồng", "2 luồng", "3 luồng", "5 luồng"],
+            variable=self.workers_var,
+            width=100,
+            height=28,
+            font=UIThemeTokens.FONT_BODY,
+        )
+        self.workers_combo.pack(side="left")
+
+        # Summary text right
+        ctk.CTkLabel(opt_inner, textvariable=self.summary_var, font=UIThemeTokens.FONT_BUTTON, text_color=UIThemeTokens.ACCENT_PRIMARY).pack(side="right")
+
+        # 3. Table Frame
+        table_frame = ctk.CTkFrame(container, fg_color=UIThemeTokens.BG_CARD, corner_radius=8, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+        table_frame.pack(fill="both", expand=True, pady=(0, 8))
+
+        columns = ('name', 'tiktok', 'mode', 'state', 'source', 'auth', 'time', 'detail')
+        self.table = ttk.Treeview(table_frame, columns=columns, show='headings', height=11)
         for col, text, width in (
-            ('name', 'Tài khoản', 150),
-            ('tiktok', 'TikTok ID', 90),
-            ('state', 'Trạng thái', 105),
-            ('source', 'Nguồn', 120),
-            ('auth', 'Cookie auth', 115),
-            ('time', 'Kiểm tra lúc', 145),
-            ('detail', 'Chi tiết', 250),
+            ('name', 'Tài khoản', 140),
+            ('tiktok', 'TikTok ID', 100),
+            ('mode', 'Chế độ', 80),
+            ('state', 'Trạng thái', 100),
+            ('source', 'Nguồn', 100),
+            ('auth', 'Cookie auth', 110),
+            ('time', 'Kiểm tra lúc', 130),
+            ('detail', 'Chi tiết', 220),
         ):
             self.table.heading(col, text=text)
             self.table.column(col, width=width, anchor='w' if col in ('name', 'detail') else 'center')
-        self.table.pack(fill='both', expand=True)
+        self.table.pack(fill='both', expand=True, padx=6, pady=6)
+
         for name, uuid in self.targets:
-            self.table.insert('', 'end', iid=uuid, values=(name, '', 'Chờ', '', '', '', ''))
-        btn_frame = ctk.CTkFrame(self.dialog, fg_color='transparent')
-        btn_frame.pack(fill='x', padx=12, pady=(0, 10))
-        self.start_btn = ctk.CTkButton(btn_frame, text="Bắt đầu kiểm tra", width=150, command=self._start)
+            self.table.insert('', 'end', iid=uuid, values=(name, '', '', 'Chờ', '', '', '', ''))
+
+        # 4. Action Buttons Frame
+        btn_frame = ctk.CTkFrame(container, fg_color="transparent")
+        btn_frame.pack(fill="x")
+
+        self.start_btn = ctk.CTkButton(
+            btn_frame,
+            text="▶ Bắt đầu kiểm tra",
+            width=140,
+            height=32,
+            font=UIThemeTokens.FONT_BUTTON,
+            fg_color=UIThemeTokens.ACCENT_PRIMARY,
+            hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
+            command=self._start,
+        )
         self.start_btn.pack(side='left')
-        self.stop_btn = ctk.CTkButton(btn_frame, text="Dừng", width=90, command=self._request_cancel)
+
+        self.stop_btn = ctk.CTkButton(
+            btn_frame,
+            text="⏹ Dừng",
+            width=80,
+            height=32,
+            font=UIThemeTokens.FONT_BUTTON,
+            fg_color=UIThemeTokens.STATUS_ERROR,
+            hover_color="#b91c1c",
+            command=self._request_cancel,
+        )
         self.stop_btn.pack(side='left', padx=6)
-        self.retry_btn = ctk.CTkButton(btn_frame, text="Kiểm tra lại lỗi", width=150, command=self._retry_failed)
+
+        self.retry_btn = ctk.CTkButton(
+            btn_frame,
+            text="🔄 Kiểm tra lại lỗi",
+            width=130,
+            height=32,
+            font=UIThemeTokens.FONT_BUTTON,
+            fg_color="#475569",
+            hover_color="#334155",
+            command=self._retry_failed,
+        )
         self.retry_btn.pack(side='left')
-        self.close_btn = ctk.CTkButton(btn_frame, text="Đóng", width=90, command=self._on_close)
+
+        self.close_btn = ctk.CTkButton(
+            btn_frame,
+            text="Đóng",
+            width=80,
+            height=32,
+            font=UIThemeTokens.FONT_BUTTON,
+            fg_color="#64748b",
+            hover_color="#475569",
+            command=self._on_close,
+        )
         self.close_btn.pack(side='right')
+
+    def _on_mode_change(self):
+        if self.mode_var.get() == "BROWSER_FULL":
+            self.workers_var.set("1 luồng")
 
     def _start(self):
         if self.running:
@@ -981,25 +1124,56 @@ class CookieCheckDialog:
         self.cancel_event = threading.Event()
         self.start_btn.configure(state='disabled')
         self.retry_btn.configure(state='disabled')
+        self.radio_fast.configure(state='disabled')
+        self.radio_full.configure(state='disabled')
+        self.workers_combo.configure(state='disabled')
         threading.Thread(target=self._worker, daemon=True).start()
 
     def _worker(self):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        raw_workers = self.workers_var.get() or "1"
         try:
-            for name, uuid in self.targets:
-                if self.cancel_requested:
-                    if uuid not in self.results:
-                        self.results[uuid] = CookieCheckResult(account_uuid=uuid, profile_name=name, state=CookieCheckState.CANCELLED, detail='Đã dừng bởi người dùng')
-                        self._update_row(uuid, self.results[uuid])
-                    continue
-                self.results[uuid] = CookieCheckResult(account_uuid=uuid, profile_name=name, state=CookieCheckState.CHECKING, detail='Đang kiểm tra...')
-                self._update_row(uuid, self.results[uuid])
-                profile = profiles.get(name)
-                if profile is None:
-                    self.results[uuid] = CookieCheckResult(account_uuid=uuid, profile_name=name, state=CookieCheckState.SKIPPED, detail='Không tồn tại')
-                    self._update_row(uuid, self.results[uuid])
-                    continue
-                self.results[uuid] = _check_profile_cookie_live(name, cancel_event=self.cancel_event)
-                self._update_row(uuid, self.results[uuid])
+            max_workers = int(raw_workers.split()[0])
+        except Exception:
+            max_workers = 1
+        check_mode = self.mode_var.get() or "HTTP_FAST"
+
+        def _execute_single(target_tuple):
+            name, uuid = target_tuple
+            if self.cancel_requested or self.cancel_event.is_set():
+                if uuid not in self.results:
+                    res = CookieCheckResult(account_uuid=uuid, profile_name=name, state=CookieCheckState.CANCELLED, detail='Đã dừng bởi người dùng')
+                    self.results[uuid] = res
+                    self._update_row(uuid, res)
+                return
+            
+            res_checking = CookieCheckResult(account_uuid=uuid, profile_name=name, state=CookieCheckState.CHECKING, detail='Đang kiểm tra...')
+            self.results[uuid] = res_checking
+            self._update_row(uuid, res_checking)
+
+            profile = profiles.get(name)
+            if profile is None:
+                res_skip = CookieCheckResult(account_uuid=uuid, profile_name=name, state=CookieCheckState.SKIPPED, detail='Không tồn tại')
+                self.results[uuid] = res_skip
+                self._update_row(uuid, res_skip)
+                return
+
+            res_final = _check_profile_cookie_live(name, cancel_event=self.cancel_event, mode=check_mode)
+            self.results[uuid] = res_final
+            self._update_row(uuid, res_final)
+
+        try:
+            if max_workers <= 1 or check_mode == "BROWSER_FULL":
+                for target in self.targets:
+                    if self.cancel_requested:
+                        break
+                    _execute_single(target)
+            else:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [executor.submit(_execute_single, t) for t in self.targets]
+                    for f in as_completed(futures):
+                        if self.cancel_requested:
+                            break
             self._finish()
         except Exception:
             self._finish()
@@ -1019,17 +1193,36 @@ class CookieCheckDialog:
         try:
             if not self.table.winfo_exists():
                 return
-            values = (result.profile_name, tiktok_id, result.display_state(), result.display_source(), ", ".join(result.auth_cookie_names), result.checked_at, mask_detail(result.detail))
+            mode_str = "⚡ HTTP" if getattr(result, 'mode', None) == CookieCheckMode.HTTP_FAST else "🌐 Browser"
+            st_text = result.display_state()
+            if result.state == CookieCheckState.LIVE:
+                st_text = "🟢 Live"
+            elif result.state == CookieCheckState.DEAD:
+                st_text = "🔴 Die"
+            elif result.state == CookieCheckState.PROXY_ERROR:
+                st_text = "🟡 Lỗi proxy"
+            elif result.state == CookieCheckState.CHECKING:
+                st_text = "⏳ Đang check..."
+
+            values = (
+                result.profile_name,
+                tiktok_id,
+                mode_str,
+                st_text,
+                result.display_source(),
+                ", ".join(result.auth_cookie_names),
+                result.checked_at,
+                mask_detail(result.detail),
+            )
             if uuid in self.table.get_children(''):
                 self.table.item(uuid, values=values)
             else:
                 self.table.insert('', 'end', iid=uuid, values=values)
+
             counts = build_summary(list(self.results.values()))
             self.summary_var.set(
-                f"Đã chọn: {counts['total']} | Live: {counts['live']} | Die: {counts['dead']} "
-                f"| Không rõ: {counts['unknown']} | Lỗi proxy: {counts['proxy_error']} "
-                f"| Profile bận: {counts['profile_busy']} | Lỗi browser: {counts['browser_error']} "
-                f"| Lỗi lưu: {counts['persist_error']} | Bỏ qua: {counts['skipped']} | Đã dừng: {counts['cancelled']}"
+                f"Đã chọn: {counts['total']} | 🟢 Live: {counts['live']} | 🔴 Die: {counts['dead']} "
+                f"| 🟡 Lỗi proxy: {counts['proxy_error']} | ⏳ Đang check: {counts['checking']}"
             )
         except Exception:
             pass
@@ -1039,6 +1232,9 @@ class CookieCheckDialog:
         try:
             self.start_btn.configure(state='normal')
             self.retry_btn.configure(state='normal')
+            self.radio_fast.configure(state='normal')
+            self.radio_full.configure(state='normal')
+            self.workers_combo.configure(state='normal')
         except Exception:
             pass
 
@@ -1252,157 +1448,71 @@ def _persist_inspection_snapshot(name, result):
 
 
 def _inspect_tiktok_account_worker(name, claim_id=None, cancel_event=None):
-    """Inspect one account read-only. Runs on a worker thread; no Tk calls."""
+    """Inspect one account using Fast HTTP (TikTokMonetizationClient) + auto-sync to config."""
     profile = profiles.get(name)
     if profile is None:
-        return AccountInspectionResult(
-            profile_name=name, state=InspectionState.ERROR, detail="Không tồn tại"
-        )
-    cfg = profile['config']
-    checked_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    token = None
-    owned = False
-    try:
-        if claim_id is None:
-            try:
-                claim_id = _claim_profile_operation(
-                    name, OperationState.INSPECTING_ACCOUNT.value,
-                    preflight_fn=_inspection_preflight_reason,
-                )
-            except OperationClaimError as error:
-                return AccountInspectionResult(
-                    profile_name=name, state=InspectionState.UNAVAILABLE,
-                    checked_at=checked_at, detail=mask_detail(error.reason),
-                )
-        try:
-            proxy_data, preflight = session_runner.resolve_proxy(cfg)
-            browser_glue.ensure_patchright_profile(cfg)
-            _sync_patchright_migration(cfg)
-            token = browser_glue.open_session(cfg, name)
-            owned = True
-            if proxy_data:
-                is_match, _current_ip, detail = session_runner.verify_browser_proxy(token, proxy_data, preflight)
-                if not is_match:
-                    return AccountInspectionResult(
-                        profile_name=name, state=InspectionState.UNAVAILABLE,
-                        checked_at=checked_at, detail=mask_detail(detail),
-                    )
-        except session_runner.SessionRunnerError as error:
-            return AccountInspectionResult(
-                profile_name=name, state=InspectionState.UNAVAILABLE,
-                checked_at=checked_at, detail=mask_detail(error.reason),
-            )
-        except Exception as error:
-            return AccountInspectionResult(
-                profile_name=name, state=InspectionState.ERROR,
-                checked_at=checked_at, detail=mask_detail(f"Lỗi mở browser: {type(error).__name__}"),
-            )
-
-        if cancel_event is not None and cancel_event.is_set():
-            return AccountInspectionResult(
-                profile_name=name, state=InspectionState.CANCELLED,
-                checked_at=checked_at, detail='Đã dừng bởi người dùng',
-            )
-
-        browser_glue.navigate(token, TIKTOK_UPLOAD_URL)
-        login_state = browser_glue.wait_page_login_state(token, timeout=35)
-        auth_state = session_runner.probe_account_auth(token, cancel_event=cancel_event, timeout=40)
-        if auth_state in ('login_required',):
-            return AccountInspectionResult(
-                profile_name=name, state=InspectionState.LOGIN_REQUIRED,
-                checked_at=checked_at, detail='Profile chưa đăng nhập',
-            )
-        if auth_state == 'rate_limited':
-            return AccountInspectionResult(
-                profile_name=name, state=InspectionState.RATE_LIMITED,
-                checked_at=checked_at, detail='TikTok giới hạn request',
-            )
-        if auth_state == 'checkpoint':
-            return AccountInspectionResult(
-                profile_name=name, state=InspectionState.CHECKPOINT,
-                checked_at=checked_at, detail='TikTok yêu cầu xác minh',
-            )
-        if login_state != 'authenticated' and auth_state != 'authenticated':
-            return AccountInspectionResult(
-                profile_name=name, state=InspectionState.LOGIN_REQUIRED,
-                checked_at=checked_at, detail='Không xác minh được đăng nhập',
-            )
-
-        discovered = browser_glue.discover_tiktok_readonly_endpoints(
-            token, timeout=browser_glue.OP_DEFAULT_TIMEOUT
-        )
-        observed_urls = dict(getattr(discovered, 'observed_urls', ()) or ())
-        fetched = browser_glue.inspect_tiktok_account(
-            token,
-            endpoint_paths=SEED_ENDPOINTS,
-            urls_by_path=observed_urls,
-            timeout=browser_glue.OP_DEFAULT_TIMEOUT * 2,
-        )
-        fetched_results = dict(fetched.get('results') or {})
-        for path, payload in tuple(getattr(discovered, 'observed_payloads', ()) or ()):
-            fetched_results.setdefault(path, payload)
-        fetched['checked_at'] = fetched.get('checked_at') or checked_at
-        result = build_inspection_result(
-            name,
-            fetched_results,
-            checked_at=fetched.get('checked_at') or checked_at,
-            sources=tuple(getattr(discovered, 'endpoints', ()) or ()),
-        )
-        capability_requests = build_capability_requests(days=30)
-        capability_transport = browser_glue.fetch_tiktok_capabilities(
-            token,
-            capability_requests,
-            timeout=browser_glue.OP_DEFAULT_TIMEOUT * 2,
-        )
-        observed_payloads = dict(tuple(getattr(discovered, 'observed_payloads', ()) or ()))
-        capability_paths = {
-            request.capability: urlsplit(request.url).path
-            for request in capability_requests
+        return {
+            "status": "ERROR",
+            "profile_name": name,
+            "error": "Profile không tồn tại",
+            "checked_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         }
-        for capability, path in capability_paths.items():
-            if path in observed_payloads:
-                capability_transport.setdefault('results', {})[capability] = {
-                    'endpoint_id': next(
-                        request.endpoint_id for request in capability_requests
-                        if request.capability == capability
-                    ),
-                    'status': 200,
-                    'content_type': 'application/json',
-                    'payload': observed_payloads[path],
-                }
-        result = replace(
-            result,
-            capabilities=build_capability_results(
-                capability_requests,
-                capability_transport,
-                checked_at=fetched.get('checked_at') or checked_at,
-            ),
-        )
-        result = _persist_inspection_snapshot(name, result)
-        return result
-    except session_runner.SessionCancelled as error:
-        return AccountInspectionResult(
-            profile_name=name, state=InspectionState.CANCELLED,
-            checked_at=checked_at, detail=mask_detail(str(error)),
-        )
-    except Exception as error:
-        return AccountInspectionResult(
-            profile_name=name, state=InspectionState.ERROR,
-            checked_at=checked_at, detail=mask_detail(f"Lỗi kiểm tra: {type(error).__name__}: {error}"),
-        )
-    finally:
-        close_confirmed = True
-        if owned and token is not None:
-            try:
-                close_confirmed = bool(token.quit())
-            except Exception:
-                close_confirmed = False
-        if claim_id is not None:
-            _release_profile_operation(name, claim_id, close_confirmed=close_confirmed)
+    cfg = profile.get('config', {})
+    checked_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    if cancel_event is not None and cancel_event.is_set():
+        return {
+            "status": "CANCELLED",
+            "profile_name": name,
+            "error": "Đã dừng bởi người dùng",
+            "checked_at": checked_at,
+        }
+
+    try:
+        from tiktok_monetization_client import TikTokMonetizationClient
+        client = TikTokMonetizationClient(name, cfg, timeout=12.0)
+        data = client.fetch_all_monetization_data()
+
+        # Auto-sync extracted UID & @username into profile config
+        if data.get("unique_id"):
+            cfg['tiktok_id'] = data['unique_id']
+            cfg['tiktok_account'] = data['unique_id']
+        if data.get("tiktok_user_id"):
+            cfg['tiktok_user_id'] = str(data['tiktok_user_id'])
+
+        # Auto-sync auth state
+        if data.get("status") == "SUCCESS":
+            cfg['session_auth_state'] = 'verified'
+        elif data.get("status") in ("COOKIE_EXPIRED", "NO_AUTH"):
+            cfg['session_auth_state'] = 'expired'
+
+        # Update monetization cache
+        monetization_cache[name] = data
+        try:
+            _save_monetization_cache()
+        except Exception:
+            pass
+        try:
+            save_configs()
+        except Exception:
+            pass
+        try:
+            request_profile_refresh()
+        except Exception:
+            pass
+
+        return data
+    except Exception as e:
+        return {
+            "status": "ERROR",
+            "profile_name": name,
+            "error": str(e),
+            "checked_at": checked_at,
+        }
 
 
 class InspectionDialog:
-    """Single/batch read-only account inspection dialog."""
+    """Single/batch Fast HTTP TikTok account inspection dialog (Clean SaaS Light)."""
 
     def __init__(self, targets):
         self.targets = targets
@@ -1410,55 +1520,119 @@ class InspectionDialog:
         self.running = False
         self.cancel_event = threading.Event()
         self.dialog = ctk.CTkToplevel(root)
-        self.dialog.title("TikTok Insights (Beta) — Kiểm tra thông tin TikTok")
-        self.dialog.geometry("1280x620")
-        self.dialog.resizable(True, True)
+        self.dialog.title("Kiểm Tra Thông Tin TikTok — Fast HTTP Engine")
+        self.dialog.geometry("1300x660")
+        self.dialog.minsize(1000, 500)
+        self.dialog.configure(fg_color=UIThemeTokens.BG_ROOT)
         self.dialog.transient(root)
-        self.summary_var = ctk.StringVar(value=f"Đã chọn: {len(targets)}")
+        self.summary_var = ctk.StringVar(value=f"Đã chọn: {len(targets)} hồ sơ")
+        self.concurrency_var = ctk.StringVar(value="2 luồng")
         self._build_ui()
         self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
         _inspection_batch['active'] = True
 
     def _build_ui(self):
-        summary = ctk.CTkLabel(self.dialog, textvariable=self.summary_var, font=("", 14, "bold"), anchor='w')
-        summary.pack(fill='x', padx=12, pady=(10, 6))
-        frame = ctk.CTkFrame(self.dialog, fg_color='transparent')
-        frame.pack(fill='both', expand=True, padx=12, pady=(0, 6))
-        columns = ('name', 'tiktok', 'state', 'dash', 'rpm', 'views', 'balance', 'crp', 'payout', 'traffic', 'violations', 'kyc', 'payment', 'time')
-        self.table = ttk.Treeview(frame, columns=columns, show='headings', height=14)
-        for col, text, width in (
-            ('name', 'Tài khoản', 150),
-            ('tiktok', 'TikTok ID', 130),
-            ('state', 'Trạng thái', 120),
-            ('dash', 'DASH', 75),
-            ('rpm', 'RPM', 70),
-            ('views', 'Views', 70),
-            ('balance', 'Balance', 75),
-            ('crp', 'CRP', 80),
-            ('payout', 'Payout', 80),
-            ('traffic', 'Traffic', 110),
-            ('violations', 'Violations', 80),
-            ('kyc', 'KYC', 90),
-            ('payment', 'Payment', 90),
-            ('time', 'Kiểm tra lúc', 145),
-        ):
+        # Header / Control bar
+        top_bar = ctk.CTkFrame(self.dialog, fg_color=UIThemeTokens.BG_CARD, corner_radius=10, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+        top_bar.pack(fill='x', padx=14, pady=(12, 8))
+
+        lbl_sum = ctk.CTkLabel(top_bar, textvariable=self.summary_var, font=("Segoe UI", 13, "bold"), text_color=UIThemeTokens.TEXT_PRIMARY)
+        lbl_sum.pack(side='left', padx=14, pady=8)
+
+        ctk.CTkLabel(top_bar, text="Số luồng:", font=("Segoe UI", 12), text_color=UIThemeTokens.TEXT_MUTED).pack(side='left', padx=(16, 4))
+        self.concurrency_menu = ctk.CTkOptionMenu(
+            top_bar,
+            values=["1 luồng", "2 luồng", "3 luồng", "5 luồng"],
+            variable=self.concurrency_var,
+            width=100,
+            height=30,
+            fg_color=UIThemeTokens.BG_HOVER,
+            button_color=UIThemeTokens.ACCENT_PRIMARY,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+        )
+        self.concurrency_menu.pack(side='left', padx=(0, 12))
+
+        self.start_btn = ctk.CTkButton(
+            top_bar,
+            text="⚡ Bắt Đầu Kiểm Tra",
+            width=150,
+            height=32,
+            fg_color=UIThemeTokens.ACCENT_PRIMARY,
+            hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
+            text_color="#ffffff",
+            font=("Segoe UI", 12, "bold"),
+            command=self._start,
+        )
+        self.start_btn.pack(side='right', padx=12, pady=8)
+
+        self.stop_btn = ctk.CTkButton(
+            top_bar,
+            text="⏹ Dừng",
+            width=85,
+            height=32,
+            fg_color=UIThemeTokens.BG_HOVER,
+            hover_color=UIThemeTokens.BORDER_LIGHT,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+            command=self._request_cancel,
+            state='disabled',
+        )
+        self.stop_btn.pack(side='right', padx=4, pady=8)
+
+        # Table frame
+        frame = ctk.CTkFrame(self.dialog, fg_color=UIThemeTokens.BG_CARD, corner_radius=10, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+        frame.pack(fill='both', expand=True, padx=14, pady=(0, 8))
+
+        columns = ('name', 'tiktok', 'uid', 'state', 'followers', 'likes', 'videos', 'balance', 'crp', 'kyc', 'tax', 'payment', 'time')
+        self.table = ttk.Treeview(frame, columns=columns, show='headings', height=12)
+        
+        headers_def = [
+            ('name', 'Tên Hồ Sơ', 130, 'w'),
+            ('tiktok', 'TikTok ID', 125, 'center'),
+            ('uid', 'TikTok UID', 140, 'center'),
+            ('state', 'Trạng Thái', 95, 'center'),
+            ('followers', 'Follower', 85, 'center'),
+            ('likes', 'Thích', 80, 'center'),
+            ('videos', 'Video', 70, 'center'),
+            ('balance', 'Số Dư', 85, 'center'),
+            ('crp', 'Kiếm Tiền', 110, 'center'),
+            ('kyc', 'KYC', 85, 'center'),
+            ('tax', 'Thuế', 80, 'center'),
+            ('payment', 'PTTT', 130, 'center'),
+            ('time', 'Cập Nhật', 120, 'center'),
+        ]
+        for col, text, width, anchor in headers_def:
             self.table.heading(col, text=text)
-            self.table.column(col, width=width, anchor='w')
-        self.table.pack(fill='both', expand=True)
+            self.table.column(col, width=width, anchor=anchor)
+
+        self.table.pack(fill='both', expand=True, padx=4, pady=4)
         for name in self.targets:
-            self.table.insert('', 'end', iid=name, values=(name, '', 'Chờ') + ('',) * 11)
+            cfg = profiles.get(name, {}).get('config', {}) or {}
+            cur_uid = str(cfg.get('tiktok_user_id', '') or '')
+            cur_user = str(cfg.get('tiktok_id', '') or cfg.get('tiktok_account', '') or '')
+            self.table.insert('', 'end', iid=name, values=(name, f"@{cur_user.lstrip('@')}" if cur_user else '', cur_uid, '⚪ Chờ check') + ('',) * 9)
+
         self.table.bind('<<TreeviewSelect>>', lambda _e: self._show_detail())
-        detail = ctk.CTkFrame(self.dialog, fg_color='transparent')
-        detail.pack(fill='x', padx=12, pady=(0, 6))
-        self.detail_var = ctk.StringVar(value="Chọn 1 dòng để xem chi tiết.")
-        ctk.CTkLabel(detail, textvariable=self.detail_var, anchor='w', justify='left', wraplength=880, font=("", 11)).pack(fill='x')
+
+        # Detail box
+        detail_frame = ctk.CTkFrame(self.dialog, fg_color=UIThemeTokens.BG_CARD, corner_radius=10, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+        detail_frame.pack(fill='x', padx=14, pady=(0, 8))
+        self.detail_var = ctk.StringVar(value="👉 Chọn một dòng trong bảng trên để xem chi tiết thông tin tài khoản.")
+        ctk.CTkLabel(detail_frame, textvariable=self.detail_var, anchor='w', justify='left', wraplength=1200, font=("Segoe UI", 11), text_color=UIThemeTokens.TEXT_PRIMARY).pack(fill='x', padx=12, pady=10)
+
+        # Action bar
         btn_frame = ctk.CTkFrame(self.dialog, fg_color='transparent')
-        btn_frame.pack(fill='x', padx=12, pady=(0, 10))
-        self.start_btn = ctk.CTkButton(btn_frame, text="Bắt đầu kiểm tra", width=160, command=self._start)
-        self.start_btn.pack(side='left')
-        self.stop_btn = ctk.CTkButton(btn_frame, text="Dừng", width=90, command=self._request_cancel, state='disabled')
-        self.stop_btn.pack(side='left', padx=6)
-        self.close_btn = ctk.CTkButton(btn_frame, text="Đóng", width=90, command=self._on_close)
+        btn_frame.pack(fill='x', padx=14, pady=(0, 12))
+
+        self.btn_copy_uid = ctk.CTkButton(btn_frame, text="📋 Copy UID", width=110, height=30, fg_color=UIThemeTokens.BG_HOVER, text_color=UIThemeTokens.TEXT_PRIMARY, command=self._copy_selected_uid)
+        self.btn_copy_uid.pack(side='left', padx=(0, 6))
+
+        self.btn_copy_user = ctk.CTkButton(btn_frame, text="📋 Copy @Username", width=130, height=30, fg_color=UIThemeTokens.BG_HOVER, text_color=UIThemeTokens.TEXT_PRIMARY, command=self._copy_selected_username)
+        self.btn_copy_user.pack(side='left', padx=6)
+
+        self.btn_open_web = ctk.CTkButton(btn_frame, text="🌐 Mở Kênh TikTok", width=130, height=30, fg_color=UIThemeTokens.BG_HOVER, text_color=UIThemeTokens.TEXT_PRIMARY, command=self._open_selected_tiktok)
+        self.btn_open_web.pack(side='left', padx=6)
+
+        self.close_btn = ctk.CTkButton(btn_frame, text="Đóng", width=85, height=30, fg_color=UIThemeTokens.BG_HOVER, text_color=UIThemeTokens.TEXT_PRIMARY, command=self._on_close)
         self.close_btn.pack(side='right')
 
     def _start(self):
@@ -1468,142 +1642,109 @@ class InspectionDialog:
         self.cancel_event = threading.Event()
         self.start_btn.configure(state='disabled')
         self.stop_btn.configure(state='normal')
-        threading.Thread(target=self._worker, daemon=True).start()
+        self.concurrency_menu.configure(state='disabled')
 
-    def _worker(self):
+        c_str = self.concurrency_var.get().split()[0]
+        max_workers = int(c_str) if c_str.isdigit() else 2
+        threading.Thread(target=self._worker_pool, args=(max_workers,), daemon=True).start()
+
+    def _worker_pool(self, max_workers):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        completed = 0
+        total = len(self.targets)
+
+        def _check_single(name):
+            if self.cancel_event.is_set():
+                return name, {"status": "CANCELLED", "profile_name": name, "error": "Đã dừng"}
+            self._update_row_status(name, "⏳ Đang check...")
+            res = _inspect_tiktok_account_worker(name, cancel_event=self.cancel_event)
+            return name, res
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_name = {executor.submit(_check_single, name): name for name in self.targets}
+            for future in as_completed(future_to_name):
+                name = future_to_name[future]
+                try:
+                    p_name, result = future.result()
+                    self.results[p_name] = result
+                    self._update_row_result(p_name, result)
+                except Exception as e:
+                    self.results[name] = {"status": "ERROR", "error": str(e)}
+                    self._update_row_result(name, self.results[name])
+                completed += 1
+                self.summary_var.set(f"Tiến độ: {completed}/{total} | Live: {sum(1 for r in self.results.values() if r.get('status') == 'SUCCESS')} | Lỗi: {sum(1 for r in self.results.values() if r.get('status') in ('ERROR', 'COOKIE_EXPIRED', 'NO_AUTH'))}")
+
+        self.running = False
         try:
-            for name in self.targets:
-                if self.cancel_event.is_set():
-                    if name not in self.results:
-                        self.results[name] = AccountInspectionResult(profile_name=name, state=InspectionState.CANCELLED, detail='Đã dừng bởi người dùng')
-                        self._update_row(name, self.results[name])
-                    continue
-                self.results[name] = AccountInspectionResult(profile_name=name, state=InspectionState.CHECKING, checked_at='')
-                self._update_row(name, self.results[name])
-                profile = profiles.get(name)
-                if profile is None:
-                    self.results[name] = AccountInspectionResult(profile_name=name, state=InspectionState.ERROR, detail='Không tồn tại')
-                    self._update_row(name, self.results[name])
-                    continue
-                self.results[name] = _inspect_tiktok_account_worker(name, cancel_event=self.cancel_event)
-                self._update_row(name, self.results[name])
+            root.after(0, self._finish_inspection)
         except Exception:
             pass
-        finally:
-            self.running = False
-            try:
-                self.start_btn.configure(state='normal')
-                self.stop_btn.configure(state='disabled')
-            except Exception:
-                pass
+
+    def _finish_inspection(self):
+        try:
+            self.start_btn.configure(state='normal')
+            self.stop_btn.configure(state='disabled')
+            self.concurrency_menu.configure(state='normal')
+            update_status(f"Kiểm tra thông tin TikTok hoàn tất ({len(self.results)} hồ sơ).")
+        except Exception:
+            pass
 
     def _request_cancel(self):
         self.cancel_event.set()
         update_status("Đã yêu cầu dừng kiểm tra thông tin TikTok.")
 
-    def _update_row(self, name, result):
+    def _update_row_status(self, name, status_text):
         try:
-            cfg = profiles.get(name, {}).get('config', {}) or {}
-            tiktok_id = str(cfg.get('tiktok_id', '') or '').lstrip('@')
-        except Exception:
-            tiktok_id = ''
-        try:
-            root.after(0, lambda: self._apply_row(name, result, tiktok_id))
+            def _apply():
+                if self.table.winfo_exists() and name in self.table.get_children(''):
+                    cur = list(self.table.item(name, 'values'))
+                    cur[3] = status_text
+                    self.table.item(name, values=cur)
+            root.after(0, _apply)
         except Exception:
             pass
 
-    def _apply_row(self, name, result, tiktok_id):
+    def _update_row_result(self, name, data):
         try:
-            if not self.table.winfo_exists():
-                return
-            capability_values = {}
-            for capability in result.capabilities.results:
-                capability_values[capability.capability] = capability
-            dashboard = capability_values.get('dashboard')
-            balance = capability_values.get('balance')
-            rewards = capability_values.get('creative_rewards')
-            payout_cap = capability_values.get('payout')
-            traffic = capability_values.get('traffic')
-            violations = capability_values.get('violations')
-            kyc = capability_values.get('kyc')
-            payment = capability_values.get('payment')
-
-            dash_value = dashboard.value if dashboard else None
-            balance_value = balance.value if balance else None
-            rewards_value = rewards.value if rewards else None
-            payout_value = payout_cap.value if payout_cap else None
-            traffic_value = traffic.value if traffic else None
-            violations_value = violations.value if violations else None
-            kyc_value = kyc.value if kyc else None
-            payment_value = payment.value if payment else None
-
-            def _money_text(amount):
-                if amount is None:
-                    return 'N/A'
-                return amount.formatted or f"{amount.decimal:.2f}{amount.currency}"
-
-            def _cap_text(capability):
-                if capability is None:
-                    return 'N/A'
-                if capability.state.value not in ('success', 'success_empty', 'partial'):
-                    return {
-                        'login_required': 'Cần đăng nhập',
-                        'rate_limited': 'Giới hạn',
-                        'endpoint_changed': 'N/A',
-                        'unavailable': 'Không khả dụng',
-                        'error': 'Lỗi',
-                        'cancelled': 'Đã hủy',
-                    }.get(capability.state.value, capability.state.value)
-                return None
-
-            top_traffic = ''
-            if traffic_value and traffic_value.sources:
-                item = max(traffic_value.sources, key=lambda source: source.percentage)
-                top_traffic = f"{item.name} {item.percentage}%"
-            dash_status = _cap_text(dashboard)
-            balance_status = _cap_text(balance)
-            rewards_status = _cap_text(rewards)
-            payout_status = _cap_text(payout_cap)
-            traffic_status = _cap_text(traffic)
-            violations_status = _cap_text(violations)
-            kyc_status = _cap_text(kyc)
-            payment_status = _cap_text(payment)
-
-            dash_total = dash_status or (_money_text(dash_value.total_amount) if dash_value else 'N/A')
-            dash_rpm = dash_status or (_money_text(dash_value.rpm) if dash_value else 'N/A')
-            dash_views = dash_status or (dash_value.qualified_views if dash_value and dash_value.qualified_views is not None else 'N/A')
-            balance_text = balance_status or (_money_text(balance_value.balance) if balance_value else 'N/A')
-            rewards_text = rewards_status or (('Active' if rewards_value.enabled is True else 'Chưa đủ') if rewards_value else 'N/A')
-            payout_text = payout_status or (_money_text(payout_value.summary) if payout_value else 'N/A')
-            traffic_text = traffic_status or (top_traffic or 'N/A')
-            violations_text = violations_status or (violations_value.count if violations_value else 'N/A')
-            kyc_text = kyc_status or (kyc_value.state.value if kyc_value else 'N/A')
-            payment_text = payment_status or (payment_value.state.value if payment_value else 'N/A')
-            values = (
-                name,
-                tiktok_id,
-                result.display_state(),
-                dash_total,
-                dash_rpm,
-                dash_views,
-                balance_text,
-                rewards_text,
-                payout_text,
-                traffic_text,
-                violations_text,
-                kyc_text,
-                payment_text,
-                result.checked_at,
-            )
-            if name in self.table.get_children(''):
-                self.table.item(name, values=values)
+            st = data.get("status", "")
+            if st == "SUCCESS":
+                badge_st = "🟢 Live"
+            elif st in ("COOKIE_EXPIRED", "NO_AUTH"):
+                badge_st = "🔴 Die"
+            elif st == "CANCELLED":
+                badge_st = "⚪ Đã dừng"
             else:
-                self.table.insert('', 'end', iid=name, values=values)
-            counts = build_inspection_summary(list(self.results.values()))
-            self.summary_var.set(
-                f"Đã chọn: {counts['total']} | Live: {counts['success']} | Partial: {counts['partial']} "
-                f"| Cần đăng nhập: {counts['login_required']} | Lỗi: {counts['error']}"
-            )
+                badge_st = "🔴 Lỗi"
+
+            user_str = f"@{data.get('unique_id', '').lstrip('@')}" if data.get('unique_id') else ""
+            uid_str = str(data.get('tiktok_user_id', '') or '')
+            f_cnt = data.get('follower_count') or data.get('crp_followers') or 0
+            f_str = f"{f_cnt:,}" if f_cnt else "0"
+            l_cnt = data.get('heart_count', 0) or 0
+            l_str = f"{l_cnt:,}" if l_cnt else "0"
+            v_cnt = data.get('video_count', 0) or 0
+            v_str = f"{v_cnt:,}" if v_cnt else "0"
+
+            bal = data.get('balance', 0.0) or 0.0
+            sym = data.get('currency_symbol', '$')
+            bal_str = f"{sym}{bal:.2f}"
+
+            crp_str = data.get('crp_display', '⚪ Chưa bật')
+            kyc_str = "🟢 Đã KYC" if data.get('kyc_status') == "APPROVED" else ("🟡 Chờ" if data.get('kyc_status') == "PENDING" else "⚪ Chưa")
+            tax_str = "🟢 Đã thuế" if data.get('tax_status') == "TAX_VERIFIED" else "⚪ Chưa"
+            pay_str = data.get('payment_method', 'Chưa liên kết')
+            time_str = data.get('checked_at', '')
+
+            values = (name, user_str, uid_str, badge_st, f_str, l_str, v_str, bal_str, crp_str, kyc_str, tax_str, pay_str, time_str)
+
+            def _apply():
+                if self.table.winfo_exists():
+                    if name in self.table.get_children(''):
+                        self.table.item(name, values=values)
+                    else:
+                        self.table.insert('', 'end', iid=name, values=values)
+            root.after(0, _apply)
         except Exception:
             pass
 
@@ -1612,105 +1753,55 @@ class InspectionDialog:
         if not sel:
             return
         name = sel[0]
-        result = self.results.get(name)
-        if result is None:
+        data = self.results.get(name)
+        if not data:
             return
-        lines = []
-        lines.append(f"Tài khoản: {name}  |  {result.display_state()}  |  {result.checked_at}")
-        lines.append(f"Phân loại: {classify_account(result)}")
-        lines.append("")
-        lines.append("— Identity —")
-        identity = result.identity
-        lines.append(f"  TikTok ID: {identity.numeric_user_id or 'Không có trong response'}")
-        lines.append(f"  Username: {identity.unique_id or 'Không có trong response'}")
-        lines.append(f"  Nickname: {identity.nickname or 'Không có trong response'}")
-        lines.append(f"  Region: {identity.region or 'Không có trong response'}")
-        verified = {True: 'Có', False: 'Không'}.get(identity.verified, 'Không rõ')
-        lines.append(f"  Verified: {verified}")
-        cfg = profiles.get(name, {}).get('config', {}) or {}
-        configured_id = str(cfg.get('tiktok_id', '') or '').lstrip('@')
-        if configured_id and identity.unique_id:
-            mismatch = configured_id.strip().casefold() != identity.unique_id.strip().casefold()
-            if mismatch:
-                lines.append(f"  [CẢNH BÁO] ID cấu hình (@{configured_id}) khác ID live (@{identity.unique_id})")
-        lines.append("")
-        lines.append("— Analytics —")
-        analytics = result.analytics
-        lines.append(f"  Tổng views: {analytics.total_views if analytics.total_views is not None else 'Chưa hỗ trợ'}")
-        lines.append(f"  Views 30 ngày: {analytics.views_30d if analytics.views_30d is not None else 'Chưa hỗ trợ'}")
-        lines.append("")
-        lines.append("— Kiếm tiền —")
-        monetization = result.monetization
-        lines.append(f"  Balance: {monetization.balance_amount if monetization.balance_amount else 'Không có dữ liệu xác minh'}")
-        lines.append(f"  Currency: {monetization.currency or 'Không có trong response'}")
-        lines.append("")
-        lines.append("— Chương trình —")
-        if result.programs:
-            for program in result.programs:
-                lines.append(f"  {program.name}: {program.status.value}")
-        else:
-            lines.append("  Chưa hỗ trợ")
-        lines.append("")
-        lines.append("— Payout —")
-        payout = result.payout
-        linked = {True: 'Có', False: 'Không'}.get(payout.payout_linked, 'Không rõ')
-        lines.append(f"  Đã liên kết: {linked}")
-        lines.append(f"  Provider: {payout.provider or 'Không có trong response'}")
-        lines.append(f"  Tài khoản (mask): {payout.masked_identifier or ''}")
-        if result.capabilities.results:
-            lines.append("")
-            lines.append("— TikTok Insights —")
-            for capability in result.capabilities.results:
-                value = capability.value
-                state_text = {
-                    'success': 'OK',
-                    'success_empty': 'OK (không có dữ liệu)',
-                    'partial': 'Một phần',
-                    'login_required': 'Cần đăng nhập',
-                    'rate_limited': 'Giới hạn',
-                    'endpoint_changed': 'N/A',
-                    'unavailable': 'Không khả dụng',
-                    'error': 'Lỗi',
-                    'cancelled': 'Đã hủy',
-                }.get(capability.state.value, capability.state.value)
-                if capability.state.value not in ('success', 'success_empty', 'partial'):
-                    lines.append(f"  {capability.capability}: {state_text}")
-                    continue
-                if capability.capability == 'dashboard' and value:
-                    lines.append(f"  DASH: {value.total_amount.formatted if value.total_amount else 'N/A'}")
-                    lines.append(f"  RPM: {value.rpm.formatted if value.rpm else 'N/A'}")
-                    lines.append(f"  Qualified views: {value.qualified_views if value.qualified_views is not None else 'N/A'}")
-                elif capability.capability == 'balance' and value:
-                    lines.append(f"  Balance: {value.balance.formatted if value.balance else 'N/A'}")
-                elif capability.capability == 'creative_rewards' and value:
-                    lines.append(f"  CRP: {'Active' if value.enabled is True else 'Chưa đủ/không bật'}")
-                    for requirement in value.requirements:
-                        lines.append(f"    {requirement.key}: {requirement.status}")
-                elif capability.capability == 'payout' and value:
-                    summary = value.summary.formatted if value.summary else 'N/A'
-                    lines.append(f"  Payout: {summary} | Flexible: {value.flexible_enabled}")
-                elif capability.capability == 'traffic' and value:
-                    lines.append("  Traffic: " + ", ".join(f"{item.name} {item.percentage}%" for item in value.sources))
-                elif capability.capability == 'violations' and value:
-                    lines.append(f"  Violations: {value.count}")
-                elif capability.capability == 'kyc' and value:
-                    lines.append(f"  KYC: {value.state.value}")
-                elif capability.capability == 'payment' and value:
-                    lines.append(f"  Payment: {value.state.value}")
-        lines.append("")
-        if result.sources:
-            lines.append("— Endpoint —")
-            for source in result.sources:
-                status = source.status or '?'
-                lines.append(f"  {source.group}: {source.path} → HTTP {status}")
-        lines.append("")
-        lines.append("— Cảnh báo —")
-        if result.warnings:
-            for warning in result.warnings:
-                lines.append(f"  - {mask_detail(warning)}")
-        else:
-            lines.append("  Không có")
+
+        lines = [
+            f"👤 Tài Khoản: {name}  |  Nickname: {data.get('nickname', 'N/A')}  |  Vùng: {data.get('region', 'N/A')}  |  UID: {data.get('tiktok_user_id', 'N/A')}  |  @{data.get('unique_id', 'N/A')}",
+            f"📊 Thống Kê Kênh: Follower: {data.get('follower_count', 0):,}  |  Lượt Thích: {data.get('heart_count', 0):,}  |  Video: {data.get('video_count', 0):,}",
+            f"💰 Tài Chính & Kiếm Tiền: Số dư: {data.get('currency_symbol','$')}{data.get('balance', 0.0):.2f}  |  CRP: {data.get('crp_display', 'N/A')}  |  RPM: {data.get('crp_rpm', 0.0):.2f}  |  Views Đạt Chuẩn: {data.get('crp_qualified_views', 0):,}",
+            f"🛡️ Định Danh & Thanh Toán: KYC: {data.get('kyc_status', 'N/A')} ({data.get('kyc_full_name','')})  |  Thuế: {data.get('tax_status', 'N/A')}  |  PTTT: {data.get('payment_method', 'N/A')}",
+        ]
+        if data.get('errors'):
+            lines.append(f"⚠️ Cảnh báo: {', '.join(str(e) for e in data['errors'])}")
+
         self.detail_var.set("\n".join(lines))
+
+    def _copy_selected_uid(self):
+        sel = self.table.selection()
+        if not sel: return
+        data = self.results.get(sel[0], {})
+        uid = data.get('tiktok_user_id') or (profiles.get(sel[0], {}).get('config', {}) or {}).get('tiktok_user_id')
+        if uid:
+            root.clipboard_clear()
+            root.clipboard_append(str(uid))
+            toast_manager.enqueue(f"Đã copy UID: {uid}", level="info")
+        else:
+            toast_manager.enqueue("Chưa có thông tin UID", level="warning")
+
+    def _copy_selected_username(self):
+        sel = self.table.selection()
+        if not sel: return
+        data = self.results.get(sel[0], {})
+        user = data.get('unique_id') or (profiles.get(sel[0], {}).get('config', {}) or {}).get('tiktok_id')
+        if user:
+            root.clipboard_clear()
+            root.clipboard_append(f"@{str(user).lstrip('@')}")
+            toast_manager.enqueue(f"Đã copy Username: @{str(user).lstrip('@')}", level="info")
+        else:
+            toast_manager.enqueue("Chưa có thông tin Username", level="warning")
+
+    def _open_selected_tiktok(self):
+        sel = self.table.selection()
+        if not sel: return
+        data = self.results.get(sel[0], {})
+        user = data.get('unique_id') or (profiles.get(sel[0], {}).get('config', {}) or {}).get('tiktok_id')
+        if user:
+            import webbrowser
+            webbrowser.open(f"https://www.tiktok.com/@{str(user).lstrip('@')}")
+        else:
+            toast_manager.enqueue("Chưa có thông tin Username để mở", level="warning")
 
     def _on_close(self):
         self.cancel_event.set()
@@ -2422,7 +2513,31 @@ def _treeview_sort_column(tv, col, reverse):
     _tree_sort_state = (col, reverse)
     try:
         data = [(tv.set(k, col), k) for k in tv.get_children('')]
-        if col == 'status':
+        if col == 'cookie_st':
+            def sort_key_cookie(t):
+                val = str(t[0]).lower()
+                if 'live' in val: return 3
+                if 'check' in val: return 2
+                if 'die' in val: return 1
+                return 0
+            data.sort(key=sort_key_cookie, reverse=reverse)
+        elif col == 'activity':
+            def sort_key_activity(t):
+                val = str(t[0]).lower()
+                if 'chạy' in val: return 2
+                if 'mở' in val: return 1
+                return 0
+            data.sort(key=sort_key_activity, reverse=reverse)
+        elif col == 'monetization':
+            def sort_key_mono(t):
+                val = str(t[0]).lower()
+                if 'đang bật' in val: return 4
+                if 'kyc' in val: return 3
+                if 'thuế' in val: return 2
+                if 'tktbm' in val: return 1
+                return 0
+            data.sort(key=sort_key_mono, reverse=reverse)
+        elif col == 'status':
             def sort_key_status(t):
                 val = str(t[0]).lower()
                 if 'lỗi' in val: return 3
@@ -2430,15 +2545,6 @@ def _treeview_sort_column(tv, col, reverse):
                 if 'đang chạy' in val or 'running' in val: return 1
                 return 0
             data.sort(key=sort_key_status, reverse=reverse)
-        elif col == 'headless':
-            data.sort(key=lambda t: str(t[0]).lower() in ('có', 'true', 'yes'), reverse=reverse)
-        elif col == 'limit':
-            def sort_key_limit(t):
-                val_str = str(t[0]).lower()
-                if val_str in ('không', 'no', '0'): return 0
-                try: return float(val_str)
-                except Exception: return float('inf') 
-            data.sort(key=sort_key_limit, reverse=reverse)
         else:
             try: data.sort(key=lambda t: float(t[0]), reverse=reverse)
             except Exception: data.sort(key=lambda t: str(t[0]).lower(), reverse=reverse)
@@ -3141,11 +3247,29 @@ def shorten_filename(filename, max_len=64):
         return filename[:max_len - 3] + "..."
     return base[:keep] + "..." + ext
 
+LOG_RING_BUFFER = {
+    "important": [],
+    "failed": [],
+    "detail": [],
+}
+
+def add_log_entry(message, tag="INFO", important=False):
+    line_obj = {"text": f"{datetime.now().strftime('%H:%M:%S')} {message}", "tag": tag}
+    LOG_RING_BUFFER["detail"].append(line_obj)
+    if len(LOG_RING_BUFFER["detail"]) > 300:
+        LOG_RING_BUFFER["detail"].pop(0)
+    if important or tag in ("ERROR", "CRITICAL", "SUCCESS", "WARN"):
+        LOG_RING_BUFFER["important"].append(line_obj)
+        if len(LOG_RING_BUFFER["important"]) > 150:
+            LOG_RING_BUFFER["important"].pop(0)
+
 def update_status(message):
+    tag, important_tag = classify_log_message(message)
+    add_log_entry(message, tag=tag or "INFO", important=bool(important_tag))
+
     def _update():
         if not root.winfo_exists() or not status_text.winfo_exists(): return
         status_text.configure(state='normal')
-        tag, important_tag = classify_log_message(message)
         line = f"{datetime.now().strftime('%H:%M:%S')} {message}\n"
         status_text.insert(ctk.END, line, tag)
         trim_text_widget_lines(status_text, MAX_STATUS_LOG_LINES)
@@ -3162,7 +3286,10 @@ def update_status(message):
                     important_log_text.configure(state='disabled')
         except Exception:
             pass
-    root.after(0, _update)
+    try:
+        root.after(0, _update)
+    except Exception:
+        pass
 
 def _apply_scale(*_):
     try:
@@ -3993,7 +4120,14 @@ def _reapply_tree_sort():
 def update_profile_list(*args):
     sp = selected_project_var.get()
     kw = filter_var.get().strip().lower()
-    iter_names = sorted(profiles.keys()) if sp == ALL_OPTION else sorted(projects.get(sp, []))
+    if sp == ALL_OPTION:
+        iter_names = sorted(profiles.keys())
+    else:
+        proj_members = set(projects.get(sp, []))
+        for p_k, p_v in profiles.items():
+            if (p_v.get('config', {}) or {}).get('project_name') == sp:
+                proj_members.add(p_k)
+        iter_names = sorted(proj_members)
     iter_names = [n for n in iter_names if n in profiles]
 
     row_map = {}
@@ -4003,35 +4137,146 @@ def update_profile_list(*args):
         running = profiles[name]['running']
         cfg = profiles[name]['config']
         lim = str(cfg.get('max_uploads_per_day', 0)) if cfg.get('max_uploads_per_day', 0) > 0 else "Không"
-        headless_text = "Có" if cfg.get("headless", True) else "Không"
-        tiktok_id = str(cfg.get('tiktok_id', '') or '').lstrip('@')
+        tiktok_id = str(cfg.get('tiktok_id', '') or cfg.get('tiktok_account', '') or '').lstrip('@')
+        tiktok_display = f"@{tiktok_id}" if tiktok_id else ""
         region = _profile_region(cfg)
-        health = _health_summary(ui, running)
         snapshot = _build_profile_snapshot(name, profiles[name])
-        row = (
-            f"{name} {health} {automation_label(snapshot.automation)} {browser_label(snapshot.browser)} "
-            f"{ui.get('login','')} {ui.get('proxy','')} {ui.get('upload','')} {ui.get('last_error','')} "
-            f"{cfg.get('folder_path','')} {cfg.get('chrome_profile','')} {headless_text} {lim} {tiktok_id} {region}"
+
+        snap_mono = monetization_cache.get(name, {})
+        auth_state = str(cfg.get('session_auth_state', '')).lower()
+        cookie_raw = str(cfg.get('cookie_str', '') or '').strip()
+        login_ui = str(ui.get('login', '')).lower()
+        payout_st = snap_mono.get('payout_status', '')
+        kyc_st = snap_mono.get('kyc_status', '')
+        tax_st = snap_mono.get('tax_status', '')
+        crp_st = snap_mono.get('crp_status', '')
+        mono_st = snap_mono.get('status', '')
+        inspection = cfg.get('tiktok_inspection', {}) or {}
+
+        # 1. NO_COOKIE: Thực sự không có chuỗi cookie
+        is_no_cookie = (not cookie_raw) or (cookie_raw in ("[]", "{}", "null"))
+
+        # 2. COOKIE_LIVE: Có cookie và được xác thực hợp lệ (qua API/Browser)
+        is_cookie_live = (
+            not is_no_cookie
+            and (
+                auth_state in ("live", "verified")
+                or mono_st == "SUCCESS"
+                or payout_st in ("PAYOUT_READY", "PAYOUT_NOT_LINKED", "CRP_ACTIVE")
+                or browser_label(snapshot.browser) == "Sẵn sàng"
+                or inspection.get("state") == "VALID"
+            )
+            and auth_state not in ("expired", "invalid", "dead")
+        )
+
+        # 3. COOKIE_DIE: Có cookie nhưng hết hạn hoặc lỗi đăng nhập
+        is_cookie_die = (
+            not is_no_cookie
+            and not is_cookie_live
+            and (
+                auth_state in ("expired", "invalid", "dead")
+                or mono_st == "COOKIE_EXPIRED"
+                or payout_st in ("Cookie Die", "COOKIE_EXPIRED")
+                or kyc_st == "Cookie Die"
+                or "die" in login_ui
+            )
+        )
+
+        # 4. KYC_OK: Đã vượt qua xác minh danh tính
+        is_kyc_ok = (
+            kyc_st == "APPROVED"
+            or inspection.get("identity", {}).get("verified") is True
+            or inspection.get("payout", {}).get("verification_status") == "APPROVED"
+        )
+
+        # 5. TAX_OK: Đã hoàn tất hồ sơ thuế
+        is_tax_ok = (
+            tax_st in ("TAX_VERIFIED", "APPROVED")
+            or inspection.get("payout", {}).get("payout_status") in ("VERIFIED", "TAX_VERIFIED")
+        )
+
+        # 6. TKTBM: Bị hạn chế bảo mật
+        is_tktbm = (
+            crp_st == "TKTBM"
+            or "tktbm" in str(inspection).lower()
+        )
+
+        # 7. RUNNING: Đang chạy tác vụ
+        driver_alive = _browser_session_valid(profiles[name].get('driver'))
+        manual_driver_alive = _browser_session_valid(profiles[name].get('manual_driver'))
+        uploading = bool(profiles[name].get('uploading'))
+        is_running = running or snapshot.can_stop or driver_alive or manual_driver_alive or uploading
+
+        # Badge text format cho các cột bảng
+        if is_no_cookie:
+            cookie_badge = "⚪ Chưa có"
+        elif is_cookie_live:
+            cookie_badge = "🟢 Live"
+        elif is_cookie_die:
+            cookie_badge = "🔴 Die"
+        else:
+            cookie_badge = "🟡 Chưa check"
+
+        if is_running:
+            activity_badge = "⚡ Đang chạy"
+        elif driver_alive or manual_driver_alive:
+            activity_badge = "🌐 Đang mở"
+        else:
+            activity_badge = "⏸ Đã dừng"
+
+        if is_tktbm:
+            mono_badge = "🔴 TKTBM"
+        elif crp_st in ("ENABLED", "ACTIVE") or payout_st in ("PAYOUT_READY", "CRP_ACTIVE"):
+            mono_badge = "🏆 Đang bật"
+        elif is_kyc_ok:
+            mono_badge = "🟢 Đã KYC"
+        elif is_tax_ok:
+            mono_badge = "🟢 Đã Thuế"
+        else:
+            mono_badge = "⚪ Chưa bật"
+
+        proxy_str = ui.get('proxy', '')
+        proxy_region_badge = f"[{region}] {proxy_str}" if (region and proxy_str) else (proxy_str or region or "Tắt")
+
+        # Khớp từ khóa tìm kiếm (Search filter)
+        row_blob = (
+            f"{name} {tiktok_id} {cookie_badge} {activity_badge} {mono_badge} "
+            f"{proxy_str} {region} {upload_label(snapshot.upload)} "
+            f"{ui.get('last_error','')} {cfg.get('folder_path','')}"
         ).lower()
-        if kw and kw not in row:
+        if kw and kw not in row_blob:
             continue
+
+        # Lọc theo Active Filter Chip
+        active_chip = active_filter_chip_var.get() if 'active_filter_chip_var' in globals() else "ALL"
+        if active_chip == "COOKIE_LIVE" and not is_cookie_live:
+            continue
+        elif active_chip == "COOKIE_DIE" and not is_cookie_die:
+            continue
+        elif active_chip == "NO_COOKIE" and not is_no_cookie:
+            continue
+        elif active_chip == "KYC_OK" and not is_kyc_ok:
+            continue
+        elif active_chip == "TAX_OK" and not is_tax_ok:
+            continue
+        elif active_chip == "TKTBM" and not is_tktbm:
+            continue
+        elif active_chip == "RUNNING" and not is_running:
+            continue
+
         uuid = ensure_account_uuid(cfg)
         row_map[uuid] = (
             name,
             (
                 name,
-                automation_label(snapshot.automation),
-                browser_label(snapshot.browser),
-                health,
-                tiktok_id,
-                ui.get('proxy', ''),
-                region,
+                tiktok_display,
+                cookie_badge,
+                activity_badge,
+                mono_badge,
+                proxy_region_badge,
                 upload_label(snapshot.upload),
-                _short_ui_text(ui.get('last_error', '')),
                 cfg.get('folder_path', ''),
-                cfg.get('chrome_profile', ''),
-                headless_text,
-                lim,
+                _short_ui_text(ui.get('last_error', '')),
             ),
             row_tags(snapshot),
         )
@@ -6408,7 +6653,7 @@ def _run_single_upload_test_from_env():
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
 root = ctk.CTk()
-root.title("TikTok Auto Uploader (Pro Optimized)")
+root.title("DONGLAO-TIKTOK — Automation & Studio Suite")
 root.geometry("1380x920")
 root.minsize(1180, 760)
 root.configure(fg_color="#f3f4f6")
@@ -6423,17 +6668,45 @@ header_project_label = StringVar(master=root, value=ALL_OPTION)
 summary_cookie_var = StringVar(master=root, value="0")
 summary_error_var = StringVar(master=root, value="0")
 mono_total_balance_var = StringVar(master=root, value="$0.00")
+mono_crp_count_var = StringVar(master=root, value="0 Acc")
+mono_kyc_count_var = StringVar(master=root, value="0 Acc")
+mono_tax_count_var = StringVar(master=root, value="0 Acc")
+mono_tktbm_count_var = StringVar(master=root, value="0 Acc")
 mono_ready_count_var = StringVar(master=root, value="0")
 mono_action_needed_var = StringVar(master=root, value="0")
+mono_status_var = StringVar(master=root, value="")
+active_filter_chip_var = StringVar(master=root, value="ALL")
+mono_active_filter_chip_var = StringVar(master=root, value="ALL")
 
 from ui_components import ToastManager
 toast_manager = ToastManager(root)
 
-from tiktok_monetization_client import fetch_monetization_snapshot
+from tiktok_monetization_client import fetch_monetization_snapshot, apply_creative_rewards_for_profile
 from ui_dialogs import MonetizationDetailModal
 from concurrent.futures import ThreadPoolExecutor
 
+MONETIZATION_CACHE_FILE = app_base_dir() / "monetization_cache.json"
 monetization_cache = {}
+
+def _load_monetization_cache():
+    global monetization_cache
+    if MONETIZATION_CACHE_FILE.exists():
+        try:
+            with open(MONETIZATION_CACHE_FILE, "r", encoding="utf-8") as f:
+                monetization_cache = json.load(f)
+        except Exception:
+            monetization_cache = {}
+    else:
+        monetization_cache = {}
+
+def _save_monetization_cache():
+    try:
+        with open(MONETIZATION_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(monetization_cache, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+_load_monetization_cache()
 
 configure_ttk_styles()
 
@@ -6447,45 +6720,134 @@ ui_state = {
     'summary_cookie_var': summary_cookie_var,
     'summary_error_var': summary_error_var,
     'mono_total_balance_var': mono_total_balance_var,
+    'mono_crp_count_var': mono_crp_count_var,
+    'mono_kyc_count_var': mono_kyc_count_var,
+    'mono_tax_count_var': mono_tax_count_var,
+    'mono_tktbm_count_var': mono_tktbm_count_var,
     'mono_ready_count_var': mono_ready_count_var,
     'mono_action_needed_var': mono_action_needed_var,
+    'mono_status_var': mono_status_var,
+    'active_filter_chip': active_filter_chip_var,
+    'mono_active_filter_chip': mono_active_filter_chip_var,
 }
 
 def _update_monetization_table(*_args):
     mono_tree = ui_widgets.get('monetization_tree') if 'ui_widgets' in globals() else None
     if not mono_tree:
         return
-    
+
     current_proj = selected_project_var.get()
     kw = filter_var.get().strip().lower()
-    
+    mono_chip = mono_active_filter_chip_var.get()
+
     total_balance = 0.0
     ready_count = 0
-    action_count = 0
+    crp_count = 0
+    kyc_count = 0
+    tax_count = 0
+    tktbm_count = 0
 
     for item in mono_tree.get_children():
         mono_tree.delete(item)
 
     for name, prof in sorted(profiles.items()):
         config = prof.get('config', {})
-        if current_proj != ALL_OPTION and config.get('project_name') != current_proj:
-            continue
-        if kw and kw not in name.lower() and kw not in config.get('tiktok_account', '').lower():
-            continue
-
         snap = monetization_cache.get(name, {})
         bal_val = float(snap.get('balance', 0.0) or 0.0)
         p_status = snap.get('payout_status', 'CHƯA CHECK')
         k_status = snap.get('kyc_status', 'N/A')
+        tax_st = snap.get('tax_status', 'N/A')
         p_method = snap.get('payment_method', 'N/A')
         chk_at = snap.get('checked_at', 'Chưa kiểm tra')
         reg = snap.get('region', config.get('region', 'US'))
+        crp_display = snap.get('crp_display', 'Chưa check')
+        crp_status = snap.get('crp_status', '')
 
+        # Global stats calculation
         total_balance += bal_val
         if p_status == 'PAYOUT_READY':
             ready_count += 1
-        elif p_status in ('PAYOUT_NOT_LINKED', 'NO_AUTH', 'ERROR') or k_status in ('NOT_STARTED', 'REJECTED'):
-            action_count += 1
+        if crp_status in ('ACTIVE', 'ELIGIBLE'):
+            crp_count += 1
+        if k_status == 'APPROVED':
+            kyc_count += 1
+        if tax_st in ('TAX_VERIFIED', 'APPROVED'):
+            tax_count += 1
+        if crp_status == 'TKTBM':
+            tktbm_count += 1
+
+        # Project and keyword filters
+        if current_proj != ALL_OPTION and config.get('project_name') != current_proj:
+            continue
+        uid_val = str(snap.get('tiktok_user_id') or snap.get('unique_id') or config.get('tiktok_account') or '')
+        if kw and kw not in name.lower() and kw not in uid_val.lower() and kw not in p_method.lower():
+            continue
+
+        # Filter Chip match
+        if mono_chip == "PAYOUT_READY":
+            if p_status != 'PAYOUT_READY':
+                continue
+        elif mono_chip == "CRP_ACTIVE":
+            if crp_status not in ('ACTIVE', 'ELIGIBLE'):
+                continue
+        elif mono_chip == "TAX_OK":
+            if tax_st not in ('TAX_VERIFIED', 'APPROVED'):
+                continue
+        elif mono_chip == "KYC_OK":
+            if k_status != 'APPROVED':
+                continue
+        elif mono_chip == "TKTBM":
+            if crp_status != 'TKTBM':
+                continue
+
+        if p_status == 'PAYOUT_READY':
+            p_display = "🟢 SẴN SÀNG"
+        elif p_status == 'Cookie Die':
+            p_display = "🔴 COOKIE DIE"
+        elif p_status in ('Chưa có Cookie', 'NO_AUTH'):
+            p_display = "⚪ CHƯA CÓ COOKIE"
+        elif p_status == 'Lỗi Proxy':
+            p_display = "🟡 LỖI PROXY"
+        elif p_status == 'PAYOUT_NOT_LINKED':
+            p_display = "🔵 CHƯA LIÊN KẾT"
+        else:
+            p_display = str(p_status)
+
+        # Tax Status formatting
+        if tax_st in ('TAX_VERIFIED', 'APPROVED'):
+            tax_display = "🟢 ĐÃ KHAI THUẾ"
+        elif tax_st in ('TAX_PENDING', 'PENDING'):
+            tax_display = "🟡 ĐANG DUYỆT"
+        elif tax_st == 'Cookie Die':
+            tax_display = "🔴 COOKIE DIE"
+        elif tax_st in ('Chưa có Cookie', 'NO_AUTH'):
+            tax_display = "⚪ CHƯA CÓ COOKIE"
+        elif tax_st == 'Lỗi Proxy':
+            tax_display = "🟡 LỖI PROXY"
+        elif tax_st == 'NOT_STARTED':
+            tax_display = "⚪ CHƯA KHAI"
+        else:
+            tax_display = str(tax_st)
+
+        # KYC Status formatting
+        if k_status == 'APPROVED':
+            k_display = "🟢 ĐÃ KYC"
+        elif k_status == 'Cookie Die':
+            k_display = "🔴 COOKIE DIE"
+        elif k_status in ('Chưa có Cookie', 'NO_AUTH'):
+            k_display = "⚪ CHƯA CÓ COOKIE"
+        elif k_status == 'NOT_STARTED':
+            k_display = "⚪ CHƯA KYC"
+        elif k_status == 'PENDING':
+            k_display = "🟡 ĐANG CHỜ"
+        elif k_status == 'REJECTED':
+            k_display = "🔴 BỊ TỪ CHỐI"
+        else:
+            k_display = str(k_status)
+
+        # TikTok ID / UID & Region formatting
+        uid_display = str(snap.get('tiktok_user_id') or snap.get('unique_id') or config.get('tiktok_account') or 'N/A')
+        reg_display = str(snap.get('region') or snap.get('store_region') or config.get('region', 'US')).upper()
 
         mono_tree.insert(
             '',
@@ -6493,24 +6855,34 @@ def _update_monetization_table(*_args):
             iid=name,
             values=(
                 name,
-                config.get('tiktok_account') or 'N/A',
-                reg,
+                uid_display,
+                reg_display,
+                crp_display,
                 f"${bal_val:,.2f}",
-                p_status,
-                k_status,
+                p_display,
+                tax_display,
+                k_display,
                 p_method,
                 chk_at,
             ),
         )
 
     mono_total_balance_var.set(f"${total_balance:,.2f}")
-    mono_ready_count_var.set(str(ready_count))
-    mono_action_needed_var.set(str(action_count))
+    mono_ready_count_var.set(f"{ready_count} Acc")
+    mono_crp_count_var.set(f"{crp_count} Acc")
+    mono_kyc_count_var.set(f"{kyc_count} Acc")
+    mono_tax_count_var.set(f"{tax_count} Acc")
+    mono_tktbm_count_var.set(f"{tktbm_count} Acc")
 
 
 def _do_fetch_monetization_worker(targets):
-    toast_manager.enqueue(f"Bắt đầu quét số dư {len(targets)} tài khoản...", level="info")
+    total = len(targets)
+    toast_manager.enqueue(f"Bắt đầu quét thu nhập {total} tài khoản...", level="info")
+    update_status(f"[Thu Nhập] Bắt đầu quét {total} tài khoản...")
+    mono_status_var.set(f"Đang chuẩn bị quét {total} tài khoản...")
     success_count = 0
+    processed_count = 0
+
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {
             executor.submit(fetch_monetization_snapshot, name, profiles[name].get('config', {})): name
@@ -6518,24 +6890,53 @@ def _do_fetch_monetization_worker(targets):
         }
         for fut in futures:
             name = futures[fut]
+            processed_count += 1
             try:
                 data = fut.result(timeout=20.0)
                 monetization_cache[name] = data
-                if data.get("status") == "SUCCESS":
+                st = data.get("status")
+                if st == "SUCCESS":
                     success_count += 1
+                    status_desc = f"OK (${data.get('balance', 0.0):.2f})"
+                elif st == "COOKIE_EXPIRED":
+                    _set_profile_ui(name, last_error="Cookie die - Hết hạn phiên đăng nhập", login="Die", refresh=False)
+                    _mark_session_failure(name, "Cookie die - Hết hạn phiên đăng nhập")
+                    status_desc = "🔴 Cookie Die"
+                elif st == "NO_AUTH":
+                    _set_profile_ui(name, last_error="Chưa có cookie (Cần đăng nhập)", login="Chưa có Cookie", refresh=False)
+                    status_desc = "⚪ Chưa có Cookie"
+                elif st == "PROXY_ERROR":
+                    _set_profile_ui(name, last_error="Lỗi kết nối Proxy", proxy="Lỗi Proxy", refresh=False)
+                    status_desc = "🟡 Lỗi Proxy"
+                else:
+                    status_desc = str(st)
             except Exception as e:
                 monetization_cache[name] = {
                     "balance": 0.0,
                     "payout_status": "ERROR",
+                    "tax_status": "ERROR",
                     "kyc_status": "ERROR",
                     "payment_method": "N/A",
                     "checked_at": "Lỗi",
                     "errors": [str(e)],
                 }
-    
-    root.after(0, _update_monetization_table)
+                _set_profile_ui(name, last_error=f"Lỗi kiểm tra: {e}", refresh=False)
+                status_desc = f"Lỗi ({e})"
+
+            # Realtime progress notification
+            msg_progress = f"[{processed_count}/{total}] Đang quét: {name} ({status_desc})"
+            update_status(f"[Thu Nhập] {msg_progress}")
+            mono_status_var.set(msg_progress)
+            _save_monetization_cache()
+            root.after(0, _update_monetization_table)
+            root.after(0, update_profile_list)
+
+    _save_monetization_cache()
+    fin_time = time.strftime("%H:%M:%S")
+    mono_status_var.set(f"Đã cập nhật lúc {fin_time} ({success_count}/{total} OK)")
+    update_status(f"[Thu Nhập] Hoàn tất quét {total} tài khoản: {success_count}/{total} thành công.")
     toast_manager.enqueue(
-        f"Hoàn tất quét thu nhập: {success_count}/{len(targets)} OK",
+        f"Hoàn tất quét thu nhập: {success_count}/{total} OK",
         level="success" if success_count > 0 else "warning"
     )
 
@@ -6563,6 +6964,34 @@ def refresh_selected_monetization():
     threading.Thread(target=_do_fetch_monetization_worker, args=(selected,), daemon=True).start()
 
 
+def apply_crp_selected():
+    mono_tree = ui_widgets.get('monetization_tree') if 'ui_widgets' in globals() else None
+    selected = list(mono_tree.selection()) if mono_tree else []
+    if not selected and 'tree' in globals():
+        selected = list(tree.selection())
+    if not selected:
+        toast_manager.enqueue("Vui lòng chọn ít nhất 1 profile để gửi duyệt CRP.", level="warning")
+        return
+
+    def _run():
+        toast_manager.enqueue(f"Bắt đầu gửi đơn duyệt kiếm tiền cho {len(selected)} tài khoản...", level="info")
+        success_c = 0
+        for name in selected:
+            prof = profiles.get(name, {})
+            cfg = prof.get('config', {})
+            res = apply_creative_rewards_for_profile(name, cfg)
+            if res.get("success"):
+                success_c += 1
+                update_status(f"[{name}] Gửi đơn duyệt CRP thành công!")
+                toast_manager.enqueue(f"[{name}] {res.get('message')}", level="success")
+            else:
+                update_status(f"[{name}] Gửi đơn duyệt CRP thất bại: {res.get('message')}")
+                toast_manager.enqueue(f"[{name}] {res.get('message')}", level="error")
+        update_status(f"Hoàn tất gửi đơn duyệt CRP: {success_c}/{len(selected)} thành công.")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def view_monetization_details():
     mono_tree = ui_widgets.get('monetization_tree') if 'ui_widgets' in globals() else None
     selected = list(mono_tree.selection()) if mono_tree else []
@@ -6580,8 +7009,10 @@ def view_monetization_details():
             "region": config.get("region", "US"),
             "balance": 0.0,
             "payout_status": "CHƯA KIỂM TRA",
+            "tax_status": "CHƯA KIỂM TRA",
             "payment_method": "N/A",
             "kyc_status": "N/A",
+            "crp_display": "Chưa check",
             "rewards_estimated": "$0.00",
             "checked_at": "Chưa kiểm tra",
         }
@@ -6652,6 +7083,101 @@ youtube_monitor_handlers = {
     'remove_channel': youtube_monitor.remove_channel,
 }
 
+def open_profile_folder(selected_name=None):
+    if selected_name is None:
+        sel = tree.selection() if 'tree' in globals() else ()
+        if not sel: return
+        selected_name = tree.item(sel[0])['values'][0] if sel[0] in tree.get_children('') else sel[0]
+    cfg = profiles.get(selected_name, {}).get('config', {})
+    p_path = cfg.get('browser_profile_path') or cfg.get('chrome_profile')
+    if p_path and os.path.exists(p_path):
+        _open_dir(p_path)
+    else:
+        messagebox.showinfo("Thư mục Profile", f"Thư mục Profile chưa tồn tại:\n{p_path}")
+
+def open_video_folder(selected_name=None):
+    if selected_name is None:
+        sel = tree.selection() if 'tree' in globals() else ()
+        if not sel: return
+        selected_name = tree.item(sel[0])['values'][0] if sel[0] in tree.get_children('') else sel[0]
+    cfg = profiles.get(selected_name, {}).get('config', {})
+    f_path = cfg.get('folder_path')
+    if f_path and os.path.exists(f_path):
+        _open_dir(f_path)
+    else:
+        messagebox.showinfo("Thư mục Video", f"Thư mục Video chưa tồn tại:\n{f_path}")
+
+def copy_tiktok_uid(selected_name=None):
+    if selected_name is None:
+        sel = tree.selection() if 'tree' in globals() else ()
+        mono_sel = ui_widgets.get('monetization_tree').selection() if 'ui_widgets' in globals() and ui_widgets.get('monetization_tree') else ()
+        if sel:
+            selected_name = tree.item(sel[0])['values'][0] if sel[0] in tree.get_children('') else sel[0]
+        elif mono_sel:
+            selected_name = mono_sel[0]
+        else:
+            return
+    cfg = profiles.get(selected_name, {}).get('config', {})
+    snap = monetization_cache.get(selected_name, {})
+    uid = snap.get('tiktok_user_id') or snap.get('unique_id') or cfg.get('tiktok_id') or cfg.get('tiktok_account') or ''
+    if uid:
+        root.clipboard_clear()
+        root.clipboard_append(str(uid))
+        toast_manager.enqueue(f"Đã copy TikTok UID: {uid}", level="info")
+    else:
+        toast_manager.enqueue("Chưa có thông tin TikTok UID", level="warning")
+
+def copy_proxy_string(selected_name=None):
+    if selected_name is None:
+        sel = tree.selection() if 'tree' in globals() else ()
+        if not sel: return
+        selected_name = tree.item(sel[0])['values'][0] if sel[0] in tree.get_children('') else sel[0]
+    cfg = profiles.get(selected_name, {}).get('config', {})
+    proxy = cfg.get('proxy_string', '')
+    if proxy:
+        root.clipboard_clear()
+        root.clipboard_append(proxy)
+        toast_manager.enqueue("Đã copy chuỗi Proxy vào Clipboard", level="info")
+    else:
+        toast_manager.enqueue("Profile này không sử dụng Proxy", level="warning")
+
+def copy_cookie_string(selected_name=None):
+    if selected_name is None:
+        sel = tree.selection() if 'tree' in globals() else ()
+        if not sel: return
+        selected_name = tree.item(sel[0])['values'][0] if sel[0] in tree.get_children('') else sel[0]
+    cfg = profiles.get(selected_name, {}).get('config', {})
+    cookie = cfg.get('cookie_str', '')
+    if cookie:
+        root.clipboard_clear()
+        root.clipboard_append(cookie)
+        toast_manager.enqueue("Đã copy chuỗi Cookie vào Clipboard", level="info")
+    else:
+        toast_manager.enqueue("Chưa có chuỗi Cookie lưu sẵn", level="warning")
+
+def copy_payout_method(selected_name=None):
+    mono_tree = ui_widgets.get('monetization_tree') if 'ui_widgets' in globals() else None
+    if not mono_tree: return
+    sel = mono_tree.selection()
+    if not sel: return
+    name = sel[0]
+    snap = monetization_cache.get(name, {})
+    pm = snap.get('payment_method', '')
+    if pm:
+        root.clipboard_clear()
+        root.clipboard_append(pm)
+        toast_manager.enqueue(f"Đã copy PTTT: {pm}", level="info")
+    else:
+        toast_manager.enqueue("Chưa có thông tin PTTT", level="warning")
+
+def apply_filter_chip(chip_key):
+    active_filter_chip_var.set(chip_key)
+    update_profile_list()
+
+def apply_mono_filter_chip(chip_key):
+    mono_active_filter_chip_var.set(chip_key)
+    _update_monetization_table()
+
 activity_handlers = {
     'get_logs': get_activity_logs,
     'get_stats': get_activity_stats,
@@ -6679,6 +7205,7 @@ ui_handlers = {
     'refresh_all_monetization': refresh_all_monetization,
     'refresh_selected_monetization': refresh_selected_monetization,
     'view_monetization_details': view_monetization_details,
+    'apply_crp_selected': apply_crp_selected,
     'clean_browser': clean_browser,
     'change_license_key': change_license_key,
     'check_update': check_update_clicked,
@@ -6690,15 +7217,34 @@ ui_handlers = {
     'stop_all_in_project': stop_all_in_project,
     'copy_folder_path': copy_folder_path,
     'copy_channel_link': copy_channel_link,
+    'open_profile_folder': open_profile_folder,
+    'open_video_folder': open_video_folder,
+    'copy_tiktok_uid': copy_tiktok_uid,
+    'copy_proxy_string': copy_proxy_string,
+    'copy_cookie_string': copy_cookie_string,
+    'copy_payout_method': copy_payout_method,
+    'apply_filter_chip': apply_filter_chip,
+    'apply_mono_filter_chip': apply_mono_filter_chip,
     'sort_tree': _treeview_sort_column,
     'youtube_monitor': youtube_monitor_handlers,
     'activity': activity_handlers,
 }
 ui_widgets = build_dashboard(root, ui_state, ui_handlers)
 
-# Bind double-click on monetization tree
+# Bind double-click & right-click on monetization tree
 if 'monetization_tree' in ui_widgets:
     ui_widgets['monetization_tree'].bind("<Double-1>", lambda _e: view_monetization_details())
+    def _on_mono_tree_right_click(event):
+        mono_t = ui_widgets.get('monetization_tree')
+        if not mono_t: return
+        iid = mono_t.identify_row(event.y)
+        if not iid: return
+        if iid not in mono_t.selection():
+            mono_t.selection_set(iid)
+        mono_ctx = ui_widgets.get('mono_ctx_menu')
+        if mono_ctx:
+            mono_ctx.post(event.x_root, event.y_root)
+    ui_widgets['monetization_tree'].bind("<Button-3>", _on_mono_tree_right_click)
 
 topbar = ui_widgets['topbar']
 manage_frame = ui_widgets['manage_frame']
@@ -6791,9 +7337,10 @@ def _tick():
 root.after(1000, _tick)
 root.after(100, _drain_update_ui_queue)
 
-require_license_then_boot()
-_run_auto6_watcher_test_from_env()
-_run_single_upload_test_from_env()
-_run_live_verify_from_env()
-root.protocol("WM_DELETE_WINDOW", on_closing)
-root.mainloop()
+if __name__ == "__main__":
+    require_license_then_boot()
+    _run_auto6_watcher_test_from_env()
+    _run_single_upload_test_from_env()
+    _run_live_verify_from_env()
+    root.protocol("WM_DELETE_WINDOW", on_closing)
+    root.mainloop()

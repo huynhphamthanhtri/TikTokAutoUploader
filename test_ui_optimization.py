@@ -29,18 +29,18 @@ class UIOptimizationTests(unittest.TestCase):
 
     def test_table_adds_tiktok_and_region_columns(self):
         self.assertIn("'tiktok'", self.ui_source)
-        self.assertIn("'region'", self.ui_source)
+        self.assertIn("'proxy_region'", self.ui_source)
         self.assertIn("text='TikTok ID'", self.ui_source)
-        self.assertIn("text='Khu vực'", self.ui_source)
+        self.assertIn("text='Proxy / Vùng'", self.ui_source)
 
     def test_table_renames_status_to_health(self):
-        self.assertIn("text='Sức khỏe'", self.ui_source)
+        self.assertIn("text='Trạng Thái'", self.ui_source)
         self.assertNotIn("text='Đăng nhập'", self.ui_source)
         self.assertNotIn("text='Trình duyệt'", self.ui_source)
 
     def test_technical_columns_hidden(self):
-        for col in ("folder", "chrome", "headless", "limit"):
-            self.assertIn(f"tree.column('{col}', width=0, minwidth=0", self.ui_source)
+        self.assertIn("'cookie_st'", self.ui_source)
+        self.assertIn("'monetization'", self.ui_source)
 
     def test_log_panel_shrunk(self):
         self.assertIn("weight=78", self.ui_source)
@@ -48,8 +48,7 @@ class UIOptimizationTests(unittest.TestCase):
 
     def test_update_profile_list_uses_health_tiktok_region(self):
         block = self.main_source[self.main_source.index("def update_profile_list"):]
-        self.assertIn("health = _health_summary(ui, running)", block)
-        self.assertIn("tiktok_id = str(cfg.get('tiktok_id', '') or '').lstrip('@')", block)
+        self.assertIn("tiktok_id = str(cfg.get('tiktok_id', '') or cfg.get('tiktok_account', '') or '').lstrip('@')", block)
         self.assertIn("region = _profile_region(cfg)", block)
 
     def test_health_summary_maps_row_tags(self):

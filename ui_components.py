@@ -112,37 +112,42 @@ def calculate_summary_counts(
         if active_project and active_project != "Tất cả" and proj != active_project:
             continue
 
-        # Kiểm tra lọc theo search text
+        # Kiểm tra lọc theo search text (quét toàn diện khớp với update_profile_list)
         if f_text:
-            tiktok_id = str(cfg.get("tiktok_account", "") or "").lower()
+            tiktok_id = str(cfg.get("tiktok_id", "") or cfg.get("tiktok_account", "") or "").lower()
             proxy = str(cfg.get("proxy_string", "") or "").lower()
             note = str(cfg.get("note", "") or "").lower()
-            if not (f_text in name.lower() or f_text in tiktok_id or f_text in proxy or f_text in note):
+            region = str(cfg.get("region", "") or cfg.get("geo_country", "") or "").lower()
+            folder = str(cfg.get("folder_path", "") or "").lower()
+            profile_dir = str(cfg.get("chrome_profile", "") or "").lower()
+            last_err = str(data.get("last_error", "") or cfg.get("last_error", "") or "").lower()
+            status_text = str(data.get("status", "") or cfg.get("status", "") or "").lower()
+
+            search_blob = f"{name.lower()} {tiktok_id} {proxy} {note} {region} {folder} {profile_dir} {last_err} {status_text}"
+            if f_text not in search_blob:
                 continue
 
         total += 1
 
         status = str(data.get("status", "") or cfg.get("status", "")).lower()
-        if any(r in status for r in ("running", "processing", "uploading", "manual", "đang chạy", "đang đăng")):
+        if any(r in status for r in ("running", "processing", "uploading", "manual", "đang chạy", "đang đăng")) or data.get("running"):
             running += 1
 
         if any(e in status for e in ("error", "failed", "die", "checkpoint", "proxy_error", "lỗi")):
             errors += 1
 
-        # Cookie Live check: dựa vào session_auth_state và timestamp
+        # Cookie Live check: dựa vào session_auth_state, status, verified_at và TTL
         auth_state = str(cfg.get("session_auth_state", "")).lower()
         verified_at = cfg.get("session_verified_at")
-        is_fresh = False
+        is_fresh = True
         if verified_at:
             try:
-                # Nếu là timestamp số
                 v_ts = float(verified_at)
                 is_fresh = (now - v_ts) <= ttl_seconds
             except (ValueError, TypeError):
-                # Nếu là ISO format string
                 is_fresh = True
 
-        if auth_state == "live" and is_fresh:
+        if is_fresh and (auth_state in ("live", "verified") or ("live" in status or "sẵn sàng" in status or "sống" in status or "đã đăng nhập" in status)):
             cookie_live += 1
 
     return {

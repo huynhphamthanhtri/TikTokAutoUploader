@@ -55,9 +55,9 @@ class ProfileTableRefreshTests(unittest.TestCase):
 
     def test_status_columns_present_in_ui(self):
         self.assertIn("'activity'", self.ui_source)
-        self.assertIn("'browser'", self.ui_source)
-        self.assertIn("text='Hoạt động'", self.ui_source)
-        self.assertIn("text='Browser'", self.ui_source)
+        self.assertIn("'cookie_st'", self.ui_source)
+        self.assertIn("text='Trạng Thái'", self.ui_source)
+        self.assertIn("text='Cookie'", self.ui_source)
         self.assertIn("Check Cookie", self.ui_source)
         self.assertIn("handlers['check_cookie_live']", self.ui_source)
 

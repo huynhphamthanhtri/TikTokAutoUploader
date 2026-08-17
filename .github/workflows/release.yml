@@ -106,14 +106,14 @@ jobs:
       - name: Browser launch smoke (bundled resource)
         shell: pwsh
         run: |
-          $browserTag = "v1.0.7"
-          $browserZip = "Browser-v1.0.7.zip"
+          $browserTag = "v1.0.8"
+          $browserZip = "Browser-v1.0.8.zip"
           $url = "https://github.com/${{ github.repository }}/releases/download/$browserTag/$browserZip"
           $tmp = Join-Path $env:RUNNER_TEMP "browser_smoke"
           New-Item -ItemType Directory -Path $tmp -Force | Out-Null
           Invoke-WebRequest -Uri $url -OutFile (Join-Path $tmp $browserZip)
           Expand-Archive -Path (Join-Path $tmp $browserZip) -DestinationPath $tmp -Force
-          $exe = Join-Path $tmp "Browser\orbita-browser-123\chrome.exe"
+          $exe = Join-Path $tmp "Browser\chrome-win64\chrome.exe"
           if (-not (Test-Path $exe)) { throw "Bundled chrome.exe missing after extract" }
           $env:BROWSER_SMOKE_EXECUTABLE = $exe
           python browser_launch_smoke.py
@@ -193,11 +193,18 @@ jobs:
       - name: Create release zip
         run: |
           $tag = "${{ github.ref_name }}"
-          $zipName = "TikTokAutoUploader-${tag}.zip"
+          $zipName = "DONGLAO-TIKTOK-${tag}.zip"
           Compress-Archive -Path "dist\TikTokAutoUploader\*" -DestinationPath "dist\$zipName"
           $hash = (Get-FileHash "dist\$zipName" -Algorithm SHA256).Hash.ToLower()
           echo "ZIP_NAME=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "ZIP_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Create legacy release zip (for current-version auto-update)
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $legacyZip = "TikTokAutoUploader-${tag}.zip"
+          Copy-Item "dist\DONGLAO-TIKTOK-${tag}.zip" "dist\$legacyZip"
+          echo "LEGACY_ZIP_NAME=$legacyZip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Determine prerelease
         shell: pwsh
@@ -209,7 +216,9 @@ jobs:
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
-          files: "dist/${{ env.ZIP_NAME }}"
+          files: |
+            dist/${{ env.ZIP_NAME }}
+            dist/${{ env.LEGACY_ZIP_NAME }}
           body_path: "RELEASE_NOTES_VI.md"
           generate_release_notes: false
           prerelease: ${{ env.IS_PRERELEASE }}

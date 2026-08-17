@@ -1,3 +1,21 @@
+# Phiên bản 1.0.17
+
+## Điểm mới
+- Bổ sung tab/bộ lọc nhanh theo trạng thái cookie và thu nhập: Tất cả, Cookie Sống, Cookie Die, Chưa Có Cookie, Đã KYC, Đã Khai Thuế, TKTBM, Đang Chạy.
+- Mở rộng thông tin KYC và thu nhập Monetization: dữ liệu chi tiết thu nhập, quỹ tác giả (CRP), trạng thái đăng ký thuế và cảnh báo cookie hết hạn.
+- Bổ sung kiểm tra cookie nhanh qua HTTP (Webcast/Passport API) không cần mở browser.
+- Chuyển browser đóng gói sang Chromium chrome-win64.
+
+## Cải thiện
+- Nâng cấp dashboard Monetization thành 5 thẻ KPI tổng quan.
+- Cải thiện hộp thoại chi tiết thu nhập với đầy đủ thông tin tài chính và quỹ tác giả.
+- Ưu tiên dò tìm chrome-win64 tại nhiều vị trí root kèm tham số khởi chạy tối ưu RAM.
+- Đổi tên asset release sang tiền tố DONGLAO-TIKTOK-v; vẫn giữ file cập nhật tương thích cho bản cũ.
+
+## Sửa lỗi
+- Khắc phục bộ lọc tìm kiếm và thống kê không khớp khi profile thiếu thông tin tiktok_id.
+- Cải thiện xác định trạng thái cookie live dựa trên trạng thái session, trạng thái profile và thời gian xác thực.
+
 # Phiên bản 1.0.16
 
 ## Điểm mới

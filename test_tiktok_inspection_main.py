@@ -28,38 +28,22 @@ class TiktokInspectionMainTests(unittest.TestCase):
         self.assertIn("_blocked_by_profile_conflict(name)", block)
         self.assertIn("snapshot.can_check_cookie", block)
 
-    def test_inspection_worker_uses_readonly_fetch(self):
+    def test_inspection_worker_uses_fast_http(self):
         start = self.main_source.index("def _inspect_tiktok_account_worker")
         block = self.main_source[start:self.main_source.index("class InspectionDialog", start)]
-        self.assertIn("browser_glue.inspect_tiktok_account", block)
-        self.assertIn("wait_page_login_state", block)
-        self.assertIn("SEED_ENDPOINTS", block)
+        self.assertIn("TikTokMonetizationClient", block)
+        self.assertIn("fetch_all_monetization_data", block)
+        self.assertIn("cfg['tiktok_id'] = data['unique_id']", block)
+        self.assertIn("monetization_cache[name] = data", block)
 
-    def test_inspection_worker_owns_and_quits_session(self):
-        start = self.main_source.index("def _inspect_tiktok_account_worker")
-        block = self.main_source[start:self.main_source.index("class InspectionDialog", start)]
-        self.assertIn("token = browser_glue.open_session(cfg, name)", block)
-        self.assertIn("owned = True", block)
-        self.assertIn("if owned and token is not None:", block)
-        self.assertIn("token.quit()", block)
-
-    def test_inspection_snapshot_persisted(self):
-        start = self.main_source.index("def _persist_inspection_snapshot")
-        block = self.main_source[start:self.main_source.index("def _inspect_tiktok_account_worker", start)]
-        self.assertIn("cfg['tiktok_inspection'] = snapshot", block)
-        self.assertIn("'schema_version': 1", block)
-        self.assertIn("save_configs()", block)
-
-    def test_inspection_uses_operation_state(self):
-        self.assertIn("OperationState.INSPECTING_ACCOUNT.value", self.main_source)
-        self.assertIn('INSPECTING_ACCOUNT = "INSPECTING_ACCOUNT"', self.runtime_source)
-
-    def test_dialog_masks_payout_identifier(self):
+    def test_inspection_dialog_saas_features(self):
         start = self.main_source.index("class InspectionDialog")
         block = self.main_source[start:self.main_source.index("def inspect_selected_tiktok_account", start)]
-        self.assertIn("masked_identifier", block)
-        self.assertIn("Không có dữ liệu xác minh", block)
-        self.assertIn("mask_detail(warning)", block)
+        self.assertIn("ThreadPoolExecutor", block)
+        self.assertIn("btn_copy_uid", block)
+        self.assertIn("btn_copy_user", block)
+        self.assertIn("btn_open_web", block)
+        self.assertIn("concurrency_menu", block)
 
 
 if __name__ == "__main__":

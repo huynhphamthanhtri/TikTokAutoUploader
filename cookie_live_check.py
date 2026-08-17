@@ -32,12 +32,18 @@ class CookieSource(str, Enum):
     SAVED_COOKIE = "SAVED_COOKIE"
 
 
+class CookieCheckMode(str, Enum):
+    HTTP_FAST = "HTTP_FAST"
+    BROWSER_FULL = "BROWSER_FULL"
+
+
 @dataclass(frozen=True)
 class CookieCheckResult:
     account_uuid: str = ""
     profile_name: str = ""
     state: CookieCheckState = CookieCheckState.PENDING
     source: CookieSource = CookieSource.NONE
+    mode: CookieCheckMode = CookieCheckMode.BROWSER_FULL
     auth_cookie_names: tuple = ()
     checked_at: str = ""
     detail: str = ""
@@ -164,3 +170,85 @@ def mask_detail(text, secrets=()):
         masked = masked.replace(pattern, "cookie-auth")
     masked = _MASK_COOKIE_VALUE.sub(r"cookie-auth=***", masked)
     return masked
+
+
+def check_cookie_fast_http(cookie_raw, proxy_cfg=None, timeout=8.0):
+    """Kiểm tra nhanh cookie qua TikTok Webcast / Passport API không cần mở browser.
+    
+    Returns: (CookieCheckState, detail_message, auth_cookie_names_tuple)
+    """
+    import requests
+    from tiktok_monetization_client import build_cookie_string
+    from core_helpers import parse_proxy_string
+
+    cookie_str = build_cookie_string(cookie_raw)
+    if not cookie_str:
+        return CookieCheckState.DEAD, "Không có chuỗi cookie để kiểm tra", ()
+
+    # Check primary auth cookies
+    auth_names = []
+    for piece in cookie_str.split(";"):
+        k = piece.strip().split("=")[0].strip()
+        if k in ("sessionid", "sessionid_ss", "sid_tt", "sid_guard"):
+            auth_names.append(k)
+    auth_tuple = tuple(sorted(set(auth_names)))
+    if not auth_tuple:
+        return CookieCheckState.DEAD, "Cookie thiếu token xác thực chính (sessionid)", ()
+
+    session = requests.Session()
+    if proxy_cfg and proxy_cfg.get("use_proxy") and proxy_cfg.get("proxy_string"):
+        parsed = parse_proxy_string(proxy_cfg["proxy_string"])
+        if parsed and parsed.get("ip") and parsed.get("port"):
+            p_type = str(proxy_cfg.get("proxy_type", "http")).lower()
+            u, p = parsed.get("user"), parsed.get("pass")
+            if u and p:
+                p_url = f"{p_type}://{u}:{p}@{parsed['ip']}:{parsed['port']}"
+            else:
+                p_url = f"{p_type}://{parsed['ip']}:{parsed['port']}"
+            session.proxies = {"http": p_url, "https": p_url}
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.7559.96 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Cookie": cookie_str,
+        "Referer": "https://www.tiktok.com/",
+    }
+
+    try:
+        # 1. Check endpoint Webcast Creator Earnings (Nhạy với cookie die)
+        url = "https://webcast.tiktok.com/webcast/api/money/creator_earnings/v1/payout_summary"
+        resp = session.get(url, headers=headers, timeout=timeout)
+        if resp.status_code in (401, 403):
+            return CookieCheckState.DEAD, "TikTok trả về 401/403 (Cookie hết hạn)", auth_tuple
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+                st_code = data.get("status_code", 0)
+                st_msg = str(data.get("status_message", "")).lower()
+                if st_code in (20003, 10003) or "not logged in" in st_msg or "login" in st_msg:
+                    return CookieCheckState.DEAD, f"TikTok báo chưa đăng nhập (status {st_code})", auth_tuple
+                return CookieCheckState.LIVE, "Cookie Live (Xác thực qua Webcast API)", auth_tuple
+            except Exception:
+                pass
+
+        # 2. Fallback endpoint Passport Account Info
+        url_pass = "https://www.tiktok.com/passport/web/account/info/"
+        resp_pass = session.get(url_pass, headers=headers, timeout=timeout)
+        if resp_pass.status_code == 200:
+            try:
+                p_data = resp_pass.json().get("data", {})
+                if p_data.get("user_id") or p_data.get("user_id_str"):
+                    return CookieCheckState.LIVE, "Cookie Live (Xác thực qua Passport API)", auth_tuple
+            except Exception:
+                pass
+
+        return CookieCheckState.UNKNOWN, f"Không xác định được (HTTP {resp.status_code})", auth_tuple
+    except requests.exceptions.ProxyError as e:
+        return CookieCheckState.PROXY_ERROR, f"Lỗi kết nối Proxy: {type(e).__name__}", auth_tuple
+    except requests.RequestException as e:
+        err_str = str(e).lower()
+        if "proxy" in err_str:
+            return CookieCheckState.PROXY_ERROR, f"Lỗi Proxy: {type(e).__name__}", auth_tuple
+        return CookieCheckState.UNKNOWN, f"Lỗi mạng: {type(e).__name__}", auth_tuple
+    except Exception as e:
+        return CookieCheckState.UNKNOWN, f"Lỗi kiểm tra: {type(e).__name__}", auth_tuple

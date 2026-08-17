@@ -258,7 +258,7 @@ def _is_valid_executable(path):
 def resolve_browser_executable(app_base=None):
     """Return a Chromium-compatible executable path for Patchright.
 
-    Preference order: bundled ``Browser`` resource, then system Google Chrome.
+    Preference order: bundled ``Browser/chrome-win64``, then other bundled resources, then system Google Chrome.
     Returns ``None`` when no usable browser is found so callers can fail with a
     clear Vietnamese message instead of relying on Patchright's default
     ``.local-browsers`` lookup."""
@@ -270,9 +270,30 @@ def resolve_browser_executable(app_base=None):
         browser_dir / "chrome.exe",
         browser_dir / "chrome" / "chrome.exe",
     ]
+
+    # If in standard environment without explicit app_base, check all potential workspace roots
+    if app_base is None:
+        extra_bases = [
+            _app_base_dir(),
+            Path.cwd(),
+            Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else None,
+            Path(__file__).resolve().parent,
+        ]
+        for base in extra_bases:
+            if base and base.exists() and base != browser_dir.parent:
+                candidates.extend([
+                    base / "Browser" / "chrome-win64" / "chrome.exe",
+                    base / "_internal" / "Browser" / "chrome-win64" / "chrome.exe",
+                ])
+
+    seen = set()
     for path in candidates:
-        if path is not None and _is_valid_executable(path):
-            return str(path)
+        if path is not None:
+            p_str = str(path.resolve()) if hasattr(path, "resolve") and path.exists() else str(path)
+            if p_str not in seen:
+                seen.add(p_str)
+                if _is_valid_executable(path):
+                    return p_str
     return _find_system_chrome_executable()
 
 
@@ -380,11 +401,29 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profi
     )
     write_profile_config_files(profile_path, orbita_cfg)
 
+    # Ultra-optimized arguments for low RAM & high concurrency multi-profile hanging
     kwargs["args"] = (
         "--no-first-run",
         "--log-level=3",
         "--disable-session-crashed-bubble",
         "--disable-backgrounding-occluded-windows",
+        "--disable-background-timer-throttling",
+        "--disable-renderer-backgrounding",
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-domain-reliability",
+        "--disable-sync",
+        "--disable-breakpad",
+        "--disable-client-side-phishing-detection",
+        "--disable-default-apps",
+        "--disable-hang-monitor",
+        "--disable-popup-blocking",
+        "--disable-prompt-on-repost",
+        "--metrics-recording-only",
+        "--password-store=basic",
+        "--use-mock-keychain",
+        "--js-flags=--max-old-space-size=512",
+        "--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints",
     )
     kwargs["account_uuid"] = account_uuid
     kwargs["profile_name"] = resolved_profile_name
