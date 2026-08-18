@@ -9,12 +9,14 @@ Mô-đun thuần Presentation:
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 import customtkinter as ctk
 import queue
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 
 # ==============================================================================
@@ -588,3 +590,138 @@ class ToastManager:
             "frame": toast_frame,
             "created_at": time.time(),
         })
+
+
+# ==============================================================================
+# 9. RESPONSIVE DIALOG GEOMETRY & CENTERING HELPER
+# ==============================================================================
+
+def calculate_centered_geometry(
+    pref_w: int,
+    pref_h: int,
+    screen_w: int = 1366,
+    screen_h: int = 768,
+    min_w: int = 320,
+    min_h: int = 200,
+    margin_w: int = 60,
+    margin_h: int = 96,
+) -> Tuple[int, int, int, int, str]:
+    """
+    Calculates responsive dimensions and centered coordinates for a dialog.
+    Ensures dialog never overflows available screen height (subtracting taskbar & titlebar).
+    Returns (width, height, x, y, geometry_string).
+    """
+    avail_w = max(min_w, screen_w - margin_w)
+    avail_h = max(min_h, screen_h - margin_h)
+
+    width = min(pref_w, avail_w)
+    height = min(pref_h, avail_h)
+
+    x = max(0, (screen_w - width) // 2)
+    y = max(0, (screen_h - height) // 2 - 15)
+
+    geom_str = f"{width}x{height}+{x}+{y}"
+    return width, height, x, y, geom_str
+
+
+def fit_and_center_dialog(
+    dlg: Any,
+    pref_w: int,
+    pref_h: int,
+    parent: Optional[Any] = None,
+    min_w: int = 320,
+    min_h: int = 200,
+) -> Tuple[int, int]:
+    """
+    Dynamically sizes and centers a CTkToplevel dialog on the screen or parent.
+    Applies geometry, minsize, application branding icon, and returns (width, height).
+    """
+    try:
+        if parent is not None and hasattr(parent, "winfo_screenwidth"):
+            screen_w = parent.winfo_screenwidth()
+            screen_h = parent.winfo_screenheight()
+        elif hasattr(dlg, "winfo_screenwidth"):
+            screen_w = dlg.winfo_screenwidth()
+            screen_h = dlg.winfo_screenheight()
+        else:
+            screen_w, screen_h = 1366, 768
+    except Exception:
+        screen_w, screen_h = 1366, 768
+
+    width, height, x, y, geom_str = calculate_centered_geometry(
+        pref_w, pref_h, screen_w, screen_h, min_w, min_h
+    )
+
+    try:
+        dlg.geometry(geom_str)
+        dlg.minsize(min_w, min_h)
+    except Exception:
+        pass
+
+    try:
+        apply_app_icon(dlg)
+    except Exception:
+        pass
+
+    return width, height
+
+
+def resolve_app_icon_path(app_base: Optional[Any] = None) -> Optional[Path]:
+    """Find the application icon.ico across root, _internal, assets, or sys._MEIPASS."""
+    if getattr(sys, "frozen", False):
+        bases = [
+            Path(sys.executable).resolve().parent,
+            Path(sys.executable).resolve().parent / "_internal",
+            getattr(sys, "_MEIPASS", None),
+        ]
+    else:
+        root_dir = Path(app_base or Path(__file__).resolve().parent)
+        bases = [
+            root_dir,
+            root_dir / "_internal",
+            root_dir / "assets",
+        ]
+
+    for b in bases:
+        if b:
+            p = Path(b) / "icon.ico"
+            if p.exists() and p.is_file() and p.stat().st_size > 0:
+                return p.resolve()
+    return None
+
+
+_APP_USER_MODEL_ID_SET = False
+
+
+def apply_app_icon(window: Any, app_base: Optional[Any] = None) -> bool:
+    """Apply icon.ico to the given Tk / CTk window or toplevel, and register Windows AppUserModelID."""
+    global _APP_USER_MODEL_ID_SET
+    if sys.platform == "win32" and not _APP_USER_MODEL_ID_SET:
+        try:
+            import ctypes
+            app_id = "donglao.tiktok.studio.suite"
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+            _APP_USER_MODEL_ID_SET = True
+        except Exception:
+            pass
+
+    icon_path = resolve_app_icon_path(app_base)
+    if not icon_path or not icon_path.exists():
+        return False
+
+    def _set_icon():
+        try:
+            if hasattr(window, "iconbitmap"):
+                window.iconbitmap(str(icon_path))
+            elif hasattr(window, "wm_iconbitmap"):
+                window.wm_iconbitmap(str(icon_path))
+        except Exception:
+            pass
+
+    _set_icon()
+    try:
+        if hasattr(window, "after"):
+            window.after(100, _set_icon)
+    except Exception:
+        pass
+    return True

@@ -7,12 +7,13 @@ from patchright_upload import SELECTORS, UploadTimeouts, upload_tiktok
 
 
 class FakeElement:
-    def __init__(self, *, visible=True, enabled=True, text="", on_click=None, attributes=None):
+    def __init__(self, *, visible=True, enabled=True, text="", on_click=None, attributes=None, evaluate_payload=None):
         self.visible = visible
         self.enabled = enabled
         self.text = text
         self.on_click = on_click
         self.attributes = attributes or {}
+        self.evaluate_payload = evaluate_payload
         self.clicks = 0
         self.files = []
 
@@ -37,6 +38,11 @@ class FakeElement:
 
     async def set_input_files(self, path):
         self.files.append(path)
+
+    async def evaluate(self, script):
+        if self.evaluate_payload is None:
+            raise AttributeError("element evaluate is not available")
+        return self.evaluate_payload
 
 
 class FakeLocator:
@@ -307,7 +313,7 @@ class PatchrightUploadTests(unittest.IsolatedAsyncioTestCase):
                 return selector
         self.fail("content_checks_cancel popup not defined")
 
-    def _popup_page(self, *, content_checks_first=False, sticky_overlay=False):
+    def _popup_page(self, *, content_checks_first=False, simultaneous=False, sticky_overlay=False):
         page = FakePage()
         page.post_button.on_click = lambda: page.emit_response(FakeResponse())
         overlay = FakeElement()
@@ -340,7 +346,11 @@ class PatchrightUploadTests(unittest.IsolatedAsyncioTestCase):
         page.locators[self._got_it_selector()] = elems("got_it")
         page.locators[self._content_checks_selector()] = elems("content")
 
-        if content_checks_first:
+        if simultaneous:
+            content.visible = True
+            got_it.visible = True
+            overlay.visible = True
+        elif content_checks_first:
             content.visible = True
             got_it.visible = False
             overlay.visible = False
@@ -378,6 +388,22 @@ class PatchrightUploadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["content"].clicks, 1)
         self.assertEqual(state["got_it"].clicks, 1)
         self.assertEqual(page.post_button.clicks, 1)
+
+    async def test_simultaneous_identified_popups_dismiss_in_safe_priority_order(self):
+        page, state = self._popup_page(simultaneous=True)
+
+        result = await upload_tiktok(
+            page,
+            self.video,
+            timeouts=self.timeouts,
+            diagnostics_dir=None,
+            stop_before_post=True,
+        )
+
+        self.assertEqual(result.outcome, "prepared")
+        self.assertEqual(state["content"].clicks, 1)
+        self.assertEqual(state["got_it"].clicks, 1)
+        self.assertEqual(page.post_button.clicks, 0)
 
     async def test_sticky_joyride_overlay_blocks_post_before_dispatch(self):
         page, state = self._popup_page(sticky_overlay=True)
@@ -427,6 +453,37 @@ class PatchrightUploadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.outcome, "failed")
         self.assertFalse(result.post_dispatched)
         self.assertEqual(page.post_button.clicks, 0)
+
+    async def test_unknown_dialog_fails_closed_and_records_non_sensitive_snapshot(self):
+        page = FakePage()
+        dialog_snapshot = {
+            "text": "Tell us about your content Not now Continue",
+            "role": "dialog",
+            "ariaLabel": "Content information",
+            "className": "TUXModal unknown-dialog",
+            "dataE2e": "content-info-modal",
+            "buttons": [
+                {"text": "Not now", "ariaLabel": "", "dataE2e": "dismiss", "disabled": False},
+                {"text": "Continue", "ariaLabel": "", "dataE2e": "continue", "disabled": False},
+            ],
+        }
+        unknown = FakeElement(evaluate_payload=dialog_snapshot)
+        page.locators[SELECTORS["visible_dialog"]] = FakeLocator([unknown])
+
+        result = await upload_tiktok(
+            page,
+            self.video,
+            timeouts=self.timeouts,
+            diagnostics_dir=self.temp_dir.name,
+            stop_before_post=True,
+        )
+
+        self.assertEqual(result.outcome, "failed")
+        self.assertFalse(result.post_dispatched)
+        self.assertEqual(page.post_button.clicks, 0)
+        meta_path = next(Path(path) for path in result.diagnostic_paths if path.endswith(".json"))
+        payload = __import__("json").loads(meta_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["visible_dialogs"], [dialog_snapshot])
 
 
 if __name__ == "__main__":

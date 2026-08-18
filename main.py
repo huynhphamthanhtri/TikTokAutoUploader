@@ -30,7 +30,7 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox, ttk, StringVar, Menu
 from tkinter.scrolledtext import ScrolledText
 from app_ui import configure_ttk_styles, build_dashboard, classify_log_message
-from ui_components import UIThemeTokens
+from ui_components import UIThemeTokens, fit_and_center_dialog, calculate_centered_geometry, apply_app_icon
 from core_helpers import (
     parse_proxy_string,
     parse_cookie,
@@ -949,8 +949,7 @@ class CookieCheckDialog:
         self.cancel_event = threading.Event()
         self.dialog = ctk.CTkToplevel(root)
         self.dialog.title("Kiểm tra Live Cookie")
-        self.dialog.geometry("920x520")
-        self.dialog.minsize(780, 420)
+        fit_and_center_dialog(self.dialog, 960, 560, parent=root, min_w=760, min_h=400)
         self.dialog.resizable(True, True)
         self.dialog.transient(root)
         self.dialog.configure(fg_color=UIThemeTokens.BG_ROOT)
@@ -1521,8 +1520,7 @@ class InspectionDialog:
         self.cancel_event = threading.Event()
         self.dialog = ctk.CTkToplevel(root)
         self.dialog.title("Kiểm Tra Thông Tin TikTok — Fast HTTP Engine")
-        self.dialog.geometry("1300x660")
-        self.dialog.minsize(1000, 500)
+        fit_and_center_dialog(self.dialog, 1200, 660, parent=root, min_w=850, min_h=460)
         self.dialog.configure(fg_color=UIThemeTokens.BG_ROOT)
         self.dialog.transient(root)
         self.summary_var = ctk.StringVar(value=f"Đã chọn: {len(targets)} hồ sơ")
@@ -1846,7 +1844,7 @@ def _choose_browser_maintenance_mode(profile_name):
     result = {'mode': None}
     dialog = ctk.CTkToplevel(root)
     dialog.title('Reset Browser')
-    dialog.geometry('560x560')
+    fit_and_center_dialog(dialog, 560, 520, parent=root, min_w=460, min_h=380)
     dialog.resizable(False, False)
     dialog.transient(root)
     dialog.grab_set()
@@ -2314,53 +2312,30 @@ def check_license_online_or_cache(key):
 
     return False, {}, msg
 
-def _license_dialog(on_success):
-    dlg = ctk.CTkToplevel(root)
-    dlg.title("Kích hoạt License")
-    dlg.geometry("460x230")
-    dlg.grab_set()
-    dlg.focus_force()
-    dlg.resizable(False, False)
+def _license_dialog(on_success, is_first_run=True, initial_message=""):
+    from ui_dialogs import LicenseModal
+    cache = _load_license_cache() or {}
+    prefill_key = LICENSE_KEY or (cache.get("key", "") if isinstance(cache, dict) else "")
 
-    ctk.CTkLabel(dlg, text="Nhập License Key để sử dụng công cụ:", font=("", 14, "bold")).pack(pady=(16, 8))
-    key_var = ctk.StringVar(value="")
-
-    entry = ctk.CTkEntry(dlg, width=360, textvariable=key_var, placeholder_text="VD: USER-XXXX-YYYY-ZZZZ")
-    entry.pack(pady=(0, 10))
-    entry.focus_set()
-
-    msg_var = ctk.StringVar(value="")
-    msg_label = ctk.CTkLabel(dlg, textvariable=msg_var, text_color="#b91c1c")
-    msg_label.pack(pady=(0, 4))
-
-    def do_check():
+    def _on_modal_success(key, info):
         global LICENSE_OK, LICENSE_INFO, LICENSE_KEY
-        key = key_var.get().strip()
-        if not key:
-            msg_var.set("Vui lòng nhập License Key.")
-            return
-        msg_var.set("Đang kiểm tra...")
-        dlg.update()
-        ok, info, message = check_license_online_or_cache(key)
-        if ok:
-            LICENSE_OK = True
-            LICENSE_INFO = info
-            LICENSE_KEY = key
-            msg_var.set("")
-            dlg.destroy()
+        LICENSE_OK = True
+        LICENSE_INFO = info
+        LICENSE_KEY = key
+        if on_success:
             on_success()
-        else:
-            LICENSE_OK = False
-            msg_var.set(message)
 
-    def on_close():
-        if not LICENSE_OK:
-            on_closing()
-
-    btn = ctk.CTkButton(dlg, text="Kích hoạt", command=do_check, width=120)
-    btn.pack(pady=10)
-    dlg.protocol("WM_DELETE_WINDOW", on_close)
-    dlg.bind("<Return>", lambda _e: do_check())
+    dlg = LicenseModal(
+        parent=root,
+        check_func=check_license_online_or_cache,
+        on_success=_on_modal_success,
+        initial_key=prefill_key,
+        initial_status=str(LICENSE_INFO.get("status", "")),
+        initial_message=initial_message,
+        is_first_run=is_first_run,
+        on_close_app=on_closing,
+    )
+    return dlg
 
 def _set_ui_enabled(enabled: bool):
     targets = []
@@ -2420,7 +2395,23 @@ def require_license_then_boot():
         root.after(500, _first_run_download_check)
         root.after(5000, _run_background_update_check)
 
-    root.after(100, lambda: _license_dialog(on_success=_after_ok))
+    # 1. Thử xác thực ngầm nếu đã có License Key lưu trong cache
+    cache = _load_license_cache()
+    saved_key = str(cache.get("key", "")).strip() if isinstance(cache, dict) else ""
+    if saved_key:
+        try:
+            ok, info, _msg = check_license_online_or_cache(saved_key)
+            if ok:
+                LICENSE_OK = True
+                LICENSE_KEY = saved_key
+                LICENSE_INFO = info
+                root.after(50, _after_ok)
+                return
+        except Exception:
+            pass
+
+    # 2. Nếu không có key hoặc xác thực ngầm thất bại -> Mở LicenseModal
+    root.after(100, lambda: _license_dialog(on_success=_after_ok, is_first_run=True))
 
 LICENSE_WATCHDOG_STOP = threading.Event()
 
@@ -2435,7 +2426,7 @@ def _license_watchdog():
             stop_all_in_project()
             _set_ui_enabled(False)
             update_status("License mất hiệu lực.")
-            root.after(0, lambda: _license_dialog(on_success=lambda: _set_ui_enabled(True)))
+            root.after(0, lambda: _license_dialog(on_success=lambda: _set_ui_enabled(True), is_first_run=True, initial_message="License mất hiệu lực. Vui lòng kích hoạt lại."))
         except Exception:
             pass
 
@@ -2507,12 +2498,19 @@ def _smoke_mode_init():
 
 
 def _smoke_clean_exit():
+    """Exit the frozen smoke process immediately.
+
+    ``root.destroy()`` from inside the mainloop can race with pending ``after``
+    callbacks (icon, titlebar, monetization refresh) and hang before the process
+    exits, which would fail the CI smoke timeout. ``os._exit`` guarantees the
+    process terminates with a clean code; this path only runs in smoke mode."""
+    import os
     import sys
     try:
         root.destroy()
     except Exception:
         pass
-    sys.exit(0)
+    os._exit(0)
 
 # =========================
 # Tiện ích UI
@@ -2638,7 +2636,7 @@ def show_statistics_board():
 
     dlg = ctk.CTkToplevel(root)
     dlg.title("Thống kê hoạt động")
-    dlg.geometry("500x400")
+    fit_and_center_dialog(dlg, 500, 400, parent=root, min_w=400, min_h=300)
     dlg.grab_set()
 
     # Frame Tổng
@@ -2955,6 +2953,7 @@ def upload_video(profile_name, video_path):
     benchmark_phases = {}
     benchmark_success = False
     benchmark_post_clicked = False
+    benchmark_outcome = ''
     result = None
     driver_reused_before = _browser_session_valid(profiles.get(profile_name, {}).get('driver'))
 
@@ -2986,6 +2985,7 @@ def upload_video(profile_name, video_path):
                 # Patchright owns before_dispatch=mark_post_dispatch_started semantics.
                 record_phase('patchright_upload_seconds', phase_started)
                 benchmark_post_clicked = bool(result.post_dispatched)
+                benchmark_outcome = str(result.outcome or '')
                 last_error = result.message or result.outcome
 
                 if result.outcome == 'posted':
@@ -3024,7 +3024,7 @@ def upload_video(profile_name, video_path):
                     update_status(
                         f"[{profile_name}] Pre-Post dry-run hoàn tất: editor sẵn sàng, chưa bấm Post."
                     )
-                    return True
+                    return 'prepared'
 
                 no_retry = result.post_dispatched or result.outcome in {
                     'post_uncertain', 'cancelled_safe', 'cancelled_uncertain', 'rejected', 'login_required'
@@ -3087,6 +3087,7 @@ def upload_video(profile_name, video_path):
                     'driver_reused_before': driver_reused_before,
                     'driver_reused_actual': driver_reused_before,
                     'post_clicked': benchmark_post_clicked,
+                    'outcome': benchmark_outcome,
                     'driver_mode': 'warm' if driver_reused_before else 'cold',
                 },
             )
@@ -3191,7 +3192,10 @@ def process_video_queue_thread(profile_name):
             _set_profile_ui(profile_name, upload='Đang đăng')
             profiles[profile_name]['uploading'] = True
             ok = upload_video(profile_name, video_path)
-            if ok:
+            if ok == 'prepared':
+                _set_profile_ui(profile_name, upload='Dry-run OK (chưa Post)', last_error='')
+                update_status(f"[{profile_name}] Dry-run hoàn tất; không tăng số video đã đăng.")
+            elif ok:
                 profiles[profile_name]['uploads_today_count'] += 1
                 try:
                     meta = lookup_download(video_path)
@@ -3547,19 +3551,13 @@ def _profile_row_tag(ui, running):
     return ('tag_stopped',)
 
 def _refresh_status_bar():
-    total = sum(1 for _ in tree.get_children(''))
-    running = 0
-    for iid in tree.get_children(''):
-        item_data = tree.item(iid)
-        vals = item_data.get('values', ()) if isinstance(item_data, dict) else item_data
-        if isinstance(vals, (list, tuple)) and len(vals) > 0:
-            name = vals[0]
-            if profiles.get(name, {}).get('running'):
-                running += 1
-    status_count_label.configure(text=f"Hồ sơ: {total} | Đang chạy: {running}")
+    total_all = total_records_var.get() if 'total_records_var' in globals() else sum(1 for _ in tree.get_children(''))
+    total_on_page = sum(1 for _ in tree.get_children(''))
+    running = sum(1 for p in profiles.values() if p.get('running'))
+    status_count_label.configure(text=f"Hiển thị: {total_on_page}/{total_all} | Đang chạy: {running}")
     clock_label.configure(text=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     try:
-        header_total_label.set(str(total))
+        header_total_label.set(str(total_all))
         header_running_label.set(str(running))
         header_project_label.set(selected_project_var.get() or ALL_OPTION)
 
@@ -3600,6 +3598,12 @@ def _first_run_download_check():
         if not path.exists():
             missing[local_name] = info
 
+    # Upgrade case: Browser folder exists but the primary engine executable is absent
+    browser_info = RESOURCE_ASSETS.get("Browser") or {}
+    if "Browser" not in missing and browser_info.get("validate"):
+        if any(not (app_base_dir() / p).exists() for p in browser_info["validate"]):
+            missing["Browser"] = browser_info
+
     ffmpeg_ok, ffmpeg_msg, ffmpeg_src = fh.check_ffmpeg()
     ffmpeg_needed = not ffmpeg_ok
 
@@ -3609,13 +3613,17 @@ def _first_run_download_check():
     if not missing and not ffmpeg_needed and not ngrok_needed:
         return
 
+    if list(missing) == ["Browser"] and not ffmpeg_needed and not ngrok_needed:
+        _start_browser_engine_download()
+        return
+
     items_list = [f"- {name}" for name in missing]
     if ffmpeg_needed:
         items_list.append("- FFmpeg")
     if ngrok_needed:
         items_list.append("- ngrok.exe (Tunnel WebSub YouTube)")
     if "Browser" in missing:
-        items_list.append("  (Browser ~150 MB; tải về sẽ giải nén và xác minh)")
+        items_list.append("  (Browser ~700 MB sau khi giải nén; tải về sẽ giải nén và xác minh)")
     popup_msg = "Cần tải tài nguyên lần đầu:\n" + "\n".join(items_list) + "\n\nTiếp tục?"
 
     if not messagebox.askyesno("Tải tài nguyên", popup_msg):
@@ -3623,7 +3631,7 @@ def _first_run_download_check():
 
     dlg = ctk.CTkToplevel(root)
     dlg.title("Đang tải tài nguyên lần đầu...")
-    dlg.geometry("480x180")
+    fit_and_center_dialog(dlg, 480, 180, parent=root, min_w=400, min_h=160)
     dlg.grab_set()
     dlg.resizable(False, False)
     label = ctk.CTkLabel(dlg, text="Đang tải...", font=("", 13))
@@ -3682,6 +3690,11 @@ def _first_run_download_check():
                         updater = GitHubReleaseUpdater(app_base_dir(), GITHUB_REPO_OWNER, GITHUB_REPO_NAME)
                         updater.download_asset(url, part_path)
                         os.replace(part_path, zip_path)
+                        expected_sha = (info.get("sha256") or "").strip().lower()
+                        if expected_sha and expected_sha != "placeholder":
+                            from browser_engine_manager import compute_sha256
+                            if compute_sha256(zip_path) != expected_sha:
+                                raise RuntimeError(f"Checksum SHA-256 không khớp cho {asset_name}")
                         _update_status(f"Đang giải nén {local_name}...", (i - 0.4) / total)
                         extract_temp = temp_dir / f"extract_{local_name}"
                         shutil.rmtree(extract_temp, ignore_errors=True)
@@ -3784,6 +3797,40 @@ def _first_run_download_check():
             root.after(0, lambda msg=error_msg: _done(False, msg))
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+def _start_browser_engine_download():
+    """Tải Dong Lao TikTok Browser 144 qua dialog có progress, checksum và giải nén atomic."""
+    from version import (
+        RESOURCE_ASSETS,
+        RESOURCE_RELEASE_VERSION,
+        RESOURCE_BROWSER_ENGINE_DIR,
+    )
+    from ui_browser_downloader import BrowserEngineDownloadDialog
+
+    info = RESOURCE_ASSETS.get("Browser") or {}
+    asset_name = info.get("asset", "Browser-v{version}.zip").format(version=RESOURCE_RELEASE_VERSION)
+    expected_sha = (info.get("sha256") or "").strip().lower()
+    if expected_sha == "placeholder":
+        expected_sha = ""
+    download_url = (
+        f"https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}"
+        f"/releases/download/v{RESOURCE_RELEASE_VERSION}/{asset_name}"
+    )
+
+    def _on_complete(success, message):
+        if success:
+            update_status("Browser Dong Lao TikTok 144 đã sẵn sàng.")
+        else:
+            update_status(f"Lỗi tải Browser: {message}")
+
+    BrowserEngineDownloadDialog(
+        parent=root,
+        download_url=download_url,
+        target_engine_name=RESOURCE_BROWSER_ENGINE_DIR,
+        expected_sha256=expected_sha or None,
+        on_complete=_on_complete,
+    )
 
 
 def _stop_all_profiles():
@@ -3912,8 +3959,7 @@ def _show_update_available_dialog(result):
     dlg = ctk.CTkToplevel(root)
     _update_available_dialog = dlg
     dlg.title(f"Có phiên bản mới v{latest}")
-    dlg.geometry("680x560")
-    dlg.minsize(580, 460)
+    fit_and_center_dialog(dlg, 680, 560, parent=root, min_w=520, min_h=420)
     dlg.grab_set()
     dlg.focus_force()
 
@@ -4014,7 +4060,7 @@ def _do_download_update(result):
 
     dlg = ctk.CTkToplevel(root)
     dlg.title("Đang tải bản cập nhật...")
-    dlg.geometry("400x120")
+    fit_and_center_dialog(dlg, 420, 150, parent=root, min_w=380, min_h=130)
     dlg.grab_set()
     dlg.resizable(False, False)
 
@@ -4145,6 +4191,36 @@ def _reapply_tree_sort():
         pass
 
 
+def _update_pagination_ui(cur_page, total_pages, total_records):
+    try:
+        if 'ui_widgets' not in globals():
+            return
+        lbl = ui_widgets.get('pagination_page_info_label')
+        if lbl:
+            if total_records == 0:
+                lbl.configure(text="Không có hồ sơ nào")
+            else:
+                lbl.configure(text=f"Trang {cur_page} / {total_pages}   (Tổng {total_records} hồ sơ)")
+
+        btn_f = ui_widgets.get('pagination_btn_first')
+        if btn_f:
+            btn_f.configure(state="normal" if cur_page > 1 else "disabled")
+
+        btn_p = ui_widgets.get('pagination_btn_prev')
+        if btn_p:
+            btn_p.configure(state="normal" if cur_page > 1 else "disabled")
+
+        btn_n = ui_widgets.get('pagination_btn_next')
+        if btn_n:
+            btn_n.configure(state="normal" if cur_page < total_pages else "disabled")
+
+        btn_l = ui_widgets.get('pagination_btn_last')
+        if btn_l:
+            btn_l.configure(state="normal" if cur_page < total_pages else "disabled")
+    except Exception:
+        pass
+
+
 def update_profile_list(*args):
     sp = selected_project_var.get()
     kw = filter_var.get().strip().lower()
@@ -4158,8 +4234,9 @@ def update_profile_list(*args):
         iter_names = sorted(proj_members)
     iter_names = [n for n in iter_names if n in profiles]
 
-    row_map = {}
-    order = []
+    filtered_matching_items = []
+    active_chip = active_filter_chip_var.get() if 'active_filter_chip_var' in globals() else "ALL"
+
     for name in iter_names:
         ui = _profile_ui(name)
         running = profiles[name]['running']
@@ -4276,7 +4353,6 @@ def update_profile_list(*args):
             continue
 
         # Lọc theo Active Filter Chip
-        active_chip = active_filter_chip_var.get() if 'active_filter_chip_var' in globals() else "ALL"
         if active_chip == "COOKIE_LIVE" and not is_cookie_live:
             continue
         elif active_chip == "COOKIE_DIE" and not is_cookie_die:
@@ -4292,6 +4368,56 @@ def update_profile_list(*args):
         elif active_chip == "RUNNING" and not is_running:
             continue
 
+        filtered_matching_items.append((
+            name,
+            cfg,
+            tiktok_display,
+            cookie_badge,
+            activity_badge,
+            mono_badge,
+            proxy_region_badge,
+            snapshot,
+            ui,
+        ))
+
+    # Pagination calculations
+    total_records = len(filtered_matching_items)
+    if 'total_records_var' in globals():
+        total_records_var.set(total_records)
+
+    page_size_str = str(page_size_var.get()) if 'page_size_var' in globals() else "10 / trang"
+    if "10" in page_size_str and "100" not in page_size_str:
+        page_size = 10
+    elif "25" in page_size_str:
+        page_size = 25
+    elif "50" in page_size_str:
+        page_size = 50
+    elif "100" in page_size_str:
+        page_size = 100
+    elif "200" in page_size_str:
+        page_size = 200
+    else:
+        page_size = max(1, total_records)
+
+    import math
+    total_pages = max(1, math.ceil(total_records / page_size)) if total_records > 0 else 1
+    if 'total_pages_var' in globals():
+        total_pages_var.set(total_pages)
+
+    cur_page = current_page_var.get() if 'current_page_var' in globals() else 1
+    cur_page = max(1, min(cur_page, total_pages))
+    if 'current_page_var' in globals():
+        current_page_var.set(cur_page)
+
+    # Slice page items
+    start_idx = (cur_page - 1) * page_size
+    end_idx = start_idx + page_size
+    paged_items = filtered_matching_items[start_idx:end_idx]
+
+    row_map = {}
+    order = []
+    for item in paged_items:
+        name, cfg, tiktok_display, cookie_badge, activity_badge, mono_badge, proxy_region_badge, snapshot, ui = item
         uuid = ensure_account_uuid(cfg)
         row_map[uuid] = (
             name,
@@ -4335,6 +4461,7 @@ def update_profile_list(*args):
     _apply_row_tags()
     _refresh_status_bar()
     _update_action_buttons()
+    _update_pagination_ui(cur_page, total_pages, total_records)
 
 # =========================
 # Worker Functions (Batch)
@@ -4737,7 +4864,7 @@ def create_project():
     if not _license_guard(): return
     dlg = ctk.CTkToplevel(root)
     dlg.title("Tạo dự án")
-    dlg.geometry("300x150")
+    fit_and_center_dialog(dlg, 340, 180, parent=root, min_w=280, min_h=140)
     ctk.CTkLabel(dlg, text="Tên dự án:").pack(pady=5)
     e = ctk.CTkEntry(dlg, width=200)
     e.pack(pady=5)
@@ -4787,7 +4914,7 @@ def assign_to_project():
     name = tree.item(sel[0])['values'][0]
     dlg = ctk.CTkToplevel(root)
     dlg.title("Gán dự án")
-    dlg.geometry("300x150")
+    fit_and_center_dialog(dlg, 340, 180, parent=root, min_w=280, min_h=140)
     ctk.CTkLabel(dlg, text="Dự án:").pack(pady=5)
     var = StringVar(dlg, value=profiles[name].get('project', 'Mặc định'))
     cb = ctk.CTkComboBox(dlg, values=list(projects.keys()), variable=var)
@@ -4806,11 +4933,9 @@ def assign_to_project():
 def add_profile():
     if not _license_guard(): return
     
-    width, height = _dialog_size(960, 740)
     dlg = ctk.CTkToplevel(root)
     dlg.title("DONGLAO-TIKTOK — Thêm Hồ Sơ Mới")
-    dlg.geometry(f"{width}x{height}")
-    dlg.minsize(800, 600)
+    fit_and_center_dialog(dlg, 960, 720, parent=root, min_w=620, min_h=450)
     dlg.transient(root)
     try:
         dlg.grab_set()
@@ -5247,8 +5372,7 @@ def batch_add_profiles():
 
     dlg = ctk.CTkToplevel(root)
     dlg.title("DONGLAO-TIKTOK — Import Tài Khoản Hàng Loạt")
-    dlg.geometry("980x780")
-    dlg.minsize(800, 600)
+    fit_and_center_dialog(dlg, 1000, 750, parent=root, min_w=700, min_h=520)
     dlg.configure(fg_color=UIThemeTokens.BG_ROOT)
     dlg.transient(root)
     try:
@@ -5257,7 +5381,7 @@ def batch_add_profiles():
         pass
 
     top = ctk.CTkFrame(dlg, fg_color=UIThemeTokens.BG_CARD, corner_radius=10, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
-    top.pack(fill='x', padx=12, pady=(12, 6))
+    top.pack(side='top', fill='x', padx=12, pady=(12, 6))
     top.grid_columnconfigure(1, weight=1)
 
     ctk.CTkLabel(top, text="Định dạng:", font=('Segoe UI', 12, 'bold'), text_color=UIThemeTokens.TEXT_PRIMARY).grid(row=0, column=0, sticky='w', padx=10, pady=(8, 2))
@@ -5280,7 +5404,7 @@ def batch_add_profiles():
     ctk.CTkLabel(top, text="(Phân tách bằng dấu `|`, bấm các thẻ bên phải để chèn nhanh trường)", font=('Segoe UI', 10), text_color=UIThemeTokens.TEXT_MUTED).grid(row=2, column=1, sticky='w', padx=6, pady=(2, 8))
 
     opt = ctk.CTkFrame(dlg, fg_color=UIThemeTokens.BG_CARD, corner_radius=10, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
-    opt.pack(fill='x', padx=12, pady=(0, 6))
+    opt.pack(side='top', fill='x', padx=12, pady=(0, 6))
     skip_header_var = ctk.BooleanVar(opt, value=False)
     ctk.CTkCheckBox(opt, text="Dòng đầu là tiêu đề", variable=skip_header_var, font=('Segoe UI', 11)).pack(side='left', padx=(10, 16), pady=8)
     ctk.CTkLabel(opt, text="Loại Proxy:", font=('Segoe UI', 11), text_color=UIThemeTokens.TEXT_PRIMARY).pack(side='left')
@@ -5290,27 +5414,15 @@ def batch_add_profiles():
     dup_policy_var = StringVar(opt, value='Cập nhật')
     ctk.CTkOptionMenu(opt, values=['Cập nhật', 'Bỏ qua', 'Báo lỗi'], variable=dup_policy_var, width=120, height=28, button_color=UIThemeTokens.ACCENT_PRIMARY).pack(side='left', padx=4, pady=8)
 
-    middle = ctk.CTkFrame(dlg, fg_color=UIThemeTokens.BG_CARD, corner_radius=10, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
-    middle.pack(fill='both', expand=True, padx=12, pady=(0, 6))
-    middle.grid_columnconfigure(0, weight=1)
-    middle.grid_columnconfigure(1, weight=0)
-    middle.grid_rowconfigure(0, weight=1)
+    # 1. Pinned Bottom Action Bar (Packed first with side='bottom' so it is NEVER cut off)
+    btn_row = ctk.CTkFrame(dlg, fg_color='transparent')
+    btn_row.pack(side='bottom', fill='x', padx=12, pady=(4, 12))
 
-    txt_input = ctk.CTkTextbox(middle, width=620, height=260, font=("Consolas", 10))
-    txt_input.grid(row=0, column=0, sticky='nsew', padx=(8, 8), pady=8)
-
-    field_panel = ctk.CTkScrollableFrame(middle, width=220, height=260, label_text="Nhấn để chèn trường")
-    field_panel.grid(row=0, column=1, sticky='ns', padx=(0, 8), pady=8)
-    for field in DEFAULT_FIELDS:
-        ctk.CTkButton(
-            field_panel, text=field, height=26, fg_color='#e2e8f0', hover_color='#cbd5e1', text_color='#0f172a', font=('Segoe UI', 10),
-            command=lambda f=field: format_var.set((format_var.get() + ('' if format_var.get().endswith('|') else '|') + f)),
-        ).pack(fill='x', pady=2)
-
+    # 2. Pinned Bottom Preview Table (Packed above bottom buttons)
     prev_frame = ctk.CTkFrame(dlg, fg_color=UIThemeTokens.BG_CARD, corner_radius=10, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
-    prev_frame.pack(fill='x', padx=12, pady=(0, 6))
+    prev_frame.pack(side='bottom', fill='x', padx=12, pady=(0, 6))
     prev_cols = ('name', 'email', 'tiktok', 'proxy', 'status')
-    prev_tree = ttk.Treeview(prev_frame, columns=prev_cols, show='headings', height=6)
+    prev_tree = ttk.Treeview(prev_frame, columns=prev_cols, show='headings', height=4)
     for col, text, width in (
         ('name', 'Tên Profile', 160), ('email', 'Email', 180), ('tiktok', 'TikTok ID', 120),
         ('proxy', 'Proxy', 140), ('status', 'Trạng thái xử lý', 140),
@@ -5320,6 +5432,24 @@ def batch_add_profiles():
     prev_tree.pack(fill='x', padx=8, pady=(8, 4))
     error_label = ctk.CTkLabel(prev_frame, text="", text_color=UIThemeTokens.STATUS_ERROR, font=('Segoe UI', 11))
     error_label.pack(anchor='w', padx=10, pady=(0, 6))
+
+    # 3. Middle Expandable Section (Takes all remaining flexible space in the center)
+    middle = ctk.CTkFrame(dlg, fg_color=UIThemeTokens.BG_CARD, corner_radius=10, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+    middle.pack(side='top', fill='both', expand=True, padx=12, pady=(0, 6))
+    middle.grid_columnconfigure(0, weight=1)
+    middle.grid_columnconfigure(1, weight=0)
+    middle.grid_rowconfigure(0, weight=1)
+
+    txt_input = ctk.CTkTextbox(middle, width=620, height=180, font=("Consolas", 10))
+    txt_input.grid(row=0, column=0, sticky='nsew', padx=(8, 8), pady=8)
+
+    field_panel = ctk.CTkScrollableFrame(middle, width=220, height=180, label_text="Nhấn để chèn trường")
+    field_panel.grid(row=0, column=1, sticky='ns', padx=(0, 8), pady=8)
+    for field in DEFAULT_FIELDS:
+        ctk.CTkButton(
+            field_panel, text=field, height=26, fg_color='#e2e8f0', hover_color='#cbd5e1', text_color='#0f172a', font=('Segoe UI', 10),
+            command=lambda f=field: format_var.set((format_var.get() + ('' if format_var.get().endswith('|') else '|') + f)),
+        ).pack(fill='x', pady=2)
 
     def _parse_current():
         fields = parse_format(format_var.get())
@@ -5398,8 +5528,6 @@ def batch_add_profiles():
         )
         dlg.destroy()
 
-    btn_row = ctk.CTkFrame(dlg, fg_color='transparent')
-    btn_row.pack(fill='x', padx=12, pady=(4, 12))
     ctk.CTkButton(btn_row, text="📁 Mở File TXT", command=open_file, fg_color="#64748b", hover_color="#475569", height=32, text_color="#ffffff").pack(side='left', padx=2)
     ctk.CTkButton(btn_row, text="👁️ Xem Trước", command=do_preview, fg_color=UIThemeTokens.ACCENT_PRIMARY, hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER, height=32, text_color="#ffffff").pack(side='left', padx=6)
     ctk.CTkButton(btn_row, text="⚡ Nhập Dữ Liệu", command=run_import, fg_color=UIThemeTokens.STATUS_LIVE, hover_color="#15803d", height=32, text_color="#ffffff", font=('Segoe UI', 11, 'bold')).pack(side='right', padx=2)
@@ -5414,8 +5542,7 @@ def export_profiles():
 
     dlg = ctk.CTkToplevel(root)
     dlg.title("DONGLAO-TIKTOK — Xuất Dữ Liệu Tài Khoản")
-    dlg.geometry("880x660")
-    dlg.minsize(700, 500)
+    fit_and_center_dialog(dlg, 880, 640, parent=root, min_w=650, min_h=450)
     dlg.configure(fg_color=UIThemeTokens.BG_ROOT)
     dlg.transient(root)
     try:
@@ -5424,7 +5551,7 @@ def export_profiles():
         pass
 
     top = ctk.CTkFrame(dlg, fg_color=UIThemeTokens.BG_CARD, corner_radius=10, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
-    top.pack(fill='x', padx=12, pady=(12, 6))
+    top.pack(side='top', fill='x', padx=12, pady=(12, 6))
     top.grid_columnconfigure(1, weight=1)
 
     scope_var = StringVar(value='Tất cả')
@@ -5435,7 +5562,7 @@ def export_profiles():
     ctk.CTkRadioButton(scope_row, text="Đã chọn", variable=scope_var, value='Đã chọn').pack(side='left')
 
     field_row = ctk.CTkScrollableFrame(dlg, width=400, height=64, label_text="Nhấn đôi để chèn trường")
-    field_row.pack(fill='x', padx=10, pady=4)
+    field_row.pack(side='top', fill='x', padx=10, pady=4)
     inner = ctk.CTkFrame(field_row, fg_color='transparent')
     inner.pack(fill='x')
     for field in DEFAULT_FIELDS:
@@ -5444,9 +5571,14 @@ def export_profiles():
             command=lambda f=field: format_var.set((format_var.get() + ('' if format_var.get().endswith('|') else '|') + f)),
         ).pack(side='left', padx=2, pady=2)
 
+    # 1. Pinned Bottom Action Bar
+    btn_row = ctk.CTkFrame(dlg, fg_color='transparent')
+    btn_row.pack(side='bottom', fill='x', padx=10, pady=(4, 10))
+
+    # 2. Expandable Preview Section
     prev_frame = ctk.CTkFrame(dlg)
-    prev_frame.pack(fill='both', expand=True, padx=10, pady=4)
-    prev_tree = ttk.Treeview(prev_frame, columns=('name', 'email', 'tiktok', 'proxy'), show='headings', height=14)
+    prev_frame.pack(side='top', fill='both', expand=True, padx=10, pady=4)
+    prev_tree = ttk.Treeview(prev_frame, columns=('name', 'email', 'tiktok', 'proxy'), show='headings', height=12)
     for col, text, width in (('name', 'Name', 180), ('email', 'Email', 200), ('tiktok', 'TikTok ID', 140), ('proxy', 'Proxy', 180)):
         prev_tree.heading(col, text=text)
         prev_tree.column(col, width=width, anchor='w')
@@ -5543,9 +5675,10 @@ def _dialog_size(pref_w, pref_h, margin=48):
         work_h = root.winfo_screenheight()
     except Exception:
         work_w, work_h = 1366, 768
-    width = min(pref_w, max(460, work_w - margin))
-    height = min(pref_h, max(520, work_h - margin))
-    return width, height
+    w, h, _, _, _ = calculate_centered_geometry(
+        pref_w, pref_h, work_w, work_h, margin_w=margin, margin_h=margin + 48
+    )
+    return w, h
 
 
 def _ui_card(parent, title, subtitle=None):
@@ -5563,111 +5696,7 @@ def _ui_card(parent, title, subtitle=None):
 
 def _ui_footer(dialog, primary_text, primary_command, secondary_text='Đóng', secondary_command=None):
     footer = ctk.CTkFrame(dialog, corner_radius=12, fg_color='#ffffff', border_width=1, border_color='#e5e7eb')
-    footer.pack(fill='x', padx=10, pady=10)
-    if secondary_command is None:
-        secondary_command = dialog.destroy
-    ctk.CTkButton(footer, text=secondary_text, fg_color='#f1f5f9', text_color='#334155',
-                  hover_color='#e2e8f0', command=secondary_command).pack(side='left', padx=8, pady=6)
-    ctk.CTkButton(footer, text=primary_text, fg_color='#2563eb', hover_color='#1d4ed8',
-                  text_color='#ffffff', command=primary_command).pack(side='right', padx=8, pady=6)
-    return footer
-
-
-def _ui_badge(parent, text, color):
-    ctk.CTkLabel(parent, text=text, fg_color=color, text_color='#ffffff',
-                 corner_radius=10, font=('Segoe UI Semibold', 10), padx=8).pack(side='left', padx=(0, 6))
-
-
-def _cell_copy(parent, value):
-    btn = ctk.CTkButton(parent, text='Copy', width=50, height=26, fg_color='#eef2ff',
-                        text_color='#2563eb', hover_color='#dbeafe', font=('Segoe UI', 10))
-    def do():
-        if not value:
-            return
-        try:
-            root.clipboard_clear()
-            root.clipboard_append(value)
-            root.update()
-        except Exception:
-            pass
-        btn.configure(text='Đã copy')
-        root.after(1200, lambda: btn.configure(text='Copy'))
-    btn.configure(command=do)
-    btn.pack(side='right', padx=(4, 0))
-    return btn
-
-
-def _edit_field(body, r, c, label, value=''):
-    frame = ctk.CTkFrame(body, fg_color='transparent')
-    frame.grid(row=r, column=c, sticky='nsew', padx=8, pady=4)
-    ctk.CTkLabel(frame, text=label, font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
-    entry = ctk.CTkEntry(frame, height=32, border_width=1, border_color='#cbd5e1')
-    entry.insert(0, value)
-    entry.pack(fill='x', pady=(3, 0))
-    return frame, entry
-
-
-def _edit_secret(body, r, c, label, value=''):
-    frame = ctk.CTkFrame(body, fg_color='transparent')
-    frame.grid(row=r, column=c, sticky='nsew', padx=8, pady=4)
-    ctk.CTkLabel(frame, text=label, font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w')
-    row = ctk.CTkFrame(frame, fg_color='transparent')
-    row.pack(fill='x', pady=(3, 0))
-    entry = ctk.CTkEntry(row, show='*', height=32, border_width=1, border_color='#cbd5e1')
-    entry.insert(0, value)
-    entry.pack(side='left', fill='x', expand=True)
-    btn = ctk.CTkButton(row, text='Hiện', width=48, height=32, fg_color='#eef2ff',
-                        text_color='#2563eb', hover_color='#dbeafe', font=('Segoe UI', 10))
-    def toggle(b=btn, e=entry):
-        if e.cget('show'):
-            e.configure(show='')
-            b.configure(text='Ẩn')
-        else:
-            e.configure(show='*')
-            b.configure(text='Hiện')
-    btn.configure(command=toggle)
-    btn.pack(side='left', padx=(4, 0))
-    return frame, entry
-
-
-def _edit_check(parent, r, c, text, value):
-    frame = ctk.CTkFrame(parent, fg_color='transparent')
-    frame.grid(row=r, column=c, sticky='w', padx=8, pady=4)
-    var = ctk.BooleanVar(frame, value=value)
-    ctk.CTkCheckBox(frame, text=text, variable=var, font=('Segoe UI', 12)).pack(anchor='w')
-    return frame, var
-
-
-# =========================
-# Dialog UI helpers (shared)
-# =========================
-def _dialog_size(pref_w, pref_h, margin=48):
-    try:
-        work_w = root.winfo_screenwidth()
-        work_h = root.winfo_screenheight()
-    except Exception:
-        work_w, work_h = 1366, 768
-    width = min(pref_w, max(460, work_w - margin))
-    height = min(pref_h, max(520, work_h - margin))
-    return width, height
-
-
-def _ui_card(parent, title, subtitle=None):
-    card = ctk.CTkFrame(parent, corner_radius=12, fg_color='#ffffff', border_width=1, border_color='#e5e7eb')
-    card.pack(fill='x', padx=10, pady=(8, 2))
-    header = ctk.CTkFrame(card, fg_color='transparent')
-    header.pack(fill='x', padx=14, pady=(10, 2))
-    ctk.CTkLabel(header, text=title, font=('Segoe UI Semibold', 14), text_color='#0f172a').pack(anchor='w')
-    if subtitle:
-        ctk.CTkLabel(header, text=subtitle, font=('Segoe UI', 11), text_color='#64748b').pack(anchor='w', pady=(2, 0))
-    body = ctk.CTkFrame(card, fg_color='transparent')
-    body.pack(fill='both', expand=True, padx=14, pady=(4, 12))
-    return card, body
-
-
-def _ui_footer(dialog, primary_text, primary_command, secondary_text='Đóng', secondary_command=None):
-    footer = ctk.CTkFrame(dialog, corner_radius=12, fg_color='#ffffff', border_width=1, border_color='#e5e7eb')
-    footer.pack(fill='x', padx=10, pady=10)
+    footer.pack(side='bottom', fill='x', padx=10, pady=10)
     if secondary_command is None:
         secondary_command = dialog.destroy
     ctk.CTkButton(footer, text=secondary_text, fg_color='#f1f5f9', text_color='#334155',
@@ -5780,11 +5809,9 @@ def edit_profile(selected_name=None):
     ensure_account_uuid(cfg)
     fingerprint_backup = copy.deepcopy(cfg.get('fingerprint', {}))
 
-    width, height = _dialog_size(940, 720)
     dlg = ctk.CTkToplevel(root)
     dlg.title(f"Sửa tài khoản: {nm}")
-    dlg.geometry(f"{width}x{height}")
-    dlg.minsize(460, 520)
+    fit_and_center_dialog(dlg, 940, 700, parent=root, min_w=600, min_h=450)
     dlg.transient(root)
     try:
         dlg.grab_set()
@@ -6117,7 +6144,7 @@ def rename_profile():
         return
     dlg = ctk.CTkToplevel(root)
     dlg.title("Đổi tên")
-    dlg.geometry("300x150")
+    fit_and_center_dialog(dlg, 340, 180, parent=root, min_w=280, min_h=140)
     ctk.CTkLabel(dlg, text="Tên mới:").pack(pady=5)
     e = ctk.CTkEntry(dlg, width=200)
     e.pack(pady=5)
@@ -6291,11 +6318,9 @@ def view_profile_details(selected_name=None):
     cfg = profiles[selected_name]['config']
     ensure_account_uuid(cfg)
 
-    width, height = _dialog_size(900, 680)
     dlg = ctk.CTkToplevel(root)
     dlg.title(f"Chi tiết tài khoản: {selected_name}")
-    dlg.geometry(f"{width}x{height}")
-    dlg.minsize(460, 520)
+    fit_and_center_dialog(dlg, 900, 660, parent=root, min_w=550, min_h=420)
     dlg.transient(root)
     try:
         dlg.grab_set()
@@ -6423,7 +6448,7 @@ def open_browser():
             _sync_patchright_migration(cfg)
             save_configs()
             session_config = browser_glue.build_session_config(
-                cfg, mode=browser_glue.SessionMode.MANUAL, headed=True
+                cfg, mode=browser_glue.SessionMode.MANUAL, headed=True, profile_name=nm
             )
             opened = browser_glue.browser_service().open_session(session_config).result(
                 timeout=browser_glue.SESSION_OPEN_TIMEOUT
@@ -6443,7 +6468,19 @@ def open_browser():
                 if not matched:
                     raise SessionSetupError("Không xác minh được proxy trong browser" if not current_ip else f"Proxy sai IP: {current_ip}")
                 _set_profile_ui(nm, proxy=f"OK: {current_ip}")
-            browser_glue.navigate(token, TIKTOK_BASE_URL)
+
+            # Cookie-First Injection: Ưu tiên nạp Cookie đã lưu vào phiên làm việc
+            cookies = parse_cookie(cfg.get('cookie_str', ''))
+            if cookies:
+                try:
+                    browser_glue.import_cookies_report(token, cookies)
+                except Exception as e:
+                    update_status(f"[{nm}] [WARN] Không thể nạp cookie sẵn: {e}")
+                target_url = TIKTOK_BASE_URL
+            else:
+                target_url = "https://www.tiktok.com/login"
+
+            browser_glue.navigate(token, target_url)
 
             if not lc.register_manual(manual_gen, token):
                 raise RuntimeError("Lifecycle changed before manual session publish")
@@ -6476,7 +6513,7 @@ def open_browser():
             if token:
                 if closed_ok:
                     _set_profile_ui(nm, browser='Đã đóng', login='Đang lưu session')
-                    update_status(f"[{nm}] Browser thủ công đã đóng. Đang lưu session...")
+                    update_status(f"[{nm}] Browser thủ công đã đóng. Đang lưu session ngầm (Headless)...")
                     threading.Thread(target=_capture_after_manual_close, args=(nm,), daemon=True).start()
                 else:
                     _set_profile_ui(nm, browser='Đóng lỗi', last_error='Browser chưa được đóng sạch; hãy thử lại')
@@ -6494,9 +6531,16 @@ def _capture_after_manual_close(profile_name):
                 return
             profile['session_busy'] = True
             try:
-                _capture_tiktok_cookies_worker(
+                # 1. Trích xuất và lưu Cookie mới ngầm trong headless mode
+                saved = _capture_tiktok_cookies_worker(
                     profile_name, source_label='manual_login', auto_after_manual=True
                 )
+                # 2. Tự động lấy thông tin tài khoản (UID, @Username, Region) ngầm
+                if saved:
+                    try:
+                        _inspect_tiktok_account_worker(profile_name)
+                    except Exception as ie:
+                        update_status(f"[{profile_name}] [WARN] Không lấy được thông tin chi tiết: {ie}")
             finally:
                 profile['session_busy'] = False
     except Exception as error:
@@ -6608,12 +6652,8 @@ def on_closing():
     root.after(500, root.destroy)
 
 def change_license_key():
-    global LICENSE_OK, LICENSE_KEY, LICENSE_INFO
-    LICENSE_OK = False
-    LICENSE_KEY = None
-    LICENSE_INFO = {}
-    _set_ui_enabled(False)
-    _license_dialog(on_success=lambda: _set_ui_enabled(True))
+    _license_dialog(on_success=lambda: _set_ui_enabled(True), is_first_run=False)
+
 
 def _run_auto6_watcher_test_from_env():
     if os.environ.get('AUTO6_WATCHER_TEST') != '1' or os.environ.get('UPLOAD_TEST_MODE') == '1':
@@ -6794,6 +6834,19 @@ def _run_single_upload_test_from_env():
                 save_configs()
             except Exception as error:
                 update_status(f"[{profile_name}] [WARN] Không khôi phục được chế độ mở browser: {error}")
+        if (
+            success
+            and os.environ.get('UPLOAD_TEST_STOP_BEFORE_POST') == '1'
+            and state.get('copied')
+            and state.get('target')
+        ):
+            try:
+                target_path = Path(state['target'])
+                if target_path.name.startswith('UPLOAD_TEST_') and target_path.is_file():
+                    target_path.unlink()
+                    update_status(f"[{profile_name}] Đã xóa bản clone dry-run: {target_path.name}")
+            except Exception as error:
+                update_status(f"[{profile_name}] [WARN] Không xóa được bản clone dry-run: {error}")
         if not success and state.get('target') and Path(state['target']).is_file():
             try:
                 quarantine = app_base_dir() / 'temp_dl' / 'upload_test_failed'
@@ -6827,6 +6880,9 @@ def _run_single_upload_test_from_env():
                 terminal = UPLOAD_TERMINAL_RESULTS.get(_upload_timing_key(target))
         if terminal and terminal.get('success') and start_count is not None and profile.get('uploads_today_count', 0) > start_count:
             finish(True, f"uploads_today_count {start_count} -> {profile.get('uploads_today_count', 0)}")
+            return
+        if terminal and terminal.get('success') and terminal.get('meta', {}).get('outcome') == 'prepared':
+            finish(True, 'prepared: editor sẵn sàng, popup đã dọn, chưa bấm Post')
             return
         if terminal and not terminal.get('success') and not profile.get('uploading'):
             finish(False, terminal.get('reason') or 'upload_failed')
@@ -6940,6 +6996,7 @@ root.title("DONGLAO-TIKTOK — Automation & Studio Suite")
 root.geometry("1380x920")
 root.minsize(1180, 760)
 root.configure(fg_color="#f3f4f6")
+apply_app_icon(root)
 
 selected_project_var = StringVar(master=root)
 filter_var = StringVar(master=root, value="")
@@ -6960,6 +7017,10 @@ mono_action_needed_var = StringVar(master=root, value="0")
 mono_status_var = StringVar(master=root, value="")
 active_filter_chip_var = StringVar(master=root, value="ALL")
 mono_active_filter_chip_var = StringVar(master=root, value="ALL")
+current_page_var = ctk.IntVar(master=root, value=1)
+page_size_var = ctk.StringVar(master=root, value="10 / trang")
+total_pages_var = ctk.IntVar(master=root, value=1)
+total_records_var = ctk.IntVar(master=root, value=0)
 
 from ui_components import ToastManager
 toast_manager = ToastManager(root)
@@ -7459,11 +7520,41 @@ def copy_payout_method(selected_name=None):
 
 def apply_filter_chip(chip_key):
     active_filter_chip_var.set(chip_key)
+    current_page_var.set(1)
     update_profile_list()
 
 def apply_mono_filter_chip(chip_key):
     mono_active_filter_chip_var.set(chip_key)
     _update_monetization_table()
+
+def go_first_page():
+    if current_page_var.get() != 1:
+        current_page_var.set(1)
+        update_profile_list()
+
+def go_prev_page():
+    cur = current_page_var.get()
+    if cur > 1:
+        current_page_var.set(cur - 1)
+        update_profile_list()
+
+def go_next_page():
+    cur = current_page_var.get()
+    tot = total_pages_var.get()
+    if cur < tot:
+        current_page_var.set(cur + 1)
+        update_profile_list()
+
+def go_last_page():
+    tot = total_pages_var.get()
+    if current_page_var.get() != tot:
+        current_page_var.set(tot)
+        update_profile_list()
+
+def change_page_size(val):
+    page_size_var.set(val)
+    current_page_var.set(1)
+    update_profile_list()
 
 activity_handlers = {
     'get_logs': get_activity_logs,
@@ -7513,6 +7604,11 @@ ui_handlers = {
     'apply_filter_chip': apply_filter_chip,
     'apply_mono_filter_chip': apply_mono_filter_chip,
     'sort_tree': _treeview_sort_column,
+    'go_first_page': go_first_page,
+    'go_prev_page': go_prev_page,
+    'go_next_page': go_next_page,
+    'go_last_page': go_last_page,
+    'change_page_size': change_page_size,
     'youtube_monitor': youtube_monitor_handlers,
     'activity': activity_handlers,
 }
@@ -7564,8 +7660,12 @@ def _start_youtube_monitor_safe():
             update_status(f"[YouTube] Auto-start lỗi: {e}")
     threading.Thread(target=_run, daemon=True).start()
 
-selected_project_var.trace('w', update_profile_list)
-filter_var.trace('w', update_profile_list)
+def _on_profile_filter_changed(*_args):
+    current_page_var.set(1)
+    update_profile_list()
+
+selected_project_var.trace('w', _on_profile_filter_changed)
+filter_var.trace('w', _on_profile_filter_changed)
 selected_project_var.trace('w', _update_monetization_table)
 filter_var.trace('w', _update_monetization_table)
 scale_var.trace('w', _apply_scale)

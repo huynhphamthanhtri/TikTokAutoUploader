@@ -12,7 +12,7 @@ class UIOptimizationTests(unittest.TestCase):
     def test_toolbar_keeps_primary_buttons(self):
         self.assertIn("text=\"Thêm\"", self.ui_source)
         self.assertIn("handlers['add_profile']", self.ui_source)
-        self.assertIn("text=\"Mở Chrome\"", self.ui_source)
+        self.assertIn("text=\"Login/Mở trình duyệt\"", self.ui_source)
         self.assertIn("handlers['open_browser']", self.ui_source)
 
     def test_secondary_actions_moved_to_overflow_menu(self):

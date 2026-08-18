@@ -1,3 +1,4 @@
+import json
 import tempfile
 import threading
 import unittest
@@ -110,6 +111,24 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
         }
         session = glue.build_session_config(config)
         self.assertEqual(session.executable_path, r"C:\custom\chrome.exe")
+
+    def test_resolve_orbita_144_beats_chrome_win64(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            orbita = Path(temporary) / "Browser" / "orbita-browser-144"
+            orbita.mkdir(parents=True)
+            orbita_exe = orbita / "chrome.exe"
+            orbita_exe.write_bytes(b"x")
+
+            chrome64 = Path(temporary) / "Browser" / "chrome-win64"
+            chrome64.mkdir(parents=True)
+            chrome64_exe = chrome64 / "chrome.exe"
+            chrome64_exe.write_bytes(b"x")
+
+            with patch("profile_config_engine.find_ttm_profile_config", return_value={"license_key": "dummy"}):
+                self.assertEqual(
+                    glue.resolve_browser_executable(app_base=temporary, profile_name="AUTO 22"),
+                    str(orbita_exe),
+                )
 
     def test_resolve_chrome_win64_first(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -586,7 +605,10 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
             }
             session = glue.build_session_config(config)
             self.assertIn("--renderer-process-limit=2", session.args)
-            self.assertIn("--js-flags=--max-old-space-size=256 --expose-gc", session.args)
+            self.assertIn("--js-flags=--max-old-space-size=256", session.args)
+            self.assertNotIn("--expose-gc", " ".join(session.args))
+            self.assertIn("--force-webrtc-ip-handling-policy=disable_non_proxied_udp", session.args)
+            self.assertIn("--disable-webrtc-multiple-routes", session.args)
             self.assertIn("--disk-cache-size=33554432", session.args)
             self.assertIn("--media-cache-size=67108864", session.args)
             self.assertIn("--aggressive-cache-discard", session.args)
@@ -624,10 +646,14 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
             self.assertEqual(len(session.stealth_config["plugins"]["list"]), 5)
             self.assertEqual(session.stealth_config["clientHints"]["formFactors"], ["Desktop"])
 
-            # Verify NO dead config files were written to disk
+            # Verify config files were written to disk for C++ HT Browser
             p = Path(temp_dir)
-            self.assertFalse((p / "data.huynhthang").exists())
-            self.assertFalse((p / "data.orbita").exists())
+            self.assertTrue((p / "data.huynhthang").exists())
+            self.assertTrue((p / "data.orbita").exists())
+            with open(p / "data.huynhthang", "r", encoding="utf-8") as f:
+                dh_json = json.load(f)
+            self.assertTrue(bool(dh_json.get("profile_name") or dh_json.get("account_uuid")), "Profile name or UUID must be present in config")
+            self.assertTrue(bool(dh_json["license_key"]))
 
 
 if __name__ == "__main__":

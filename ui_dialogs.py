@@ -14,7 +14,7 @@ import customtkinter as ctk
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core_helpers import parse_proxy_string
-from ui_components import UIThemeTokens, redact_proxy_string
+from ui_components import UIThemeTokens, redact_proxy_string, fit_and_center_dialog
 
 
 # ==============================================================================
@@ -33,8 +33,7 @@ class BatchSetProxyModal(ctk.CTkToplevel):
     ):
         super().__init__(parent)
         self.title("Gán Proxy Hàng Loạt")
-        self.geometry("580x520")
-        self.minsize(520, 440)
+        fit_and_center_dialog(self, 580, 520, parent=parent, min_w=480, min_h=380)
         self.transient(parent)
         self.grab_set()
 
@@ -211,8 +210,7 @@ class MonetizationDetailModal(ctk.CTkToplevel):
     def __init__(self, parent: Any, profile_name: str, snapshot_data: Dict[str, Any]):
         super().__init__(parent)
         self.title(f"Chi Tiết Thu Nhập & Payout: {profile_name}")
-        self.geometry("640x740")
-        self.minsize(580, 580)
+        fit_and_center_dialog(self, 640, 680, parent=parent, min_w=520, min_h=450)
         self.transient(parent)
         self.grab_set()
 
@@ -512,8 +510,7 @@ class CreateEditProfileModal(ctk.CTkToplevel):
     ):
         super().__init__(parent)
         self.title(title)
-        self.geometry("540x480")
-        self.minsize(480, 420)
+        fit_and_center_dialog(self, 560, 480, parent=parent, min_w=460, min_h=380)
         self.transient(parent)
         self.grab_set()
 
@@ -661,5 +658,160 @@ class CreateEditProfileModal(ctk.CTkToplevel):
                 self.destroy()
             else:
                 self.error_label.configure(text="Không thể lưu profile. Vui lòng kiểm tra lại dữ liệu.")
+        else:
+            self.destroy()
+
+
+# ==============================================================================
+# 4. LICENSE MODAL
+# ==============================================================================
+
+class LicenseModal(ctk.CTkToplevel):
+    """Hộp thoại kích hoạt & quản lý License bản quyền chuẩn Design System."""
+
+    def __init__(
+        self,
+        parent: Any,
+        check_func: Callable[[str], Tuple[bool, Dict[str, Any], str]],
+        on_success: Callable[[str, Dict[str, Any]], None],
+        initial_key: str = "",
+        initial_status: str = "",
+        initial_message: str = "",
+        is_first_run: bool = True,
+        on_close_app: Optional[Callable[[], None]] = None,
+    ):
+        super().__init__(parent)
+        self.check_func = check_func
+        self.on_success = on_success
+        self.is_first_run = is_first_run
+        self.on_close_app = on_close_app
+
+        self.title("DONGLAO-TIKTOK — Bản Quyền & Kích Hoạt Phần Mềm")
+        fit_and_center_dialog(self, 520, 310, parent=parent, min_w=460, min_h=280)
+        self.configure(fg_color=UIThemeTokens.BG_ROOT)
+        self.transient(parent)
+        self.grab_set()
+        self.focus_force()
+        self.resizable(False, False)
+
+        self._build_ui(initial_key, initial_status, initial_message)
+        self.protocol("WM_DELETE_WINDOW", self._handle_close)
+        self.bind("<Return>", lambda _e: self._do_activate())
+        self.bind("<Escape>", lambda _e: self._handle_close())
+
+    def _build_ui(self, initial_key: str, initial_status: str, initial_message: str):
+        self.card = ctk.CTkFrame(
+            self,
+            fg_color=UIThemeTokens.BG_CARD,
+            corner_radius=12,
+            border_width=1,
+            border_color=UIThemeTokens.BORDER_LIGHT,
+        )
+        self.card.pack(fill="both", expand=True, padx=14, pady=14)
+
+        # Header Title
+        lbl_title = ctk.CTkLabel(
+            self.card,
+            text="🔑 Kích Hoạt Bản Quyền Phần Mềm",
+            font=("Segoe UI", 14, "bold"),
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+        )
+        lbl_title.pack(anchor="w", padx=18, pady=(16, 4))
+
+        lbl_desc = ctk.CTkLabel(
+            self.card,
+            text="Nhập mã License Key được cấp để mở khóa toàn bộ tính năng tự động hóa.",
+            font=("Segoe UI", 11),
+            text_color=UIThemeTokens.TEXT_MUTED,
+        )
+        lbl_desc.pack(anchor="w", padx=18, pady=(0, 12))
+
+        # License Key Entry
+        self.key_var = ctk.StringVar(value=initial_key)
+        self.entry_key = ctk.CTkEntry(
+            self.card,
+            textvariable=self.key_var,
+            placeholder_text="Dán mã License Key (VD: USER-XXXX-YYYY-ZZZZ)",
+            height=36,
+            corner_radius=8,
+            font=("Segoe UI", 12),
+        )
+        self.entry_key.pack(fill="x", padx=18, pady=(0, 6))
+        self.entry_key.focus_set()
+
+        # Status Message Label
+        self.msg_var = ctk.StringVar(value=initial_message)
+        self.lbl_msg = ctk.CTkLabel(
+            self.card,
+            textvariable=self.msg_var,
+            font=("Segoe UI", 11),
+            text_color=UIThemeTokens.STATUS_ERROR if initial_message else UIThemeTokens.TEXT_MUTED,
+            wraplength=460,
+            justify="left",
+        )
+        self.lbl_msg.pack(anchor="w", padx=18, pady=(0, 8))
+
+        # Bottom Button Row (Pin to bottom)
+        btn_row = ctk.CTkFrame(self.card, fg_color="transparent")
+        btn_row.pack(side="bottom", fill="x", padx=18, pady=(0, 16))
+
+        close_text = "Thoát Ứng Dụng" if self.is_first_run else "Đóng"
+        self.btn_close = ctk.CTkButton(
+            btn_row,
+            text=close_text,
+            fg_color="#ef4444" if self.is_first_run else UIThemeTokens.BG_HOVER,
+            text_color="#ffffff" if self.is_first_run else UIThemeTokens.TEXT_PRIMARY,
+            hover_color="#dc2626" if self.is_first_run else UIThemeTokens.BORDER_LIGHT,
+            height=32,
+            width=110,
+            command=self._handle_close,
+        )
+        self.btn_close.pack(side="left")
+
+        self.btn_activate = ctk.CTkButton(
+            btn_row,
+            text="⚡ Kích Hoạt Ngay",
+            fg_color=UIThemeTokens.ACCENT_PRIMARY,
+            hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
+            height=32,
+            width=140,
+            font=("Segoe UI", 12, "bold"),
+            command=self._do_activate,
+        )
+        self.btn_activate.pack(side="right")
+
+    def _do_activate(self):
+        key = self.key_var.get().strip()
+        if not key:
+            self.lbl_msg.configure(text_color=UIThemeTokens.STATUS_ERROR)
+            self.msg_var.set("⚠️ Vui lòng nhập License Key.")
+            return
+
+        self.lbl_msg.configure(text_color=UIThemeTokens.TEXT_MUTED)
+        self.msg_var.set("⏳ Đang xác thực bản quyền với máy chủ...")
+        self.btn_activate.configure(state="disabled")
+        self.update()
+
+        try:
+            ok, info, msg = self.check_func(key)
+            if ok:
+                self.lbl_msg.configure(text_color=UIThemeTokens.STATUS_LIVE)
+                self.msg_var.set("✅ Kích hoạt bản quyền thành công!")
+                self.btn_activate.configure(state="normal")
+                if self.on_success:
+                    self.on_success(key, info)
+                self.after(500, self.destroy)
+            else:
+                self.lbl_msg.configure(text_color=UIThemeTokens.STATUS_ERROR)
+                self.msg_var.set(f"❌ {msg or 'License Key không hợp lệ.'}")
+                self.btn_activate.configure(state="normal")
+        except Exception as e:
+            self.lbl_msg.configure(text_color=UIThemeTokens.STATUS_ERROR)
+            self.msg_var.set(f"❌ Lỗi: {e}")
+            self.btn_activate.configure(state="normal")
+
+    def _handle_close(self):
+        if self.is_first_run and self.on_close_app:
+            self.on_close_app()
         else:
             self.destroy()

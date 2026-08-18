@@ -45,6 +45,7 @@ from patchright_profile_migration import (
 from profile_config_engine import (
     generate_stealth_profile_config,
     generate_orbita_profile_config,
+    write_profile_config_files,
 )
 
 try:
@@ -256,20 +257,41 @@ def _is_valid_executable(path):
         return False
 
 
-def resolve_browser_executable(app_base=None):
+def resolve_browser_executable(app_base=None, profile_name=None):
     """Return a Chromium-compatible executable path for Patchright.
 
-    Strict preference order: bundled ``Browser/chrome-win64/chrome.exe``, then system Google Chrome.
-    Orbita binaries have been completely removed in favor of standard chrome-win64 + native stealth engine.
-    Returns ``None`` when no usable browser is found so callers can fail with a
-    clear Vietnamese message instead of relying on Patchright's default
-    ``.local-browsers`` lookup."""
+    Default Primary Engine:
+    1. Custom HT Browser 144 / Multi-brand Anti-detect Engine (``ht-browser-144``, ``donglao-browser-144``, ``orbita-browser-144``).
+       Locked as the primary native browser engine across all automation and manual flows.
+    2. Bundled ``Browser/chrome-win64/chrome.exe`` (Google Chrome for Testing 149) + Vibe Stealth JS Engine.
+    3. System Google Chrome fallback.
+    """
     browser_dir = _bundled_browser_dir(app_base)
-    candidates = [
+
+    engine_dirs = [
+        "donglao-browser-144",
+        "donglao-browser",
+        "ht-browser-144",
+        "ht-browser",
+        "orbita-browser-144",
+    ]
+    exe_names = [
+        "chrome.exe",
+        "htbrowser.exe",
+        "donglao.exe",
+    ]
+
+    candidates = []
+    for ed in engine_dirs:
+        for ex in exe_names:
+            candidates.append(browser_dir / ed / ex)
+
+    candidates.extend([
         browser_dir / "chrome-win64" / "chrome.exe",
         browser_dir / "chrome.exe",
         browser_dir / "chrome" / "chrome.exe",
-    ]
+        browser_dir / "orbita-browser-123" / "chrome.exe",
+    ])
 
     # If in standard environment without explicit app_base, check all potential workspace roots
     if app_base is None:
@@ -281,6 +303,12 @@ def resolve_browser_executable(app_base=None):
         ]
         for base in extra_bases:
             if base and base.exists() and base != browser_dir.parent:
+                for ed in engine_dirs:
+                    for ex in exe_names:
+                        candidates.extend([
+                            base / "Browser" / ed / ex,
+                            base / "_internal" / "Browser" / ed / ex,
+                        ])
                 candidates.extend([
                     base / "Browser" / "chrome-win64" / "chrome.exe",
                     base / "_internal" / "Browser" / "chrome-win64" / "chrome.exe",
@@ -306,8 +334,14 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profi
         headed = not config.get("headless", True)
 
     kwargs = {"profile_path": profile_path, "mode": mode, "headed": headed}
-
-    executable = config.get("browser_executable") or resolve_browser_executable()
+    resolved_pname = str(
+        profile_name
+        or config.get("profile_name")
+        or config.get("name")
+        or (Path(profile_path).parent.name if profile_path else "")
+        or ""
+    )
+    executable = config.get("browser_executable") or resolve_browser_executable(profile_name=resolved_pname)
     if not executable:
         raise SessionSetupError(
             "Không tìm thấy browser. Hãy tải tài nguyên Browser lần đầu "
@@ -369,14 +403,15 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profi
     # Generate native stealth anti-detect config dictionary (in-memory)
     account_uuid = str(
         config.get("account_uuid")
-        or config.get("profile_name")
+        or resolved_pname
         or (Path(profile_path).name if profile_path else "")
+        or "default_profile"
     )
     proxy_info = None
-    if proxy is not None:
+    if proxy:
         proxy_info = dict(proxy)
-    geoip_info = {}
-    if isinstance(fingerprint, dict):
+    geoip_info = None
+    if fingerprint:
         geoip_info = {
             "timezone": fingerprint.get("timezone"),
             "ip": fingerprint.get("ip"),
@@ -386,12 +421,7 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profi
             geoip_info["latitude"] = geo.get("latitude")
             geoip_info["longitude"] = geo.get("longitude")
 
-    resolved_profile_name = str(
-        profile_name
-        or config.get("profile_name")
-        or config.get("name")
-        or account_uuid
-    )
+    resolved_profile_name = resolved_pname
     stealth_cfg = generate_stealth_profile_config(
         account_uuid=account_uuid,
         proxy_info=proxy_info,
@@ -399,7 +429,15 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profi
         user_agent=config.get("user_agent"),
         profile_name=resolved_profile_name,
     )
-    clean_profile_volatile_caches(profile_path)
+    if profile_path:
+        write_profile_config_files(profile_path, stealth_cfg)
+        clean_profile_volatile_caches(
+            profile_path,
+            is_orbita_engine=any(tag in str(executable) for tag in ("orbita-browser-144", "ht-browser-144", "donglao-browser-144")),
+        )
+
+    if timezone_id:
+        os.environ["TZ"] = str(timezone_id)
 
     # Ultra-optimized arguments for low RAM, anti-freeze & high concurrency multi-profile TikTok automation
     kwargs["args"] = (
@@ -429,9 +467,12 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profi
         "--disk-cache-size=33554432",
         "--media-cache-size=67108864",
         "--aggressive-cache-discard",
-        "--js-flags=--max-old-space-size=256 --expose-gc",
+        "--js-flags=--max-old-space-size=256",
         "--enable-features=MemoryReducer,PurgeAndSuspend,ResourceLoadScheduler",
-        "--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints,InterestFeedContentSuggestions,CalculateNativeWinOcclusion",
+        "--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints,InterestFeedContentSuggestions,CalculateNativeWinOcclusion,UnoPhase2FollowUp",
+        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+        "--disable-webrtc-multiple-routes",
+        "--antidetect-optional",
     )
     kwargs["account_uuid"] = account_uuid
     kwargs["profile_name"] = resolved_profile_name
@@ -439,11 +480,12 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profi
     return BrowserSessionConfig(**kwargs)
 
 
-def clean_profile_volatile_caches(profile_path):
+def clean_profile_volatile_caches(profile_path, is_orbita_engine=False):
     """Safely purge volatile rendering and network caches from profile dir.
     
     Preserves cookies, local storage, indexedDB, sessions, and credentials.
     Only purges GPU cache, shader cache, code cache, and media cache to minimize RAM and disk bloat.
+    If is_orbita_engine is True, purges residual incompatible higher-version cache artifacts.
     """
     if not profile_path:
         return
@@ -457,13 +499,31 @@ def clean_profile_volatile_caches(profile_path):
         p / "GrShaderCache",
         p / "ShaderCache",
         p / "Default" / "Media Cache",
+        p / "GPUPersistentCache",
+        p / "GraphiteDawnCache",
+        p / "DawnGraphiteCache",
+        p / "DawnWebGPUCache",
     ]
     for target in volatile_subdirs:
         try:
-            if target.exists() and target.is_dir():
-                shutil.rmtree(target, ignore_errors=True)
+            if target.exists():
+                if target.is_dir():
+                    shutil.rmtree(target, ignore_errors=True)
+                else:
+                    target.unlink(missing_ok=True)
         except Exception:
             pass
+
+    if is_orbita_engine:
+        last_version_file = p / "Last Version"
+        if last_version_file.exists():
+            try:
+                v_text = last_version_file.read_text(encoding="utf-8", errors="ignore").strip()
+                if v_text and (v_text.startswith("149.") or v_text.startswith("15")):
+                    last_version_file.unlink(missing_ok=True)
+                    (p / "Local State").unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def _canonical_profile(path):

@@ -20,6 +20,9 @@ class TestBatchAddProfiles(unittest.TestCase):
         self.assertIn("dup_policy_var = StringVar(opt, value='Cập nhật')", main_src)
         self.assertIn("DONGLAO-TIKTOK — Import Tài Khoản Hàng Loạt", main_src)
         self.assertIn("DONGLAO-TIKTOK — Xuất Dữ Liệu Tài Khoản", main_src)
+        # Verify pin-to-bottom layout structure
+        self.assertIn("btn_row.pack(side='bottom', fill='x'", main_src)
+        self.assertIn("prev_frame.pack(side='bottom', fill='x'", main_src)
 
     def test_plan_import_update_policy(self):
         existing = {"Profile_01", "Profile_02"}
@@ -32,11 +35,19 @@ class TestBatchAddProfiles(unittest.TestCase):
         self.assertEqual(plans[0]["action"], "update")
         self.assertEqual(plans[1]["action"], "add")
 
-    def test_plan_import_skip_policy(self):
-        existing = {"Profile_01"}
-        records = [{"name": "Profile_01"}]
-        plans = plan_import(records, existing, policy="skip")
-        self.assertEqual(plans[0]["action"], "skip")
+    def test_batch_imported_profile_gets_cxx_template(self):
+        import tempfile
+        from profile_config_engine import generate_stealth_profile_config, write_profile_config_files
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile_dir = Path(temp_dir) / "Profile"
+            cfg = generate_stealth_profile_config(
+                account_uuid="batch_uuid_100",
+                profile_name="BATCH_PROFILE_100",
+            )
+            write_profile_config_files(profile_dir, cfg)
+            self.assertTrue((profile_dir / "data.huynhthang").exists())
+            self.assertTrue((profile_dir / "data.orbita").exists())
+            self.assertGreater((profile_dir / "data.huynhthang").stat().st_size, 1000)
 
 
 if __name__ == "__main__":

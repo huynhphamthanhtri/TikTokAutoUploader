@@ -163,6 +163,9 @@ DEFAULT_GL_PARAM_VALUES = [
 ]
 
 
+DEFAULT_LICENSE_KEY = "6B86FD072ECAF47212A07ABE329ED944C64244D6B153929C6BD9A552BE2B9086"
+
+
 def generate_stealth_profile_config(
     account_uuid: str,
     proxy_info: Optional[Dict[str, Any]] = None,
@@ -172,10 +175,10 @@ def generate_stealth_profile_config(
     device_memory: int = 8,
     profile_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Tạo cấu trúc cấu hình fingerprint đầy đủ cho stealth JS engine.
+    """Tạo cấu trúc cấu hình fingerprint đầy đủ cho stealth JS engine và C++ HT Browser.
 
     Dict trả về được truyền cho ``vibe_stealth_engine.generate_stealth_js()``
-    để inject vào browser context qua CDP ``add_init_script``.
+    để inject qua CDP hoặc ghi ra file ``data.huynhthang`` / ``data.orbita`` để C++ kernel đọc.
     """
     canvas_seed = generate_deterministic_seed(account_uuid, "canvas")
     audio_seed = generate_deterministic_seed(account_uuid, "audio")
@@ -199,18 +202,48 @@ def generate_stealth_profile_config(
             pass
         fake_ip = geoip_info.get("ip", fake_ip) or fake_ip
 
-    # Auto-detect proxy IP for WebRTC fake
-    if not fake_ip and proxy_info:
+    # Auto-detect proxy IP for WebRTC fake and normalize proxy dict
+    proxy_obj: Dict[str, Any] = {}
+    if proxy_info:
         server = proxy_info.get("server", "")
+        ptype = "http"
+        host = ""
+        port = 80
         if "://" in server:
-            host_port = server.split("://", 1)[1]
-            fake_ip = host_port.rsplit(":", 1)[0] if ":" in host_port else host_port
+            ptype, rest = server.split("://", 1)
+            if ":" in rest:
+                host, port_str = rest.rsplit(":", 1)
+                try:
+                    port = int(port_str)
+                except ValueError:
+                    port = 80
+            else:
+                host = rest
+        elif proxy_info.get("host"):
+            host = str(proxy_info.get("host"))
+            port = int(proxy_info.get("port", 80) or 80)
+            ptype = str(proxy_info.get("type", "http") or "http")
+
+        if host:
+            if not fake_ip:
+                fake_ip = host
+            proxy_obj = {
+                "host": host,
+                "port": port,
+                "type": ptype.lower(),
+            }
+            if proxy_info.get("username") or proxy_info.get("user"):
+                proxy_obj["username"] = proxy_info.get("username") or proxy_info.get("user")
+            if proxy_info.get("password") or proxy_info.get("pass"):
+                proxy_obj["password"] = proxy_info.get("password") or proxy_info.get("pass")
 
     ua = user_agent or (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         f"{CHROME_UA_TOKEN} Safari/537.36"
     )
+
+    resolved_license = os.environ.get("VIBE_ORBITA_LICENSE_KEY") or DEFAULT_LICENSE_KEY
 
     config: Dict[str, Any] = {
         "profile_name": str(profile_name or account_uuid),
@@ -346,12 +379,101 @@ def generate_stealth_profile_config(
             "override": True,
             "list": list(DEFAULT_PLUGINS),
         },
-        "license_key": os.environ.get("VIBE_ORBITA_LICENSE_KEY", ""),
+        "license_key": resolved_license,
         "hardware_concurrency": hardware_concurrency,
         "device_memory": device_memory,
-        "proxy": proxy_info or {},
+        "proxy": proxy_obj,
     }
     return config
+
+
+def find_ttm_raw_profile_file(profile_name: str) -> Optional[Path]:
+    """Tìm đường dẫn file data.huynhthang nguyên bản có chữ ký hợp lệ từ TTM."""
+    if not profile_name:
+        return None
+    import json
+    from pathlib import Path
+    ttm_profiles_dir = Path(os.path.expandvars(r"%APPDATA%\tiktokmanager\profiles"))
+    if not ttm_profiles_dir.exists():
+        return None
+    for p in ttm_profiles_dir.iterdir():
+        if p.is_dir():
+            dh = p / "data.huynhthang"
+            if dh.exists():
+                try:
+                    with open(dh, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if data.get("profile_name") == profile_name or p.name == profile_name:
+                        return dh
+                except Exception:
+                    pass
+    return None
+
+
+def find_ttm_profile_config(profile_name: str) -> Optional[Dict[str, Any]]:
+    """Tìm dữ liệu cấu hình data.huynhthang có sẵn từ TTM nếu profile cùng tên đã từng được tạo trên TTM."""
+    raw_file = find_ttm_raw_profile_file(profile_name)
+    if raw_file and raw_file.exists():
+        import json
+        try:
+            with open(raw_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return None
+
+
+def write_profile_config_files(profile_path: str | os.PathLike[str], config: Dict[str, Any]) -> None:
+    """Ghi file data.huynhthang và data.orbita vào thư mục profile để C++ kernel của HT Browser đọc trực tiếp.
+
+    Đối với các profile đã có chữ ký hợp lệ từ TTM (như AUTO 22, AUTO 6), thực hiện sao chép nguyên bản
+    (byte-for-byte binary copy) để bảo toàn 100% chữ ký C++ mà không làm biến dạng cấu trúc JSON.
+    """
+    if not profile_path:
+        return
+    import json
+    import shutil
+    from pathlib import Path
+    p = Path(profile_path)
+    p.mkdir(parents=True, exist_ok=True)
+
+    base_template_dir = Path(__file__).resolve().parent / "assets" / "templates"
+    base_template_huynhthang = base_template_dir / "base_data.huynhthang"
+    base_template_orbita = base_template_dir / "base_data.orbita"
+
+    profile_name = config.get("profile_name") or (p.parent.name if p.parent else "")
+    raw_file = find_ttm_raw_profile_file(str(profile_name)) if profile_name else None
+
+    if raw_file and raw_file.exists():
+        # 1. Sao chép nguyên bản giữ trọn vẹn chữ ký C++ từ TTM nếu có
+        for fname in ("data.huynhthang", "data.orbita"):
+            target = p / fname
+            try:
+                shutil.copyfile(raw_file, target)
+            except Exception:
+                pass
+    elif base_template_huynhthang.exists():
+        # 2. Cấp phát từ Base Template độc lập có sẵn trong tool (sao chép nhị phân nguyên bản để bảo toàn HMAC/chữ ký)
+        try:
+            shutil.copyfile(base_template_huynhthang, p / "data.huynhthang")
+            if base_template_orbita.exists():
+                shutil.copyfile(base_template_orbita, p / "data.orbita")
+            else:
+                shutil.copyfile(base_template_huynhthang, p / "data.orbita")
+        except Exception:
+            pass
+    else:
+        # 3. Fallback ghi JSON chuẩn
+        cfg_to_write = dict(config)
+        if not cfg_to_write.get("license_key"):
+            cfg_to_write["license_key"] = os.environ.get("VIBE_ORBITA_LICENSE_KEY", DEFAULT_LICENSE_KEY)
+        for fname in ("data.huynhthang", "data.orbita"):
+            target = p / fname
+            try:
+                with open(target, "w", encoding="utf-8") as f:
+                    json.dump(cfg_to_write, f, indent=2, ensure_ascii=False)
+            except Exception:
+                pass
 
 
 # Backward-compatibility alias

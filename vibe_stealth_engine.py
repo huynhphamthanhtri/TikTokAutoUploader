@@ -102,6 +102,28 @@ def generate_stealth_js(config: Optional[Dict[str, Any]] = None) -> str:
     if (window.__donglao_stealth_applied__) return;
     window.__donglao_stealth_applied__ = true;
 
+    // 0. Native Code Masking — Bảo vệ Function.prototype.toString cho toàn bộ hook
+    const _nativeFns = new Map();
+    const _origToString = Function.prototype.toString;
+    try {{
+        const customToString = function toString() {{
+            if (_nativeFns.has(this)) {{
+                return 'function ' + _nativeFns.get(this) + '() {{ [native code] }}';
+            }}
+            return _origToString.call(this);
+        }};
+        _nativeFns.set(customToString, 'toString');
+        _nativeFns.set(_origToString, 'toString');
+        Function.prototype.toString = customToString;
+    }} catch (e) {{}}
+
+    function makeNative(fn, name) {{
+        if (typeof fn === 'function') {{
+            _nativeFns.set(fn, name || fn.name || '');
+        }}
+        return fn;
+    }}
+
     // 1. Loại bỏ navigator.webdriver
     try {{
         Object.defineProperty(navigator, 'webdriver', {{
@@ -122,7 +144,7 @@ def generate_stealth_js(config: Optional[Dict[str, Any]] = None) -> str:
             PlatformOs: {{ ANDROID: "android", CROS: "cros", LINUX: "linux", MAC: "mac", OPENBSD: "openbsd", WIN: "win" }},
             RequestUpdateCheckStatus: {{ NO_UPDATE: "no_update", THROTTLED: "throttled", UPDATE_AVAILABLE: "update_available" }}
         }};
-        chromeObj.loadTimes = chromeObj.loadTimes || function() {{
+        chromeObj.loadTimes = makeNative(chromeObj.loadTimes || function loadTimes() {{
             return {{
                 commitLoadTime: Date.now() / 1000 - 0.2,
                 connectionInfo: "http/1.1",
@@ -138,15 +160,15 @@ def generate_stealth_js(config: Optional[Dict[str, Any]] = None) -> str:
                 wasFetchedViaSpdy: true,
                 wasNpnNegotiated: true
             }};
-        }};
-        chromeObj.csi = chromeObj.csi || function() {{
+        }}, 'loadTimes');
+        chromeObj.csi = makeNative(chromeObj.csi || function csi() {{
             return {{
                 onloadT: Date.now(),
                 pageT: 123.45,
                 startE: Date.now() - 500,
                 tran: 15
             }};
-        }};
+        }}, 'csi');
         chromeObj.app = chromeObj.app || {{
             isInstalled: false,
             InstallState: {{ DISABLED: "disabled", INSTALLED: "installed", NOT_INSTALLED: "not_installed" }},
@@ -240,25 +262,25 @@ def generate_stealth_js(config: Optional[Dict[str, Any]] = None) -> str:
         }}
 
         const getParameterOrig1 = WebGLRenderingContext.prototype.getParameter;
-        WebGLRenderingContext.prototype.getParameter = function(param) {{
+        WebGLRenderingContext.prototype.getParameter = makeNative(function getParameter(param) {{
             return fakeGetParam.call(this, getParameterOrig1, param);
-        }};
-        WebGLRenderingContext.prototype.getSupportedExtensions = function() {{
+        }}, 'getParameter');
+        WebGLRenderingContext.prototype.getSupportedExtensions = makeNative(function getSupportedExtensions() {{
             return fakeExtensions.slice();
-        }};
+        }}, 'getSupportedExtensions');
 
         if (typeof WebGL2RenderingContext !== 'undefined') {{
             const getParameterOrig2 = WebGL2RenderingContext.prototype.getParameter;
-            WebGL2RenderingContext.prototype.getParameter = function(param) {{
+            WebGL2RenderingContext.prototype.getParameter = makeNative(function getParameter(param) {{
                 return fakeGetParam.call(this, getParameterOrig2, param);
-            }};
-            WebGL2RenderingContext.prototype.getSupportedExtensions = function() {{
+            }}, 'getParameter');
+            WebGL2RenderingContext.prototype.getSupportedExtensions = makeNative(function getSupportedExtensions() {{
                 return fakeExtensions.slice();
-            }};
+            }}, 'getSupportedExtensions');
         }}
     }} catch (e) {{}}
 
-    // 5. Canvas 2D Deterministic Micro-Noise
+    // 5. Canvas 2D Deterministic Micro-Noise (Idempotent per canvas)
     try {{
         const canvasSeed = {canvas_seed};
         function pseudoRandom(seed) {{
@@ -269,36 +291,70 @@ def generate_stealth_js(config: Optional[Dict[str, Any]] = None) -> str:
                 return (s - 1) / 2147483646;
             }};
         }}
-        const rng = pseudoRandom(canvasSeed);
+        function simpleHash(str) {{
+            let h = 0;
+            for (let i = 0; i < str.length; i++) {{
+                h = ((h << 5) - h) + str.charCodeAt(i);
+                h |= 0;
+            }}
+            return Math.abs(h);
+        }}
 
+        const _canvasNoiseCache = new WeakMap();
         const getImageDataOrig = CanvasRenderingContext2D.prototype.getImageData;
-        CanvasRenderingContext2D.prototype.getImageData = function(sx, sy, sw, sh) {{
+
+        CanvasRenderingContext2D.prototype.getImageData = makeNative(function getImageData(sx, sy, sw, sh) {{
             const imageData = getImageDataOrig.apply(this, arguments);
+            const canvas = this.canvas;
+            if (!canvas) return imageData;
+
+            const cacheKey = sx + '_' + sy + '_' + sw + '_' + sh + '_' + imageData.data.length;
+            let canvasCache = _canvasNoiseCache.get(canvas);
+            if (!canvasCache) {{
+                canvasCache = {{}};
+                _canvasNoiseCache.set(canvas, canvasCache);
+            }}
+
+            if (canvasCache[cacheKey]) {{
+                imageData.data.set(canvasCache[cacheKey]);
+                return imageData;
+            }}
+
+            const localRng = pseudoRandom(canvasSeed ^ simpleHash(cacheKey));
             const data = imageData.data;
             const step = Math.max(1, Math.floor(data.length / 50));
             for (let i = 0; i < data.length; i += step) {{
-                const noise = (rng() > 0.5 ? 1 : -1);
+                const noise = (localRng() > 0.5 ? 1 : -1);
                 data[i] = Math.min(255, Math.max(0, data[i] + noise));
             }}
+            canvasCache[cacheKey] = new Uint8ClampedArray(data);
             return imageData;
-        }};
+        }}, 'getImageData');
 
         const toDataURLOrig = HTMLCanvasElement.prototype.toDataURL;
-        HTMLCanvasElement.prototype.toDataURL = function() {{
+        const _dataUrlCache = new WeakMap();
+
+        HTMLCanvasElement.prototype.toDataURL = makeNative(function toDataURL() {{
             const ctx = this.getContext('2d');
             if (ctx) {{
+                const cachedUrl = _dataUrlCache.get(this);
+                if (cachedUrl) return cachedUrl;
                 try {{
                     const w = Math.min(this.width, 10);
                     const h = Math.min(this.height, 10);
                     if (w > 0 && h > 0) {{
                         const img = getImageDataOrig.call(ctx, 0, 0, w, h);
+                        const rng = pseudoRandom(canvasSeed ^ simpleHash('toDataUrl_' + w + '_' + h));
                         img.data[0] = Math.min(255, Math.max(0, img.data[0] + (rng() > 0.5 ? 1 : -1)));
                         ctx.putImageData(img, 0, 0);
                     }}
                 }} catch (e) {{}}
+                const res = toDataURLOrig.apply(this, arguments);
+                _dataUrlCache.set(this, res);
+                return res;
             }}
             return toDataURLOrig.apply(this, arguments);
-        }};
+        }}, 'toDataURL');
     }} catch (e) {{}}
 
     // 6. AudioContext Deterministic Noise
@@ -314,23 +370,23 @@ def generate_stealth_js(config: Optional[Dict[str, Any]] = None) -> str:
 
         if (typeof AudioBuffer !== 'undefined') {{
             const getChannelDataOrig = AudioBuffer.prototype.getChannelData;
-            AudioBuffer.prototype.getChannelData = function(channel) {{
+            AudioBuffer.prototype.getChannelData = makeNative(function getChannelData(channel) {{
                 const channelData = getChannelDataOrig.apply(this, arguments);
                 for (let i = 0; i < channelData.length; i += 100) {{
                     channelData[i] += audioRng();
                 }}
                 return channelData;
-            }};
+            }}, 'getChannelData');
         }}
 
         if (typeof AnalyserNode !== 'undefined') {{
             const getFloatFrequencyDataOrig = AnalyserNode.prototype.getFloatFrequencyData;
-            AnalyserNode.prototype.getFloatFrequencyData = function(array) {{
+            AnalyserNode.prototype.getFloatFrequencyData = makeNative(function getFloatFrequencyData(array) {{
                 getFloatFrequencyDataOrig.apply(this, arguments);
                 for (let i = 0; i < array.length; i += 50) {{
                     array[i] += audioRng() * 10;
                 }}
-            }};
+            }}, 'getFloatFrequencyData');
         }}
     }} catch (e) {{}}
 
@@ -362,7 +418,7 @@ def generate_stealth_js(config: Optional[Dict[str, Any]] = None) -> str:
                 wow64: false
             }};
 
-            navigator.userAgentData.getHighEntropyValues = function(hints) {{
+            navigator.userAgentData.getHighEntropyValues = makeNative(function getHighEntropyValues(hints) {{
                 return new Promise((resolve) => {{
                     const res = {{
                         brands: brandsList,
@@ -374,7 +430,7 @@ def generate_stealth_js(config: Optional[Dict[str, Any]] = None) -> str:
                     }});
                     resolve(res);
                 }});
-            }};
+            }}, 'getHighEntropyValues');
         }}
     }} catch (e) {{}}
 
@@ -399,21 +455,21 @@ def generate_stealth_js(config: Optional[Dict[str, Any]] = None) -> str:
                 return new RTCSessionDescription({{ type: sdp.type, sdp: lines.join('\\r\\n') }});
             }}
 
-            RTCPeerConnection.prototype.createOffer = function(options) {{
+            RTCPeerConnection.prototype.createOffer = makeNative(function createOffer(options) {{
                 return origCreateOffer.apply(this, arguments).then(offer => sanitizeSDP(offer));
-            }};
+            }}, 'createOffer');
 
-            RTCPeerConnection.prototype.createAnswer = function(options) {{
+            RTCPeerConnection.prototype.createAnswer = makeNative(function createAnswer(options) {{
                 return origCreateAnswer.apply(this, arguments).then(answer => sanitizeSDP(answer));
-            }};
+            }}, 'createAnswer');
 
-            RTCPeerConnection.prototype.setLocalDescription = function(desc) {{
+            RTCPeerConnection.prototype.setLocalDescription = makeNative(function setLocalDescription(desc) {{
                 return origSetLocalDescription.call(this, sanitizeSDP(desc));
-            }};
+            }}, 'setLocalDescription');
 
             // Intercept addEventListener & onicecandidate
             const origAddEventListener = RTCPeerConnection.prototype.addEventListener;
-            RTCPeerConnection.prototype.addEventListener = function(type, listener, options) {{
+            RTCPeerConnection.prototype.addEventListener = makeNative(function addEventListener(type, listener, options) {{
                 if (type === 'icecandidate' && typeof listener === 'function' && fakeIP) {{
                     const wrappedListener = function(event) {{
                         if (event && event.candidate && event.candidate.candidate) {{
@@ -434,7 +490,7 @@ def generate_stealth_js(config: Optional[Dict[str, Any]] = None) -> str:
                     return origAddEventListener.call(this, type, wrappedListener, options);
                 }}
                 return origAddEventListener.apply(this, arguments);
-            }};
+            }}, 'addEventListener');
         }}
     }} catch (e) {{}}
 
@@ -464,9 +520,9 @@ def generate_stealth_js(config: Optional[Dict[str, Any]] = None) -> str:
             pluginArray[p.name] = pObj;
         }});
         Object.defineProperty(pluginArray, 'length', {{ value: mockPlugins.length }});
-        pluginArray.item = function(index) {{ return this[index] || null; }};
-        pluginArray.namedItem = function(name) {{ return this[name] || null; }};
-        pluginArray.refresh = function() {{}};
+        pluginArray.item = makeNative(function item(index) {{ return this[index] || null; }}, 'item');
+        pluginArray.namedItem = makeNative(function namedItem(name) {{ return this[name] || null; }}, 'namedItem');
+        pluginArray.refresh = makeNative(function refresh() {{}}, 'refresh');
 
         Object.defineProperty(navigator, 'plugins', {{
             get: () => pluginArray,
@@ -479,7 +535,7 @@ def generate_stealth_js(config: Optional[Dict[str, Any]] = None) -> str:
     try {{
         if (navigator.permissions && navigator.permissions.query) {{
             const origQuery = navigator.permissions.query;
-            navigator.permissions.query = function(parameters) {{
+            navigator.permissions.query = makeNative(function query(parameters) {{
                 if (parameters && parameters.name === 'notifications') {{
                     return Promise.resolve({{
                         state: Notification.permission,
@@ -491,7 +547,7 @@ def generate_stealth_js(config: Optional[Dict[str, Any]] = None) -> str:
                     }});
                 }}
                 return origQuery.apply(this, arguments);
-            }};
+            }}, 'query');
         }}
     }} catch (e) {{}}
 }})();

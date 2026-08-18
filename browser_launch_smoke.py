@@ -31,15 +31,21 @@ async def main():
     print("EXECUTABLE:", executable)
 
     from patchright.async_api import async_playwright
+    from profile_config_engine import generate_stealth_profile_config, write_profile_config_files
 
     with tempfile.TemporaryDirectory() as tmp:
         profile = str(Path(tmp) / "profile")
+        stealth_cfg = generate_stealth_profile_config(
+            account_uuid="smoke-launch",
+            profile_name="SMOKE_LAUNCH",
+        )
+        write_profile_config_files(profile, stealth_cfg)
         async with async_playwright() as playwright:
             ctx = await playwright.chromium.launch_persistent_context(
                 user_data_dir=profile,
                 headless=True,
                 executable_path=executable,
-                args=["--no-first-run", "--log-level=3"],
+                args=["--no-first-run", "--log-level=3", "--antidetect-optional"],
             )
             try:
                 page = ctx.pages[0] if ctx.pages else await ctx.new_page()

@@ -73,19 +73,21 @@ class ManualCloseMainFlowTests(unittest.TestCase):
         self.assertIn("token.quit()", glue_source)
         self.assertIn("cancel_session(token.handle, timeout=10)", glue_source)
 
-    def test_open_browser_does_not_inject_cookies(self):
+    def test_open_browser_injects_cookies_when_available(self):
         manual_flow = self.source[
             self.source.index("def open_browser()"):
             self.source.index("def _capture_after_manual_close")
         ]
-        self.assertNotIn("import_cookies", manual_flow)
+        self.assertIn("import_cookies_report", manual_flow)
+        self.assertIn("parse_cookie", manual_flow)
 
-    def test_open_browser_captures_session_after_close(self):
-        manual_flow = self.source[
-            self.source.index("def open_browser()"):
-            self.source.index("def _capture_after_manual_close")
+    def test_open_browser_captures_session_and_inspects_account_after_close(self):
+        after_close_flow = self.source[
+            self.source.index("def _capture_after_manual_close"):
+            self.source.index("def _wait_and_close_driver")
         ]
-        self.assertIn("_capture_after_manual_close", manual_flow)
+        self.assertIn("_capture_tiktok_cookies_worker", after_close_flow)
+        self.assertIn("_inspect_tiktok_account_worker", after_close_flow)
 
     def test_capture_worker_does_not_inject_cookies(self):
         capture_flow = self.source[

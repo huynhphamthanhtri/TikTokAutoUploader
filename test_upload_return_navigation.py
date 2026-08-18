@@ -67,6 +67,27 @@ class UploadReturnNavigationTests(unittest.TestCase):
         self.assertIn("return True", block)
         self.assertIn("return False", block)
 
+    def test_pre_post_dry_run_does_not_increment_upload_count(self):
+        prepared_flow = self.main_source[
+            self.main_source.index("if result.outcome == 'prepared':"):
+            self.main_source.index("no_retry = result.post_dispatched", self.main_source.index("if result.outcome == 'prepared':"))
+        ]
+        self.assertIn("return 'prepared'", prepared_flow)
+        queue_flow = self.main_source[
+            self.main_source.index("def process_video_queue_thread"):
+            self.main_source.index("# =========================\n# UI Helpers & Log")
+        ]
+        self.assertIn("if ok == 'prepared':", queue_flow)
+        prepared_branch = queue_flow[
+            queue_flow.index("if ok == 'prepared':"):
+            queue_flow.index("elif ok:", queue_flow.index("if ok == 'prepared':"))
+        ]
+        self.assertNotIn("uploads_today_count += 1", prepared_branch)
+        harness = self.main_source[self.main_source.index("def _run_single_upload_test_from_env"):]
+        self.assertIn("UPLOAD_TEST_STOP_BEFORE_POST", harness)
+        self.assertIn("target_path.name.startswith('UPLOAD_TEST_')", harness)
+        self.assertIn("target_path.unlink()", harness)
+
 
 if __name__ == "__main__":
     unittest.main()

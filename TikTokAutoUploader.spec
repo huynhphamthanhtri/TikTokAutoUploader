@@ -20,6 +20,8 @@ def _collect_watchdog_files():
 
 project_datas = [
     ('icon.ico', '.'),
+    ('assets/templates', 'assets/templates'),
+    ('assets/donglao_browser_logo.png', 'assets'),
 ]
 
 datas = project_datas

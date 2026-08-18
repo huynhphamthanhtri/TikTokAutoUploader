@@ -51,8 +51,10 @@ SELECTORS: Mapping[str, Any] = {
         (
             "content_checks_cancel",
             "xpath=//div[(contains(@class,'TUXModal') or @role='dialog') "
-            "and .//*[normalize-space()='Turn on automatic content checks?']]"
-            "//button[.//*[normalize-space()='Cancel'] or normalize-space()='Cancel']",
+            "and (.//*[normalize-space()='Turn on automatic content checks?'] "
+            "or .//*[normalize-space()='コンテンツの自動チェックをオンにしますか？'])]"
+            "//button[.//*[normalize-space()='Cancel' or normalize-space()='キャンセル'] "
+            "or normalize-space()='Cancel' or normalize-space()='キャンセル']",
         ),
         (
             "joyride_skip",
@@ -67,7 +69,9 @@ SELECTORS: Mapping[str, Any] = {
         (
             "joyride_got_it",
             "xpath=//div[contains(@class, 'react-joyride__tooltip')]"
-            "//button[normalize-space(.)='Got it' or .//*[normalize-space()='Got it']]",
+            "//button[normalize-space(.)='Got it' or normalize-space(.)='OK' "
+            "or .//*[normalize-space()='Got it' or normalize-space()='OK'] "
+            "or (@data-type='primary' and ancestor::div[contains(@class,'tutorial-tooltip__footer')])]",
         ),
     ),
     "known_popup_roots": (
@@ -506,11 +510,10 @@ async def _dismiss_safe_popups(
 
 
 async def _find_safe_popup_action(page: Any):
-    """Return (name, locator) for the single visible safe-popup action, else None.
+    """Return the first visible identified safe-popup action, else None.
 
-    Raises when any safe-popup selector matches more than one visible element or
-    when several distinct safe popups are visible at the same time."""
-    found: list[tuple[str, Any]] = []
+    Raises when one selector is ambiguous. Several independently identified
+    blockers may coexist; SELECTORS order is the deterministic dismissal order."""
     for name, selector in SELECTORS["safe_popups"]:
         locator = page.locator(selector)
         count = await locator.count()
@@ -518,16 +521,12 @@ async def _find_safe_popup_action(page: Any):
             index for index in range(count) if await locator.nth(index).is_visible()
         ]
         if len(visible_indices) == 1:
-            found.append((name, locator.nth(visible_indices[0])))
+            return name, locator.nth(visible_indices[0])
         elif len(visible_indices) > 1:
             raise RuntimeError(
                 f"Ambiguous safe popup selector {name}: {len(visible_indices)} matches"
             )
-    if len(found) > 1:
-        raise RuntimeError(
-            f"Multiple safe popups visible simultaneously: {[name for name, _ in found]}"
-        )
-    return found[0] if found else None
+    return None
 
 
 async def _wait_for_popup_clear(
@@ -679,6 +678,7 @@ async def _collect_upload_metadata(page: Any) -> dict[str, Any]:
         "joyride_tooltip_visible": False,
         "joyride_overlay_visible": False,
         "joyride_labels": [],
+        "visible_dialogs": [],
     }
     try:
         button_locator = page.locator(SELECTORS["post_button"])
@@ -707,6 +707,31 @@ async def _collect_upload_metadata(page: Any) -> dict[str, Any]:
             if await tooltip.nth(index).is_visible():
                 text = (await tooltip.nth(index).inner_text()) or ""
                 meta["joyride_labels"].append(" ".join(text.split())[:300])
+    except Exception:
+        pass
+    try:
+        dialogs = page.locator(SELECTORS["visible_dialog"])
+        for index in range(await dialogs.count()):
+            dialog = dialogs.nth(index)
+            if not await dialog.is_visible():
+                continue
+            snapshot = await dialog.evaluate(
+                """el => ({
+                    text: (el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 1200),
+                    role: el.getAttribute('role') || '',
+                    ariaLabel: el.getAttribute('aria-label') || '',
+                    className: typeof el.className === 'string' ? el.className.slice(0, 300) : '',
+                    dataE2e: el.getAttribute('data-e2e') || '',
+                    buttons: Array.from(el.querySelectorAll('button, [role="button"]')).slice(0, 30).map(btn => ({
+                        text: (btn.innerText || btn.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 200),
+                        ariaLabel: btn.getAttribute('aria-label') || '',
+                        dataE2e: btn.getAttribute('data-e2e') || '',
+                        disabled: !!btn.disabled || btn.getAttribute('aria-disabled') === 'true'
+                    }))
+                })"""
+            )
+            if isinstance(snapshot, dict):
+                meta["visible_dialogs"].append(snapshot)
     except Exception:
         pass
     return meta

@@ -307,10 +307,12 @@ class PatchrightBrowser:
 
             context = await playwright.chromium.launch_persistent_context(**kwargs)
 
-            # Inject Native Stealth Engine at Context Level
+            # Prepare Anti-Detect configuration: write data.huynhthang for C++ HT Browser & inject JS stealth for standard Chrome
             try:
+                exe_str = str(config.executable_path or "").lower()
+                is_ht_browser = "orbita" in exe_str or "ht-browser" in exe_str or "donglao" in exe_str or "huynhthang" in exe_str
+                from profile_config_engine import generate_stealth_profile_config, write_profile_config_files
                 from vibe_stealth_engine import generate_stealth_js
-                from profile_config_engine import generate_stealth_profile_config
 
                 resolved_id = str(
                     config.account_uuid
@@ -328,8 +330,11 @@ class PatchrightBrowser:
                     } if (config.timezone_id or config.geolocation) else None,
                     profile_name=str(config.profile_name or Path(profile).parent.name),
                 )
-                stealth_js = generate_stealth_js(stealth_cfg)
-                await context.add_init_script(stealth_js)
+                write_profile_config_files(profile, stealth_cfg)
+
+                if not is_ht_browser:
+                    stealth_js = generate_stealth_js(stealth_cfg)
+                    await context.add_init_script(stealth_js)
             except Exception:
                 pass
 

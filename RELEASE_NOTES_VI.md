@@ -1,3 +1,23 @@
+# Phiên bản 1.1.0
+
+## Điểm mới
+- Tích hợp Dong Lao TikTok Browser 144 làm động cơ trình duyệt chính (native C++ anti-detect), kèm trình tải browser tự động khi lần đầu chạy: tải streaming, kiểm tra SHA-256, giải nén an toàn và hoàn tác khi lỗi.
+- Bổ sung tab Hướ Dẫn với 9 nhóm nội dung hướng dẫn sử dụng phần mềm.
+- Bổ sung phân trang (pagination) cho danh sách hồ sơ để quản lý nhiều profile dễ dàng hơn.
+- Thiết kế lại hộp thoại kích hoạt bản quyền (License Modal) theo Design System và hỗ trợ kích hoạt ngầm từ dữ liệu đã lưu.
+
+## Cải thiện
+- Đổi thương hiệu Browser Engine sang tên Dong Lao TikTok Browser 144 kèm icon đồng nhất; ưu tiên dò tìm engine tại thư mục chuẩn và giữ các engine cũ làm dự phòng.
+- Responsive và căn giữa các hộp thoại; đồng bộ icon ứng dụng.
+- Cải thiện giao diện nhập hồ sơ hàng loạt.
+- Cải thiện anti-detect và cấu hình profile fingerprint cho Dong Lao Browser 144.
+- Thu thập diagnostics (ảnh chụp, HTML, JSON) và xử lý nhiều popup đồng thời khi đăng video.
+
+## Sửa lỗi
+- Tự động đóng các popup tiếng Anh/Nhật của TikTok khi đăng video (content check, hướng dẫn mới).
+- Popup lạ dừng an toàn trước khi bấm Post và ghi lại diagnostics.
+- Chế độ test khô (dry-run) không bấm Post, không tăng số liệu video đã đăng và tự dọn hồ sơ thử nghiệm.
+
 # Phiên bản 1.0.19
 
 ## Điểm mới

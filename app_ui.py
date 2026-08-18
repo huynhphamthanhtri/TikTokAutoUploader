@@ -24,6 +24,7 @@ from ui_components import (
     SummaryCard,
     UIThemeTokens,
 )
+from ui_guide import build_guide_workspace
 from youtube_monitor.activity_view import ActivityLogView
 from youtube_monitor.batch_view import BatchDownloadView
 from youtube_monitor.ui import YouTubeMonitorView
@@ -220,6 +221,14 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     btn_nav_monetization.pack(fill="x", pady=2)
     sidebar_buttons["monetization"] = btn_nav_monetization
 
+    btn_nav_guide = SidebarButton(
+        nav_container,
+        text="Hướ Dẫn",
+        icon_text="📖",
+    )
+    btn_nav_guide.pack(fill="x", pady=2)
+    sidebar_buttons["guide"] = btn_nav_guide
+
     # Projects List Section on Sidebar
     proj_header_frame = ctk.CTkFrame(sidebar, fg_color="transparent")
     proj_header_frame.pack(fill="x", padx=12, pady=(16, 4))
@@ -398,8 +407,8 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
 
     ctk.CTkButton(
         manage_left,
-        text="Mở Chrome",
-        width=96,
+        text="Login/Mở trình duyệt",
+        width=165,
         height=32,
         font=UIThemeTokens.FONT_BUTTON,
         fg_color=neutral[0],
@@ -588,6 +597,69 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     hsb.grid(row=1, column=0, sticky='ew')
     tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
     widgets["tree"] = tree
+
+    # Pagination Bar (Dưới đáy bảng hồ sơ)
+    pagination_bar = ctk.CTkFrame(table_card, fg_color="transparent", height=32)
+    pagination_bar.pack(fill="x", padx=10, pady=(0, 6), side="bottom")
+
+    # Left: Page size selector
+    p_left = ctk.CTkFrame(pagination_bar, fg_color="transparent")
+    p_left.pack(side="left")
+    ctk.CTkLabel(p_left, text="Hiển thị:", font=UIThemeTokens.FONT_SUBTITLE, text_color=UIThemeTokens.TEXT_MUTED).pack(side="left", padx=(0, 6))
+    page_size_menu = ctk.CTkOptionMenu(
+        p_left,
+        values=["10 / trang", "25 / trang", "50 / trang", "100 / trang", "200 / trang", "Tất cả"],
+        width=115,
+        height=26,
+        font=UIThemeTokens.FONT_BADGE,
+        command=lambda val: handlers.get("change_page_size", lambda v: None)(val),
+    )
+    page_size_menu.pack(side="left")
+    page_size_menu.set("10 / trang")
+    widgets["pagination_page_size_menu"] = page_size_menu
+
+    # Right: Pagination navigation buttons & label
+    p_right = ctk.CTkFrame(pagination_bar, fg_color="transparent")
+    p_right.pack(side="right")
+
+    btn_first = ctk.CTkButton(
+        p_right, text="⏮", width=30, height=26, font=UIThemeTokens.FONT_BADGE,
+        fg_color="#f1f5f9", text_color=UIThemeTokens.TEXT_PRIMARY, hover_color="#e2e8f0",
+        command=lambda: handlers.get("go_first_page", lambda: None)(),
+    )
+    btn_first.pack(side="left", padx=2)
+    widgets["pagination_btn_first"] = btn_first
+
+    btn_prev = ctk.CTkButton(
+        p_right, text="◀", width=30, height=26, font=UIThemeTokens.FONT_BADGE,
+        fg_color="#f1f5f9", text_color=UIThemeTokens.TEXT_PRIMARY, hover_color="#e2e8f0",
+        command=lambda: handlers.get("go_prev_page", lambda: None)(),
+    )
+    btn_prev.pack(side="left", padx=2)
+    widgets["pagination_btn_prev"] = btn_prev
+
+    page_info_label = ctk.CTkLabel(
+        p_right, text="Trang 1 / 1 (Tổng 0 hồ sơ)", font=UIThemeTokens.FONT_BODY,
+        text_color=UIThemeTokens.TEXT_PRIMARY,
+    )
+    page_info_label.pack(side="left", padx=10)
+    widgets["pagination_page_info_label"] = page_info_label
+
+    btn_next = ctk.CTkButton(
+        p_right, text="▶", width=30, height=26, font=UIThemeTokens.FONT_BADGE,
+        fg_color="#f1f5f9", text_color=UIThemeTokens.TEXT_PRIMARY, hover_color="#e2e8f0",
+        command=lambda: handlers.get("go_next_page", lambda: None)(),
+    )
+    btn_next.pack(side="left", padx=2)
+    widgets["pagination_btn_next"] = btn_next
+
+    btn_last = ctk.CTkButton(
+        p_right, text="⏭", width=30, height=26, font=UIThemeTokens.FONT_BADGE,
+        fg_color="#f1f5f9", text_color=UIThemeTokens.TEXT_PRIMARY, hover_color="#e2e8f0",
+        command=lambda: handlers.get("go_last_page", lambda: None)(),
+    )
+    btn_last.pack(side="left", padx=2)
+    widgets["pagination_btn_last"] = btn_last
 
     # --------------------------------------------------------------------------
     # WORKSPACE 2: YOUTUBE MONITOR WORKSPACE
@@ -821,6 +893,18 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
 
     widgets["monetization_tree"] = mono_tree
 
+    # --------------------------------------------------------------------------
+    # WORKSPACE 6: HƯỚNG DẪN SỬ DỤNG WORKSPACE
+    # --------------------------------------------------------------------------
+    guide_workspace = ctk.CTkFrame(workspace_container, fg_color="transparent")
+    guide_workspace.grid(row=0, column=0, sticky="nsew")
+    guide_workspace.grid_remove()
+
+    guide_view = build_guide_workspace(guide_workspace)
+    guide_view.pack(fill="both", expand=True, padx=6, pady=6)
+    widgets["guide_workspace"] = guide_workspace
+    widgets["guide_view"] = guide_view
+
     # ==========================================================================
     # WORKSPACE ROUTER LOGIC
     # ==========================================================================
@@ -830,6 +914,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
         "batch": (batch_workspace, btn_nav_batch),
         "history": (history_workspace, btn_nav_history),
         "monetization": (monetization_workspace, btn_nav_monetization),
+        "guide": (guide_workspace, btn_nav_guide),
     }
 
     def switch_workspace(target_name: str) -> None:
@@ -846,6 +931,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     btn_nav_batch.configure(command=lambda: switch_workspace("batch"))
     btn_nav_history.configure(command=lambda: switch_workspace("history"))
     btn_nav_monetization.configure(command=lambda: switch_workspace("monetization"))
+    btn_nav_guide.configure(command=lambda: switch_workspace("guide"))
 
     switch_workspace("profiles")  # Default to profiles
     widgets["switch_workspace"] = switch_workspace
@@ -916,7 +1002,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
 
     # Super Context Menu for Profiles Tree
     ctx_menu = Menu(root, tearoff=0)
-    ctx_menu.add_command(label="Mở trình duyệt", command=handlers['open_browser'])
+    ctx_menu.add_command(label="🌐 Login / Mở trình duyệt", command=handlers['open_browser'])
     ctx_menu.add_command(label="Kiểm tra Cookie (Đã chọn)", command=handlers['check_cookie_live'])
     ctx_menu.add_command(label="Kiểm tra thông tin TikTok", command=handlers['inspect_tiktok_account'])
     ctx_menu.add_command(label="💰 Kiểm tra Thu nhập / KYC / CRP", command=handlers.get('check_monetization_selected', handlers.get('refresh_selected_monetization', lambda: None)))

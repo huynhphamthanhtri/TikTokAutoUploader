@@ -460,7 +460,7 @@ class TestResourceAssetsNoFFmpeg(unittest.TestCase):
         browser = RESOURCE_ASSETS.get("Browser")
         self.assertIsNotNone(browser)
         self.assertEqual(browser["type"], "zip_dir")
-        self.assertIn("Browser/chrome-win64/chrome.exe", browser["validate"])
+        self.assertIn("Browser/donglao-browser-144/chrome.exe", browser["validate"])
         self.assertNotIn("Browser/chromedriver.exe", browser["validate"])
 
 

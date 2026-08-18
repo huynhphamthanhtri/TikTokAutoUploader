@@ -99,6 +99,8 @@ class TestAppUIContract(unittest.TestCase):
             "project_list_view",
             "log_drawer",
             "switch_workspace",
+            "guide_workspace",
+            "guide_view",
         ]
 
         for key in required_keys:
