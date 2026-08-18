@@ -54,6 +54,9 @@ ngrok.exe
 # Test helpers
 test_update/
 
+# Scratch work (never committed)
+scratch/
+
 # Secrets
 service_account.json
 

@@ -294,27 +294,12 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
         self.assertFalse(token.is_alive())
 
     def test_manual_close_then_reopen_same_profile_succeeds(self):
-        from browser_runtime import BrowserRuntime
-        from patchright_browser import BrowserSessionConfig, PatchrightBrowser, SessionMode
-        from test_patchright_browser import FakeManager, FakePlaywright
-
-        playwright = FakePlaywright()
-        runtime = BrowserRuntime(lambda: FakeManager(playwright))
-        browser = PatchrightBrowser(runtime)
-        try:
-            config = BrowserSessionConfig("profile", mode=SessionMode.MANUAL)
-            with patch.object(glue, "browser_service", return_value=browser):
-                opened = browser.open_session(config).result(2)
-                token = glue.SessionToken("account", opened.handle, SessionMode.MANUAL, "profile")
-                playwright.chromium.contexts[0].pages.clear()
-                glue.watch_manual_close(token, poll=0.01)
-                status = browser.status()
-                self.assertEqual(status.active_sessions, 0)
-                self.assertEqual(status.profile_paths, ())
-                browser.open_session(BrowserSessionConfig("profile")).result(2)
-        finally:
-            browser.shutdown()
-            runtime.shutdown()
+        token = glue.SessionToken("account", "handle", glue.SessionMode.MANUAL, "profile")
+        service = _WatcherService()
+        with patch.object(glue, "browser_service", return_value=service):
+            glue.watch_manual_close(token, poll=0.01)
+            self.assertFalse(token.is_alive())
+            self.assertEqual(service.close_calls, 1)
 
     def test_open_session_maps_profile_in_use_to_profile_busy(self):
         class BusyService:

@@ -55,8 +55,11 @@ CSV_LOG = APP_ROOT / "downloads_log.csv"
 NGROK_BINARY = APP_ROOT / "ngrok.exe"
 
 NGROK_PORT_DEFAULT = 5000
-MIN_SECONDS = 62
-LOOP_MIN_DURATION = 45
+SHORT_SLOW_MIN_DURATION = 40.0
+SHORT_SLOW_MAX_DURATION = 60.0
+SHORT_TARGET_DURATION = 61.0
+MIN_SECONDS = 61
+LOOP_MIN_DURATION = 60
 RESUBSCRIBE_INTERVAL_DAYS = 2
 MAX_ACCEPTABLE_AGE_HOURS = int(os.environ.get("MAX_ACCEPTABLE_AGE_HOURS", "12"))
 WATERMARK_SLACK_MINUTES = int(os.environ.get("WATERMARK_SLACK_MINUTES", "30"))
@@ -1482,6 +1485,42 @@ def _staging_dir(target_folder):
     return p
 
 
+def apply_short_processing(downloaded_path, duration, process_short, log_fn=log):
+    """Apply the YouTube Short duration rules to a downloaded video.
+
+    Rules:
+    * ``process_short`` off -> video is kept unchanged.
+    * duration ``< 40s``   -> kept unchanged.
+    * duration in ``[40s, 60s)`` -> slowed down to ``SHORT_TARGET_DURATION``.
+    * duration ``>= 60s``  -> kept unchanged.
+    * Unknown duration (``<= 0`` or in the slow window) is re-probed from the
+      downloaded file before deciding.
+
+    Returns ``(processed_path, created_paths)``. Raises if the slowdown helper
+    fails; the original ``downloaded_path`` is never modified by this function.
+    """
+    dur = float(duration or 0)
+    processed_path, created_paths = downloaded_path, []
+
+    if process_short:
+        if dur <= 0 or (SHORT_SLOW_MIN_DURATION <= dur < SHORT_SLOW_MAX_DURATION):
+            actual_dur = ffmpeg_helper.probe_duration(downloaded_path)
+            if actual_dur is not None and actual_dur > 0:
+                dur = actual_dur
+
+        if SHORT_SLOW_MIN_DURATION <= dur < SHORT_SLOW_MAX_DURATION:
+            log_fn(f"[Short] Video dài {dur:.1f}s (trong khoảng 40s-60s) -> Làm chậm đạt {SHORT_TARGET_DURATION}s")
+            processed_path, created_paths = slowdown_to_min_duration_in_temp(downloaded_path, SHORT_TARGET_DURATION)
+        elif dur < SHORT_SLOW_MIN_DURATION:
+            log_fn(f"[Short] Video dài {dur:.1f}s (< 40s) -> Giữ nguyên thời lượng")
+        else:
+            log_fn(f"[Short] Video dài {dur:.1f}s (>= 60s) -> Giữ nguyên thời lượng")
+    else:
+        log_fn(f"[Short] Kênh tắt tính năng Short -> Giữ nguyên thời lượng video ({dur:.1f}s)")
+
+    return processed_path, created_paths
+
+
 def download_one(channel_id, video_id, published_iso=None, detected_iso=None, target_folder=None, process_short=None, proxy=None, activity_profile=None):
     global downloaded_today, downloaded_today_date
     t_start = time.perf_counter()
@@ -1589,16 +1628,8 @@ def download_one(channel_id, video_id, published_iso=None, detected_iso=None, ta
             return False
 
         dur = float(info.get("duration") or 0)
-        needs_probe = dur < MIN_SECONDS or dur < 1
         t_process_start = time.perf_counter()
-        processed_path, created_paths = downloaded_path, []
-        if process_short and dur < MIN_SECONDS:
-            if needs_probe:
-                dur = ffmpeg_helper.probe_duration(downloaded_path) or 0
-            if dur >= LOOP_MIN_DURATION:
-                processed_path, created_paths = loop_to_min_duration_in_temp(downloaded_path, MIN_SECONDS)
-            else:
-                processed_path, created_paths = slowdown_to_min_duration_in_temp(downloaded_path, MIN_SECONDS)
+        processed_path, created_paths = apply_short_processing(downloaded_path, dur, process_short)
         t_process_end = time.perf_counter()
         process_s = t_process_end - t_process_start
 

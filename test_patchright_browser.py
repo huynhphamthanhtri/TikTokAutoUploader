@@ -19,7 +19,8 @@ from patchright_browser import (
 
 
 class FakePage:
-    pass
+    def __init__(self, context=None):
+        self.context = context
 
 
 @dataclass(frozen=True)
@@ -30,13 +31,13 @@ class FakeOperationValue:
 
 class FakeContext:
     def __init__(self):
-        self.pages = [FakePage()]
+        self.pages = [FakePage(self)]
         self.closed = False
         self.added_cookies = []
         self.owner_thread = threading.get_ident()
 
     async def new_page(self):
-        page = FakePage()
+        page = FakePage(self)
         self.pages.append(page)
         return page
 

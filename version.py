@@ -1,5 +1,5 @@
-__version__ = "1.1.0"
-RESOURCE_RELEASE_VERSION = "1.0.9"
+__version__ = "1.1.1"
+RESOURCE_RELEASE_VERSION = "1.1.0"
 APP_NAME = "TikTokAutoUploader"
 RELEASE_ASSET_PREFIX = "DONGLAO-TIKTOK-v"
 
@@ -15,6 +15,6 @@ RESOURCE_ASSETS = {
         "validate": [
             "Browser/donglao-browser-144/chrome.exe",
         ],
-        "sha256": "ce6df90fad6ea4a8fc6de2502737194cdeea026a653d1467ed2591d783805e3a",
+        "sha256": "1fad89e24cbe126b18c6bf941438af5a7d729d9e4e65e8a9e19b104f59014a96",
     },
 }

@@ -444,29 +444,38 @@ def write_profile_config_files(profile_path: str | os.PathLike[str], config: Dic
     profile_name = config.get("profile_name") or (p.parent.name if p.parent else "")
     raw_file = find_ttm_raw_profile_file(str(profile_name)) if profile_name else None
 
-    if raw_file and raw_file.exists():
-        # 1. Sao chép nguyên bản giữ trọn vẹn chữ ký C++ từ TTM nếu có
-        for fname in ("data.huynhthang", "data.orbita"):
-            target = p / fname
+    if base_template_huynhthang.exists():
+        # 1. Cấp phát từ Base Template độc lập và cập nhật đúng profile_name động
+        try:
+            with open(base_template_huynhthang, "r", encoding="utf-8") as f:
+                template_data = json.load(f)
+
+            if profile_name:
+                template_data["profile_name"] = str(profile_name)
+
+            # Đồng bộ proxy nếu có
+            proxy_cfg = config.get("proxy")
+            if isinstance(proxy_cfg, dict):
+                template_data["proxy"] = proxy_cfg
+
+            for fname in ("data.huynhthang", "data.orbita"):
+                target = p / fname
+                with open(target, "w", encoding="utf-8") as f:
+                    json.dump(template_data, f, indent=2, ensure_ascii=False)
+        except Exception:
+            # Fallback sao chép nhị phân nếu gặp lỗi parse
             try:
-                shutil.copyfile(raw_file, target)
+                shutil.copyfile(base_template_huynhthang, p / "data.huynhthang")
+                shutil.copyfile(base_template_huynhthang, p / "data.orbita")
             except Exception:
                 pass
-    elif base_template_huynhthang.exists():
-        # 2. Cấp phát từ Base Template độc lập có sẵn trong tool (sao chép nhị phân nguyên bản để bảo toàn HMAC/chữ ký)
-        try:
-            shutil.copyfile(base_template_huynhthang, p / "data.huynhthang")
-            if base_template_orbita.exists():
-                shutil.copyfile(base_template_orbita, p / "data.orbita")
-            else:
-                shutil.copyfile(base_template_huynhthang, p / "data.orbita")
-        except Exception:
-            pass
     else:
-        # 3. Fallback ghi JSON chuẩn
+        # 2. Fallback ghi JSON chuẩn
         cfg_to_write = dict(config)
         if not cfg_to_write.get("license_key"):
             cfg_to_write["license_key"] = os.environ.get("VIBE_ORBITA_LICENSE_KEY", DEFAULT_LICENSE_KEY)
+        if profile_name:
+            cfg_to_write["profile_name"] = str(profile_name)
         for fname in ("data.huynhthang", "data.orbita"):
             target = p / fname
             try:

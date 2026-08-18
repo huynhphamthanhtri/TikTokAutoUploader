@@ -106,8 +106,8 @@ jobs:
       - name: Browser launch smoke (bundled resource)
         shell: pwsh
         run: |
-          $browserTag = "v1.0.9"
-          $browserZip = "Browser-v1.0.9.zip"
+          $browserTag = "v1.1.0"
+          $browserZip = "Browser-v1.1.0.zip"
           $url = "https://github.com/${{ github.repository }}/releases/download/$browserTag/$browserZip"
           $tmp = Join-Path $env:RUNNER_TEMP "browser_smoke"
           New-Item -ItemType Directory -Path $tmp -Force | Out-Null

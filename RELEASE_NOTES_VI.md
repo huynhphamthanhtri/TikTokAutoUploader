@@ -1,3 +1,17 @@
+# Phiên bản 1.1.1
+
+## Điểm mới
+- Phát hành Browser Resource v1.1.0: bộ engine Dong Lao Browser 144 mới đã loại bỏ kiểm tra chữ ký HMAC (6 NOPs) nên chấp nhận mọi tên profile, cho phép cấp phát cấu hình động theo profile mới.
+- Công cụ vận hành browser engine: `scripts/patch_all_browser_engines.py` và `scripts/patch_chrome_version_info.py` (patch trên staging copy, có kiểm tra bytes, idempotent, tạo backup và xác minh sau patch) kèm bộ test đầy đủ.
+- Quy tắc mới cho video YouTube Short khi bật xử lý: video dưới 40 giây giữ nguyên; video từ 40 đến dưới 60 giây được làm chậm đủ 61 giây; video từ 60 giây trở lên giữ nguyên.
+
+## Cải thiện
+- Cấu hình C++ engine (data.huynhthang / data.orbita) được sinh từ Base Template có sẵn trong ứng dụng, tự đồng bộ `profile_name` và proxy của từng profile thay vì phụ thuộc dữ liệu cục bộ của TikTok Manager.
+- Bộ phát hiện đóng cửa sổ thủ công (manual close) gọi đóng session đúng một lần và giải phóng profile để có thể mở lại ngay trên cùng profile.
+
+## Sửa lỗi
+- Khắc phục profile mới (ví dụ tên tùy ý như BKT_8) bị engine cũ từ chối với lỗi `Antidetect license verification FAILED` khi khởi chạy; browser resource v1.1.0 đã xử lý triệt để.
+
 # Phiên bản 1.1.0
 
 ## Điểm mới
