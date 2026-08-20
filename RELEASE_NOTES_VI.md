@@ -1,3 +1,20 @@
+# Phiên bản 1.1.2
+
+## Điểm mới
+- Tải video YouTube ưu tiên kết nối trực tiếp (không qua proxy); proxy và cookie chỉ được dùng khi bật tùy chọn fallback `youtube_proxy_fallback`.
+- Bổ sung kiểm tra file cookie YouTube (cấu trúc Netscape, ngày hết hạn) và hiển thị trạng thái cookie ngay trên màn hình cấu hình YouTube.
+- Bổ sung tác vụ "Tải thử" video YouTube theo chế độ direct-first, cùng chuỗi thử lại linh hoạt (định dạng thay thế, client thay thế, cookie, proxy).
+- Bổ sung bộ chọn hồ sơ có tìm kiếm khi danh sách hồ sơ lớn và cải tiến trạng thái chạy lô (Batch).
+
+## Cải thiện
+- Ưu tiên định dạng DASH (video `avc1`/mp4 kèm audio `m4a`) thay vì định dạng progressive 18 khi tải video YouTube.
+- Cải thiện đồng bộ cấu hình (config service), nhật ký hiệu năng cao (log engine), bảng hồ sơ và quản lý cửa sổ taskbar.
+- Nâng cấp tự động yt-dlp trong ứng dụng và cải thiện pipeline phân phối video thống nhất (watchdog).
+
+## Sửa lỗi
+- Khắc phục tải video YouTube bị HTTP 403 do YouTube chặn định dạng progressive 18; từ bản này ưu tiên DASH-first và chỉ rơi về progressive khi không có lựa chọn khác.
+- Khắc phục một số trường hợp kênh/batch chạy sai trạng thái và dữ liệu cũ hiển thị không nhất quán.
+
 # Phiên bản 1.1.1
 
 ## Điểm mới

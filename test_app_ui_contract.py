@@ -22,7 +22,8 @@ class TestAppUIContract(unittest.TestCase):
     def tearDownClass(cls):
         if cls.root:
             try:
-                cls.root.destroy()
+                for child in cls.root.winfo_children():
+                    child.destroy()
             except Exception:
                 pass
 

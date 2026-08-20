@@ -61,7 +61,10 @@ def main(argv=None) -> int:
         branding = report.get("branding") or {}
         for which, item in branding.items():
             if item:
-                print(f"  {which:12s}: applied={item['applied']} counts={[p['count'] for p in item['pairs']]}")
+                if which == "paks":
+                    print(f"  {which:12s}: applied={item.get('applied')} paks_patched={item.get('paks_patched')}")
+                elif "pairs" in item:
+                    print(f"  {which:12s}: applied={item['applied']} counts={[p['count'] for p in item['pairs']]}")
         if problems:
             failed = True
             for problem in problems:

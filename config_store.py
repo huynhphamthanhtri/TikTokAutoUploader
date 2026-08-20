@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import shutil
 import threading
 import uuid
 from datetime import datetime
@@ -57,10 +59,10 @@ def _normalize_browser_config(config):
 def build_configs_payload(profiles, projects):
     export_profiles = {}
     for name, prof in profiles.items():
-        config = _normalize_browser_config(prof['config'])
-        config['stats_today'] = prof['uploads_today_count']
+        config = _normalize_browser_config(prof.get('config', {}))
+        config['stats_today'] = prof.get('uploads_today_count', 0)
         config['stats_yesterday'] = prof.get('uploads_yesterday_count', 0)
-        config['stats_date'] = prof['uploads_today_date']
+        config['stats_date'] = prof.get('uploads_today_date', '')
         config['project'] = prof.get('project', 'Mặc định')
         export_profiles[name] = config
 
@@ -70,8 +72,72 @@ def build_configs_payload(profiles, projects):
     }
 
 
-def save_configs_file(config_path, payload):
-    config_path = Path(config_path) if isinstance(config_path, str) else config_path
+def _rotate_backups(config_path: Path, max_backups: int = 3):
+    """Rotate config backups: .bak -> .bak.1 -> .bak.2 -> .bak.3."""
+    try:
+        if config_path.exists() and config_path.stat().st_size == 0:
+            return
+    except Exception:
+        return
+    base_bak = config_path.with_name(f"{config_path.name}.bak")
+    for i in range(max_backups, 0, -1):
+        cur_bak = config_path.with_name(f"{config_path.name}.bak.{i}")
+        if i > 1:
+            prev_bak = config_path.with_name(f"{config_path.name}.bak.{i - 1}")
+        else:
+            prev_bak = base_bak
+        if not prev_bak.exists():
+            continue
+        try:
+            if cur_bak.exists():
+                cur_bak.unlink(missing_ok=True)
+            shutil.copy2(prev_bak, cur_bak)
+        except Exception:
+            continue
+    try:
+        shutil.copy2(config_path, base_bak)
+    except Exception:
+        pass
+
+
+def save_configs_file(config_path, payload, allow_truncate: bool = False):
+    """Save configs payload to disk with rotating backups and truncation safety guards."""
+    if isinstance(config_path, str):
+        config_path = Path(config_path)
+    if isinstance(payload, dict):
+        incoming_profiles = payload.get('profiles', {})
+    else:
+        incoming_profiles = {}
+    incoming_count = len(incoming_profiles)
+
+    if config_path.exists() and config_path.stat().st_size > 0 and not allow_truncate:
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                existing_data = json.load(f)
+            if isinstance(existing_data, dict):
+                existing_profiles = existing_data.get('profiles', {})
+            else:
+                existing_profiles = {}
+            existing_count = len(existing_profiles)
+
+            if existing_count >= 3 and incoming_count <= 1:
+                scratch_dir = config_path.parent / 'scratch'
+                scratch_dir.mkdir(exist_ok=True)
+                quarantine_file = scratch_dir / f"quarantined_configs_{uuid.uuid4().hex[:8]}.json"
+                with open(quarantine_file, "w", encoding="utf-8") as qf:
+                    json.dump(payload, qf, indent=4, ensure_ascii=False)
+                err_msg = (
+                    f"[DATA PROTECTION] Blocked unsafe truncation of {config_path.name}: attempted to save "
+                    f"{incoming_count} profiles over {existing_count} existing profiles! Quarantined to "
+                    f"{quarantine_file.name}. Set allow_truncate=True to force."
+                )
+                logging.error(err_msg)
+                raise RuntimeError(err_msg)
+        except json.JSONDecodeError:
+            pass
+
+    _rotate_backups(config_path)
+
     tmp = config_path.with_name(f"{config_path.name}.{uuid.uuid4().hex}.tmp")
     with _CONFIG_SAVE_LOCK:
         try:
@@ -88,8 +154,49 @@ def save_configs_file(config_path, payload):
 
 
 def load_configs_file(config_path):
-    with open(config_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    """Load configs from file with automatic fallback recovery if corrupted or missing."""
+    if isinstance(config_path, str):
+        config_path = Path(config_path)
+    if config_path.exists() and config_path.stat().st_size > 0:
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            logging.warning(
+                f"[CONFIG LOAD] Primary file {config_path} corrupted: {e}, attempting backup recovery..."
+            )
+
+    candidates = [
+        config_path.with_name(f"{config_path.name}.bak"),
+        config_path.with_name(f"{config_path.name}.bak.1"),
+        config_path.with_name(f"{config_path.name}.bak.2"),
+    ]
+    if config_path.parent.exists():
+        candidates.extend(sorted(config_path.parent.glob(f"{config_path.name}.login-backup-*.json"), reverse=True))
+    for cand in candidates:
+        if not cand.exists() or cand.stat().st_size <= 0:
+            continue
+        try:
+            with open(cand, "r", encoding="utf-8") as f:
+                recovered = json.load(f)
+            if isinstance(recovered, dict) and len(recovered.get('profiles', {})) > 0:
+                logging.info(
+                    f"[CONFIG AUTO-RECOVERY] Successfully recovered "
+                    f"{len(recovered.get('profiles', {}))} profiles from backup: {cand.name}"
+                )
+                try:
+                    shutil.copy2(cand, config_path)
+                    return recovered
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    raise FileNotFoundError(f"Config file not found: {config_path}")
 
 
 def normalize_loaded_config(raw_configs):

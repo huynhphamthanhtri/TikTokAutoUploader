@@ -64,16 +64,15 @@ class AuthenticateSessionTests(unittest.TestCase):
                 glue.authenticate_session(_token(), _config(cookie_str="x"), "P", "https://upload")
         mock_import.assert_called_once()
 
-    def test_indeterminate_allows_one_cookie_fallback(self):
-        states = iter(["indeterminate", "authenticated"])
+    def test_indeterminate_never_imports_cookie_fallback(self):
         with patch.object(glue, "navigate"), patch.object(
-            glue, "wait_page_login_state", side_effect=lambda *a, **k: next(states)
+            glue, "wait_page_login_state", return_value="indeterminate"
         ), patch.object(glue, "import_cookies") as mock_import, patch.object(
             glue, "parse_cookie", return_value=[{"name": "sid_tt"}]
         ):
-            source = glue.authenticate_session(_token(), _config(cookie_str="x"), "P", "https://upload")
-        self.assertEqual(source, "cookie_fallback")
-        mock_import.assert_called_once()
+            with self.assertRaisesRegex(LoginRequiredError, "giữ nguyên session"):
+                glue.authenticate_session(_token(), _config(cookie_str="x"), "P", "https://upload")
+        mock_import.assert_not_called()
 
     def test_fallback_disabled_never_imports(self):
         with patch.object(glue, "navigate"), patch.object(

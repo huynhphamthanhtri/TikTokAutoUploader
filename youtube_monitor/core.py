@@ -1,3 +1,4 @@
+import copy
 import hmac
 import json
 import math
@@ -12,7 +13,8 @@ import traceback
 import urllib.parse
 import uuid
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -60,16 +62,21 @@ SHORT_SLOW_MAX_DURATION = 60.0
 SHORT_TARGET_DURATION = 61.0
 MIN_SECONDS = 61
 LOOP_MIN_DURATION = 60
-RESUBSCRIBE_INTERVAL_DAYS = 2
+RESUBSCRIBE_LEAD_TIME_HOURS = 12
 MAX_ACCEPTABLE_AGE_HOURS = int(os.environ.get("MAX_ACCEPTABLE_AGE_HOURS", "12"))
 WATERMARK_SLACK_MINUTES = int(os.environ.get("WATERMARK_SLACK_MINUTES", "30"))
 SEEN_MAX_PER_CHANNEL = 1200
 BATCH_SCAN_LIMIT = 50
 FORMAT_FAST_720P = (
+    "bv[height<=720][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
+    "bv[height<=720][ext=mp4]+ba[ext=m4a]/"
+    "bv[height<=720][vcodec^=avc1]+ba/"
     "b[height<=720][ext=mp4][vcodec^=avc1]/"
     "b[height<=720][ext=mp4]/"
-    "bv*[height<=720][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
-    "bv*[height<=720][ext=mp4]+ba[ext=m4a]/"
+    "b[height<=720]"
+)
+FORMAT_COMPAT_720P = (
+    "bv[height<=720]+ba/"
     "b[height<=720]"
 )
 
@@ -82,7 +89,45 @@ CONFIG_DEFAULTS = {
     "cookies_file": "",
     "proxy_rotation": True,
     "concurrent_fragments": 8,
+    "youtube_proxy_fallback": False,
+    "youtube_cookie_policy": "fallback",
 }
+
+FAILURE_PERMANENT = "permanent"
+FAILURE_AUTH_REQUIRED = "auth_required"
+FAILURE_HTTP_403 = "http_403"
+FAILURE_YOUTUBE_BLOCK = "youtube_block"
+FAILURE_PROXY_TRANSPORT = "proxy_transport"
+FAILURE_FORMAT_UNAVAILABLE = "format_unavailable"
+FAILURE_TRANSIENT_NETWORK = "transient_network"
+FAILURE_RETRY = "retry"
+
+_FAILURE_PERMANENT_KW = (
+    "members-only", "members only", "copyright", "removed by user",
+    "this video is private", "this video is unavailable", "video unavailable",
+    "copyright claim", "copyright strike", "age-restricted", "age restriction",
+    "sign in to age verify", "unavailable for legal reasons",
+    "has not made this video available in your country", "video has been removed",
+    "account associated with this video has been terminated",
+)
+
+_FAILURE_AUTH_KW = (
+    "sign in to watch", "sign in required", "you need to sign in",
+    "log in to watch", "login required", "please sign in", "authentication required",
+    "you must be logged in", "sign in to access",
+)
+
+_FAILURE_TRANSIENT_KW = (
+    "timed out", "timeout", "connection refused", "connection reset",
+    "connection aborted", "remote end closed connection", "temporary failure",
+    "unexpected end of stream", "500", "502", "503",
+)
+
+_FAILURE_FORMAT_KW = (
+    "unable to extract", "no video formats", "no matching formats",
+    "format is not available", "requested format is not available",
+    "format unavailable", "no such format", "unable to download video data",
+)
 
 DOWNLOADS_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
@@ -290,15 +335,79 @@ def _is_pending(cid, vid):
         return f"{cid}:{vid}" in _pending_video_ids
 
 
-def _classify_download_error(error):
-    text = str(error).lower()
-    permanent_kw = ("members-only", "members only", "copyright", "removed by user", "this video is private", "this video is unavailable", "video unavailable", "copyright claim", "copyright strike", "age-restricted", "age restriction", "sign in to age verify")
-    for kw in permanent_kw:
+def _is_http_403(message):
+    text = str(message or "").lower()
+    return (
+        "http error 403" in text
+        or "http status 403" in text
+        or "403 forbidden" in text
+        or "error 403" in text
+        or "403: forbidden" in text
+    )
+
+
+def _is_proxy_transport_error(message):
+    text = str(message or "").lower()
+    keywords = (
+        "407", "proxy", "socks", "tunnel",
+    )
+    return any(k in text for k in keywords)
+
+
+def _is_transient_network_error(message):
+    text = str(message or "").lower()
+    return any(k in text for k in _FAILURE_TRANSIENT_KW)
+
+
+def _is_format_unavailable_error(message):
+    text = str(message or "").lower()
+    return any(k in text for k in _FAILURE_FORMAT_KW)
+
+
+def _is_auth_required_error(message):
+    text = str(message or "").lower()
+    return any(k in text for k in _FAILURE_AUTH_KW)
+
+
+def _classify_failure(error):
+    """Structured failure taxonomy used by the download attempt planner.
+
+    Order matters: permanent wins first, then HTTP 403, then the YouTube bot
+    block (which contains 'sign in to confirm'), then auth, proxy transport,
+    transient network and format-unavailable. Everything else falls back to a
+    generic retryable class.
+    """
+    text = str(error or "").lower()
+    for kw in _FAILURE_PERMANENT_KW:
         if kw in text:
-            return "permanent"
+            return FAILURE_PERMANENT
+    if _is_http_403(text):
+        return FAILURE_HTTP_403
     if _is_youtube_block_error(error):
+        return FAILURE_YOUTUBE_BLOCK
+    if _is_auth_required_error(text):
+        return FAILURE_AUTH_REQUIRED
+    if _is_proxy_transport_error(text):
+        return FAILURE_PROXY_TRANSPORT
+    if _is_transient_network_error(text):
+        return FAILURE_TRANSIENT_NETWORK
+    if _is_format_unavailable_error(text):
+        return FAILURE_FORMAT_UNAVAILABLE
+    return FAILURE_RETRY
+
+
+def _classify_download_error(error):
+    """Legacy classifier kept for compatibility with existing callers/tests.
+
+    Maps the structured taxonomy back to the historical ``retry``/``retry_block``/
+    ``retry_proxy``/``permanent`` values.
+    """
+    cls = _classify_failure(error)
+    if cls == FAILURE_PERMANENT:
+        return "permanent"
+    if cls == FAILURE_YOUTUBE_BLOCK:
         return "retry_block"
-    if _is_proxy_download_error(error):
+    if cls == FAILURE_PROXY_TRANSPORT:
         return "retry_proxy"
     return "retry"
 
@@ -397,6 +506,174 @@ def _is_proxy_download_error(message):
     return any(k in text for k in keywords) or _is_youtube_block_error(text)
 
 
+@dataclass(frozen=True)
+class YtdlpAttempt:
+    name: str
+    route: str
+    proxy: str
+    use_cookies: bool
+    format_selector: str
+    reason: str = ""
+    player_client: str = ""
+    triggers: tuple = ()
+
+
+@dataclass
+class DownloadOutcome:
+    ok: bool
+    retryable: bool
+    permanent: bool
+    failure_class: str = FAILURE_RETRY
+    attempts_used: int = 0
+    final_path: str = ""
+    detail: str = ""
+
+
+def validate_youtube_cookie_file(path):
+    """Offline (no-network) sanity check of a Netscape cookie file.
+
+    Never reads cookie values into logs or activity records. Returns
+    ``(ok, reason)`` where reason is a short human-readable description.
+    """
+    if not path:
+        return False, "Chưa cấu hình file cookie."
+    p = Path(path)
+    if not p.exists():
+        return False, "File cookie không tồn tại."
+    if not p.is_file():
+        return False, "Đường dẫn cookie không phải file."
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            head = f.read(16384)
+    except Exception as e:
+        return False, f"Không đọc được file cookie: {e}"
+    if "# Netscape HTTP Cookie File" not in head and "# HTTP Cookie File" not in head:
+        return False, "File cookie không đúng định dạng Netscape."
+    lines = [line for line in head.splitlines() if line.strip() and not line.strip().startswith("#")]
+    if not lines:
+        return False, "File cookie rỗng (không có entry)."
+    yt_lines = [line for line in lines if ".youtube.com" in line or ".google.com" in line]
+    if not yt_lines:
+        return False, "Không có cookie cho domain YouTube/Google."
+    now = time.time()
+    valid_yt = 0
+    expired_yt = 0
+    for line in yt_lines:
+        fields = line.split("\t")
+        try:
+            expires = int(fields[4]) if len(fields) > 4 else 0
+        except Exception:
+            expires = 0
+        if expires > 0 and expires < now:
+            expired_yt += 1
+        else:
+            valid_yt += 1
+    if valid_yt == 0:
+        return False, "Cookie YouTube/Google đã hết hạn."
+    return True, f"Có {valid_yt} entry YouTube/Google chưa hết hạn (chưa xác minh live)."
+
+
+def _ytdlp_alternate_client():
+    """Pick a supported alternate player client from the installed yt-dlp runtime.
+
+    Returns the client name or ``""`` when none of the known fallback clients is
+    present at runtime (so callers skip the alternate-client attempt entirely).
+    """
+    try:
+        from yt_dlp.extractor.youtube._base import INNERTUBE_CLIENTS
+        available = set(INNERTUBE_CLIENTS.keys())
+    except Exception:
+        return ""
+    for candidate in ("android_vr", "web_embedded", "web_safari"):
+        if candidate in available:
+            return candidate
+    return ""
+
+
+def _build_ytdlp_opts(base_opts, attempt, attempt_dir):
+    opts = copy.deepcopy(base_opts)
+    opts["outtmpl"] = str(Path(attempt_dir) / "%(title).100s.%(ext)s")
+    opts["format"] = attempt.format_selector
+    if attempt.route == "direct":
+        opts["proxy"] = ""
+    else:
+        opts["proxy"] = attempt.proxy
+    if attempt.use_cookies:
+        cookies = _resolve_cookies_file()
+        if cookies:
+            opts["cookies"] = cookies
+    else:
+        opts.pop("cookies", None)
+    if attempt.player_client:
+        ea = {}
+        for key, value in (opts.get("extractor_args") or {}).items():
+            ea[key] = dict(value) if isinstance(value, dict) else {}
+        youtube_ea = dict(ea.get("youtube") or {})
+        youtube_ea["player_client"] = [attempt.player_client]
+        ea["youtube"] = youtube_ea
+        opts["extractor_args"] = ea
+    return opts
+
+
+def _build_attempt_plan(profile_name, explicit_proxy=None):
+    """Build the ordered attempt chain. Direct/no-proxy is always first."""
+    cfg = get_config()
+    cookie_policy = str(cfg.get("youtube_cookie_policy", "fallback")).strip().lower()
+    use_cookies = cookie_policy not in ("never", "off", "none")
+    cookie_available = bool(_resolve_cookies_file())
+    proxy_fallback = bool(cfg.get("youtube_proxy_fallback", False))
+
+    attempts = [
+        YtdlpAttempt(
+            "direct-primary", "direct", "", False, FORMAT_FAST_720P,
+            "direct anonymous",
+        ),
+        YtdlpAttempt(
+            "direct-alt-format", "direct", "", False, FORMAT_COMPAT_720P,
+            "403 -> alternate format",
+            triggers=(FAILURE_HTTP_403, FAILURE_FORMAT_UNAVAILABLE),
+        ),
+    ]
+    alt_client = _ytdlp_alternate_client()
+    if alt_client:
+        attempts.append(YtdlpAttempt(
+            "direct-alt-client", "direct", "", False, FORMAT_FAST_720P,
+            "403 -> alternate client",
+            player_client=alt_client,
+            triggers=(FAILURE_HTTP_403,),
+        ))
+    if use_cookies and cookie_available:
+        attempts.append(YtdlpAttempt(
+            "direct-cookies", "direct", "", True, FORMAT_FAST_720P,
+            "auth/403 -> cookies",
+            triggers=(FAILURE_HTTP_403, FAILURE_AUTH_REQUIRED, FAILURE_YOUTUBE_BLOCK),
+        ))
+    proxy = None
+    if proxy_fallback:
+        proxy = _proxy_for_profile(profile_name) or explicit_proxy
+    elif explicit_proxy:
+        proxy = explicit_proxy
+    if proxy:
+        attempts.append(YtdlpAttempt(
+            "proxy-exact", "proxy", proxy, False, FORMAT_FAST_720P,
+            "proxy fallback",
+            triggers=(FAILURE_HTTP_403, FAILURE_YOUTUBE_BLOCK, FAILURE_PROXY_TRANSPORT, FAILURE_TRANSIENT_NETWORK),
+        ))
+    return attempts
+
+
+def _select_next_attempt(attempts, from_index, failure_cls):
+    """Pick the next attempt index justified by the failure class, or None."""
+    if failure_cls == FAILURE_PERMANENT:
+        return None
+    target = (failure_cls,) if failure_cls != FAILURE_AUTH_REQUIRED else (FAILURE_AUTH_REQUIRED,)
+    for i in range(from_index + 1, len(attempts)):
+        triggers = attempts[i].triggers
+        if not triggers or any(t in target for t in triggers):
+            return i
+    return None
+
+
 def get_api_key():
     keys = get_config().get("api_keys") or []
     return str(keys[0]).strip() if keys else ""
@@ -459,6 +736,11 @@ class ChannelsStore:
                 "seen": sorted(list(meta.get("seen", set()))),
                 "last_pub_utc": meta.get("last_pub_utc"),
                 "process_short": bool(meta.get("process_short", True)),
+                "title": meta.get("title", ""),
+                "thumbnail": meta.get("thumbnail", ""),
+                "channel_url": meta.get("channel_url", ""),
+                "added_at": meta.get("added_at", ""),
+                "meta_attempted": bool(meta.get("meta_attempted", False)),
             }
         return out
 
@@ -478,6 +760,11 @@ class ChannelsStore:
                         "seen": set(meta.get("seen", [])),
                         "last_pub_utc": meta.get("last_pub_utc"),
                         "process_short": meta.get("process_short", True),
+                        "title": meta.get("title", ""),
+                        "thumbnail": meta.get("thumbnail", ""),
+                        "channel_url": meta.get("channel_url", ""),
+                        "added_at": meta.get("added_at", ""),
+                        "meta_attempted": bool(meta.get("meta_attempted", False)),
                     }
             log(f"[Channels] Loaded {len(self._channels)} channels.")
         except Exception as e:
@@ -530,15 +817,20 @@ class ChannelsStore:
         with _store_lock:
             return {cid: dict(m, seen=set(m.get("seen", set()))) for cid, m in self._channels.items()}
 
-    def add_channel(self, cid, folder, profile_name="", process_short=True):
+    def add_channel(self, cid, folder, profile_name="", process_short=True, title="", thumbnail="", channel_url=""):
         with _store_lock:
+            existing = self._channels.get(cid, {})
             self._channels[cid] = {
                 "folder": folder,
                 "profile_name": profile_name,
                 "active": True,
-                "seen": set(self._channels.get(cid, {}).get("seen", set())),
-                "last_pub_utc": self._channels.get(cid, {}).get("last_pub_utc"),
+                "seen": set(existing.get("seen", set())),
+                "last_pub_utc": existing.get("last_pub_utc"),
                 "process_short": process_short,
+                "title": title or existing.get("title", ""),
+                "thumbnail": thumbnail or existing.get("thumbnail", ""),
+                "channel_url": channel_url or existing.get("channel_url", ""),
+                "added_at": existing.get("added_at") or datetime.now(timezone.utc).isoformat(),
             }
             self._dirty = True
             self._revision += 1
@@ -621,6 +913,21 @@ class ChannelsStore:
                 self._dirty = True
                 self._revision += 1
 
+    def update_meta(self, cid, title="", thumbnail="", channel_url="", meta_attempted=False):
+        with _store_lock:
+            meta = self._channels.get(cid)
+            if meta:
+                if title:
+                    meta["title"] = title
+                if thumbnail:
+                    meta["thumbnail"] = thumbnail
+                if channel_url:
+                    meta["channel_url"] = channel_url
+                if meta_attempted:
+                    meta["meta_attempted"] = True
+                self._dirty = True
+                self._revision += 1
+
     def update_watermark(self, cid, pub_epoch):
         if pub_epoch is None:
             return
@@ -641,7 +948,8 @@ class ChannelsStore:
 
     def subscribe_all(self, cb_url):
         for ch in list(self.all_items().keys()):
-            threading.Thread(target=subscribe_websub, args=(ch, cb_url), daemon=True).start()
+            if _needs_resubscribe(ch):
+                threading.Thread(target=subscribe_websub, args=(ch, cb_url), daemon=True).start()
 
 
 channels_store = ChannelsStore(CHANNELS_JSON)
@@ -663,11 +971,17 @@ def youtube_callback():
                 cid = ch_match.group(1)
                 lease = request.args.get("hub.lease_seconds", "")
                 with _subscription_lock:
+                    lease_sec = int(lease) if lease and lease.isdigit() else 0
                     _subscription_status[cid] = {
                         "verified_at": datetime.now(timezone.utc).isoformat(),
-                        "lease_seconds": int(lease) if lease and lease.isdigit() else 0,
+                        "lease_seconds": lease_sec,
+                        "lease_expires_at": (
+                            (datetime.now(timezone.utc) + timedelta(seconds=lease_sec)).isoformat()
+                            if lease_sec > 0 else ""
+                        ),
                         "mode": mode,
                         "topic": topic,
+                        "last_error": "",
                     }
                 log(f"[WebSub] Verification GET: {cid} verified, lease={lease}s")
         return challenge, 200
@@ -1192,9 +1506,17 @@ def slowdown_to_min_duration_in_temp(input_path, target_seconds):
         _encode_sem.acquire()
         p, err = ffmpeg_helper.run_ffmpeg(cmd[1:])
         if p and p.returncode == 0 and os.path.exists(out_path):
-            try: os.remove(input_path)
-            except Exception: pass
-            return out_path, [out_path]
+            out_dur = ffmpeg_helper.probe_duration(out_path)
+            if out_dur is None or out_dur < target_seconds - 1.0:
+                log(f"[FFmpeg] slow-mo output không hợp lệ (dur={out_dur}) -> giữ file gốc")
+                try:
+                    os.remove(out_path)
+                except Exception:
+                    pass
+            else:
+                try: os.remove(input_path)
+                except Exception: pass
+                return out_path, [out_path]
         if p is None:
             log(f"[FFmpeg] slow-mo lỗi (binary): {err}")
         else:
@@ -1205,9 +1527,17 @@ def slowdown_to_min_duration_in_temp(input_path, target_seconds):
             cmd2 = ["ffmpeg", "-y", "-i", input_path] + filters + ["-t", str(int(target_seconds)), "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", "-threads", "2", out_path]
             p2, err2 = ffmpeg_helper.run_ffmpeg(cmd2[1:])
             if p2 and p2.returncode == 0 and os.path.exists(out_path):
-                try: os.remove(input_path)
-                except Exception: pass
-                return out_path, [out_path]
+                out_dur = ffmpeg_helper.probe_duration(out_path)
+                if out_dur is None or out_dur < target_seconds - 1.0:
+                    log(f"[FFmpeg] CPU fallback output không hợp lệ (dur={out_dur}) -> giữ file gốc")
+                    try:
+                        os.remove(out_path)
+                    except Exception:
+                        pass
+                else:
+                    try: os.remove(input_path)
+                    except Exception: pass
+                    return out_path, [out_path]
             log(f"[FFmpeg] CPU fallback also failed: {err2[:200]}")
     finally:
         try: _encode_sem.release()
@@ -1415,15 +1745,11 @@ def batch_download_latest(channel_links, target_folder, profile_name="", progres
             continue
         seen_video_ids.add(video_id)
         emit("info", f"Đang tải {video_id}: {title_or_error}")
-        proxy = None
-        if get_config().get("proxy_rotation", True):
-            proxy = _proxy_for_profile(profile_name) or _next_proxy()
         ok = download_one(
             f"BATCH_{video_id}",
             video_id,
             target_folder=target_folder,
             process_short=True,
-            proxy=proxy,
             activity_profile=profile_name,
         )
         if ok:
@@ -1433,7 +1759,7 @@ def batch_download_latest(channel_links, target_folder, profile_name="", progres
             emit("error", f"FAIL {video_id}")
     message = f"Xong: {ok_count}/{total}"
     emit("done", message)
-    return True, message
+    return ok_count == total, message
 
 
 def get_max_video_seconds():
@@ -1485,6 +1811,27 @@ def _staging_dir(target_folder):
     return p
 
 
+def _cleanup_temp_dl(older_than_seconds=86400):
+    """Remove orphaned FFmpeg/downloaad temp artifacts (slow/loop/concat/paths).
+    Only files older than the threshold are swept so in-flight jobs are untouched."""
+    if not TEMP_DIR.exists():
+        return 0
+    cutoff = time.time() - older_than_seconds
+    removed = 0
+    for p in TEMP_DIR.iterdir():
+        if not p.is_file():
+            continue
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+                removed += 1
+        except OSError:
+            continue
+    if removed:
+        log(f"[Cleanup] Đã dọn {removed} file tạm cũ trong {TEMP_DIR.name}")
+    return removed
+
+
 def apply_short_processing(downloaded_path, duration, process_short, log_fn=log):
     """Apply the YouTube Short duration rules to a downloaded video.
 
@@ -1521,12 +1868,18 @@ def apply_short_processing(downloaded_path, duration, process_short, log_fn=log)
     return processed_path, created_paths
 
 
-def download_one(channel_id, video_id, published_iso=None, detected_iso=None, target_folder=None, process_short=None, proxy=None, activity_profile=None):
+def _download_one_result(channel_id, video_id, published_iso=None, detected_iso=None, target_folder=None, process_short=None, explicit_proxy=None, activity_profile=None):
+    """Execute the direct-first yt-dlp attempt chain for one video.
+
+    Returns a :class:`DownloadOutcome`. The first attempt is always direct with
+    ``proxy=""`` (no inherited environment proxy); a profile proxy is only used
+    as a last-resort attempt when ``youtube_proxy_fallback`` is enabled.
+    """
     global downloaded_today, downloaded_today_date
     t_start = time.perf_counter()
     if not _claim_download(video_id):
         log(f"[DL] Bỏ qua {video_id}: đang tải")
-        return False
+        return DownloadOutcome(ok=False, retryable=False, permanent=False, failure_class="busy", detail="đang tải")
     _permanent = False
     try:
         meta = channels_store.get_meta(channel_id) or {}
@@ -1540,18 +1893,18 @@ def download_one(channel_id, video_id, published_iso=None, detected_iso=None, ta
         dl_uuid = uuid.uuid4().hex[:8]
         dl_staging = staging / f"{video_id}-{dl_uuid}"
         dl_staging.mkdir(parents=True, exist_ok=True)
-        temp_template = str(dl_staging / f"%(title).100s.%(ext)s")
 
         cfg = get_config()
         cf = max(1, int(cfg.get("concurrent_fragments", 8)))
-        opts = {
+        attempts = _build_attempt_plan(profile_name, explicit_proxy)
+        multi = len(attempts) > 1
+        base_opts = {
             "format": FORMAT_FAST_720P,
-            "outtmpl": temp_template,
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
-            "retries": 3,
-            "fragment_retries": 3,
+            "retries": 1 if multi else 3,
+            "fragment_retries": 1 if multi else 3,
             "socket_timeout": 12,
             "nocheckcertificate": True,
             "windowsfilenames": True,
@@ -1561,71 +1914,87 @@ def download_one(channel_id, video_id, published_iso=None, detected_iso=None, ta
             "check_formats": False,
             "merge_output_format": "mp4",
         }
-        Path(opts["cachedir"]).mkdir(exist_ok=True)
-        cookies = _resolve_cookies_file()
-        if cookies:
-            opts["cookies"] = cookies
-            log("[Cookies] Enabled")
+        Path(base_opts["cachedir"]).mkdir(exist_ok=True)
 
         t_meta = time.perf_counter()
-        log(f"[DL] Bắt đầu tải {video_id}")
-        wait_s = 0.0
-        dl_s = 0.0
+        log(f"[DL] Bắt đầu tải {video_id} ({len(attempts)} attempt, first=direct)")
+
         info = None
         downloaded_path = None
         skip_reason = ""
+        last_error = None
+        last_cls = FAILURE_RETRY
+        attempts_used = 0
+        wait_s = 0.0
+        dl_s = 0.0
         try:
             with _download_sem:
                 wait_s = time.perf_counter() - t_meta
                 t_dl_start = time.perf_counter()
-                info, downloaded_path, skip_reason = _run_ytdlp_download(video_id, url, opts)
+                idx = 0
+                while idx < len(attempts):
+                    attempt = attempts[idx]
+                    attempt_dir = dl_staging / f"attempt-{idx + 1:02d}"
+                    attempt_dir.mkdir(parents=True, exist_ok=True)
+                    opts = _build_ytdlp_opts(base_opts, attempt, attempt_dir)
+                    label = f"route={attempt.route} cookie={int(attempt.use_cookies)} format={attempt.name}"
+                    log(f"[DL][{video_id}][{idx + 1}/{len(attempts)}] {label}")
+                    try:
+                        info, downloaded_path, skip_reason = _run_ytdlp_download(video_id, url, opts)
+                        attempts_used = idx + 1
+                        log(f"[DL][{video_id}][{idx + 1}/{len(attempts)}] OK {label}")
+                        break
+                    except Exception as e:
+                        last_error = e
+                        attempts_used = idx + 1
+                        last_cls = _classify_failure(e)
+                        log(f"[DL][{video_id}][{idx + 1}/{len(attempts)}] fail class={last_cls} ({str(e)[:200]})")
+                        shutil.rmtree(attempt_dir, ignore_errors=True)
+                        if last_cls == FAILURE_PERMANENT:
+                            _permanent = True
+                            break
+                        if skip_reason:
+                            break
+                        nxt = _select_next_attempt(attempts, idx, last_cls)
+                        if nxt is None:
+                            break
+                        idx = nxt
                 dl_s = time.perf_counter() - t_dl_start
         except Exception as e:
-            err_class = _classify_download_error(e)
-            if err_class == "permanent":
-                _permanent = True
-                log(f"[DL] Permanent error {video_id}: {e}")
-                append_activity("youtube_download", video_name=video_id, video_url=url, profile=activity_profile, status="fail", detail=str(e)[:500])
-                return False
-            if proxy and (_is_youtube_block_error(e) or _is_proxy_download_error(e)):
-                proxy_opts = dict(opts)
-                proxy_opts["proxy"] = proxy
-                log(f"[Proxy] Direct bị chặn/lỗi, thử {_mask_proxy(proxy)}")
-                try:
-                    with _download_sem:
-                        wait_s = time.perf_counter() - t_meta
-                        t_dl_start = time.perf_counter()
-                        info, downloaded_path, skip_reason = _run_ytdlp_download(video_id, url, proxy_opts)
-                        dl_s = time.perf_counter() - t_dl_start
-                except Exception as proxy_error:
-                    err_class2 = _classify_download_error(proxy_error)
-                    if err_class2 == "permanent":
-                        _permanent = True
-                    log(f"[DL] Tải lỗi {video_id}: {proxy_error}")
-                    append_activity("youtube_download", video_name=video_id, video_url=url, profile=activity_profile, status="fail", detail=str(proxy_error)[:500])
-                    if _is_youtube_block_error(proxy_error):
-                        log("[DL] Proxy cũng bị chặn. Hãy nạp cookies.txt từ browser login YouTube.")
-                    return False
-            else:
-                err_class = _classify_download_error(e)
-                if err_class == "permanent":
-                    _permanent = True
-                log(f"[DL] Tải lỗi {video_id}: {e}")
-                append_activity("youtube_download", video_name=video_id, video_url=url, profile=activity_profile, status="fail", detail=str(e)[:500])
-                return False
+            last_error = e
+            last_cls = _classify_failure(e)
+            log(f"[DL] Lỗi ngoài ý muốn {video_id}: {e}")
         if info is None:
-            if "duration" in (skip_reason or "").lower() or "limit" in (skip_reason or "").lower():
+            if skip_reason:
+                if "duration" in (skip_reason or "").lower() or "limit" in (skip_reason or "").lower():
+                    _permanent = True
+                append_activity("youtube_download", video_name=video_id, video_url=url, profile=activity_profile, status="skipped", detail=skip_reason or "skipped")
+                return DownloadOutcome(ok=False, retryable=False, permanent=_permanent, failure_class="skipped", attempts_used=attempts_used, detail=skip_reason)
+            if last_error is None:
+                last_error = Exception("Không lấy được thông tin video")
+            log(f"[DL] Tải lỗi {video_id}: {last_error}")
+            retryable = last_cls not in (FAILURE_PERMANENT, FAILURE_AUTH_REQUIRED)
+            if last_cls in (FAILURE_YOUTUBE_BLOCK,):
+                log("[DL] YouTube chặn. Hãy bật cookie fallback hoặc login browser để nạp cookies.txt.")
+            if last_cls == FAILURE_AUTH_REQUIRED:
+                log("[DL] Video yêu cầu đăng nhập. Hãy cấu hình cookies.txt từ browser login YouTube.")
+            append_activity("youtube_download", video_name=video_id, video_url=url, profile=activity_profile, status="fail", detail=str(last_error)[:500])
+            if last_cls == FAILURE_PERMANENT:
                 _permanent = True
-            append_activity("youtube_download", video_name=video_id, video_url=url, profile=activity_profile, status="skipped", detail=skip_reason or "skipped")
-            return False
+            if last_cls == FAILURE_AUTH_REQUIRED:
+                # Not automatically retried, but not burned as seen either: if the
+                # user later adds valid cookies the next poll can re-attempt it.
+                _remove_pending(channel_id, video_id)
+                _clear_retry(channel_id, video_id)
+            return DownloadOutcome(ok=False, retryable=retryable, permanent=_permanent, failure_class=last_cls, attempts_used=attempts_used, detail=str(last_error)[:500])
         if not downloaded_path or not os.path.exists(downloaded_path):
-            candidates = list(dl_staging.glob("*.mp4"))
+            candidates = list(dl_staging.rglob("*.mp4"))
             downloaded_path = str(candidates[0]) if candidates else ""
         if not downloaded_path or not os.path.exists(downloaded_path):
             log(f"[DL] Không tìm thấy file tải về cho {video_id}")
             append_activity("youtube_download", video_name=info.get("title") or video_id, video_url=url, profile=activity_profile, status="fail", detail="Không tìm thấy file tải về")
             _permanent = True
-            return False
+            return DownloadOutcome(ok=False, retryable=False, permanent=True, failure_class="no_file", attempts_used=attempts_used, detail="Không tìm thấy file tải về")
 
         dur = float(info.get("duration") or 0)
         t_process_start = time.perf_counter()
@@ -1638,8 +2007,14 @@ def download_one(channel_id, video_id, published_iso=None, detected_iso=None, ta
             final_path = _finalize_video(processed_path, out_folder, info.get("title") or video_id, video_id)
         except Exception as e:
             log(f"[DL] Finalize lỗi {video_id}: {e}")
+            try:
+                if processed_path and str(processed_path).startswith(str(TEMP_DIR)):
+                    if os.path.exists(processed_path):
+                        os.remove(processed_path)
+            except Exception:
+                pass
             append_activity("youtube_download", video_name=info.get("title") or video_id, video_url=url, profile=activity_profile, status="fail", detail=str(e)[:500])
-            return False
+            return DownloadOutcome(ok=False, retryable=True, permanent=False, failure_class=FAILURE_RETRY, attempts_used=attempts_used, detail=str(e)[:500])
         t_move_end = time.perf_counter()
         move_s = t_move_end - t_move
 
@@ -1668,10 +2043,33 @@ def download_one(channel_id, video_id, published_iso=None, detected_iso=None, ta
             downloaded_today = 0
         downloaded_today += 1
         log(f"[DL] Đã lưu: {final_path}")
+        # Direct Fast Path: hand the finalized video to the unified delivery coordinator.
+        # The coordinator claims atomically, re-checks lifecycle generation, enqueues a
+        # generation-tagged item, and marks WAITING_PROFILE when the profile is not running
+        # (the file then stays on disk for startup reconciliation).
+        if profile_name:
+            try:
+                import main
+                ok, reason = main.enqueue_video(
+                    profile_name,
+                    final_path,
+                    source="FAST_PATH",
+                    channel_id=channel_id,
+                    youtube_video_id=video_id,
+                    title=info.get("title") or video_id,
+                )
+                if not ok and reason not in ("waiting_profile", "profile_missing"):
+                    log(f"[FastPath] Không đưa được {video_id} vào hàng chờ: {reason}")
+            except Exception as e:
+                log(f"[FastPath] Lỗi enqueue {video_id}: {e}")
+                try:
+                    append_activity("youtube_download", video_name=info.get("title") or video_id, video_url=url, profile=activity_profile, status="warn", detail=f"fastpath_enqueue_failed: {str(e)[:300]}")
+                except Exception:
+                    pass
         channels_store.mark_seen_only(channel_id, video_id)
         _remove_pending(channel_id, video_id)
         _clear_retry(channel_id, video_id)
-        return True
+        return DownloadOutcome(ok=True, retryable=False, permanent=False, failure_class="", attempts_used=attempts_used, final_path=final_path)
     finally:
         _release_download(video_id)
         if _permanent:
@@ -1685,9 +2083,13 @@ def download_one(channel_id, video_id, published_iso=None, detected_iso=None, ta
             pass
 
 
+def download_one(channel_id, video_id, published_iso=None, detected_iso=None, target_folder=None, process_short=None, proxy=None, activity_profile=None):
+    """Boolean wrapper kept for existing callers/tests."""
+    return _download_one_result(channel_id, video_id, published_iso=published_iso, detected_iso=detected_iso, target_folder=target_folder, process_short=process_short, explicit_proxy=proxy, activity_profile=activity_profile).ok
+
+
 def worker_main(worker_id, run_gen=None):
     log(f"[Worker-{worker_id}] started")
-    use_proxy = bool(get_config().get("proxy_rotation", True))
     while not stop_event.is_set():
         if run_gen is not None and _get_monitor_gen() != run_gen:
             log(f"[Worker-{worker_id}] Generation changed, stopping")
@@ -1701,16 +2103,9 @@ def worker_main(worker_id, run_gen=None):
             download_queue.task_done()
             break
         try:
-            proxy = None
-            if use_proxy:
-                meta = channels_store.get_meta(ch_id) or {}
-                profile_name = meta.get("profile_name", "")
-                proxy = _proxy_for_profile(profile_name) or _next_proxy()
-                if profile_name and proxy:
-                    log(f"[Proxy] {profile_name} -> {_mask_proxy(proxy)}")
-            ok = download_one(ch_id, vid_id, published_iso, detected_iso, proxy=proxy)
+            outcome = _download_one_result(ch_id, vid_id, published_iso, detected_iso)
             meta_seen = (channels_store.get_meta(ch_id) or {}).get("seen", set())
-            if not ok and _is_pending(ch_id, vid_id) and vid_id not in meta_seen:
+            if not outcome.ok and outcome.retryable and not outcome.permanent and _is_pending(ch_id, vid_id) and vid_id not in meta_seen:
                 with _retry_lock:
                     attempt_key = f"{ch_id}:{vid_id}:attempt"
                     attempt = _retry_after.get(attempt_key, 0)
@@ -1725,6 +2120,8 @@ def worker_main(worker_id, run_gen=None):
                         _remove_pending(ch_id, vid_id)
                         cooldown_key = f"{ch_id}:{vid_id}:cooldown"
                         _retry_after[cooldown_key] = time.time() + RETRY_COOLDOWN
+            elif not outcome.ok:
+                log(f"[Worker-{worker_id}] {vid_id}: không retry (class={outcome.failure_class})")
         except Exception as e:
             log(f"[Worker-{worker_id}] lỗi {e}\n{traceback.format_exc()}")
         finally:
@@ -1930,13 +2327,38 @@ def _start_ngrok(port):
         return False
 
 
+def _needs_resubscribe(cid):
+    """A subscription needs refresh when it was never verified, the hub errored, or the
+    lease is missing / expired / within RESUBSCRIBE_LEAD_TIME of expiring."""
+    with _subscription_lock:
+        s = _subscription_status.get(cid) or {}
+    if not s.get("verified_at"):
+        return True
+    if s.get("last_error"):
+        return True
+    expires = s.get("lease_expires_at") or ""
+    if not expires:
+        return True
+    try:
+        exp = datetime.fromisoformat(expires)
+    except (ValueError, TypeError):
+        return True
+    if exp <= datetime.now(timezone.utc):
+        return True
+    return exp <= datetime.now(timezone.utc) + timedelta(hours=RESUBSCRIBE_LEAD_TIME_HOURS)
+
+
 def _resubscribe_worker(run_gen=None):
     while not stop_event.is_set():
         if run_gen is not None and _get_monitor_gen() != run_gen:
             break
-        stop_event.wait(RESUBSCRIBE_INTERVAL_DAYS * 24 * 3600)
-        if public_callback_url and not stop_event.is_set():
-            channels_store.subscribe_all(public_callback_url)
+        if public_callback_url:
+            try:
+                if not stop_event.is_set():
+                    channels_store.subscribe_all(public_callback_url)
+            except Exception as e:
+                log(f"[WebSub] Resubscribe lỗi: {e}")
+        stop_event.wait(3600)
 
 
 def _polling_worker(run_gen=None):
@@ -1966,6 +2388,11 @@ def _polling_worker(run_gen=None):
                 if stop_event.is_set():
                     break
                 meta = channels_store.get_meta(cid) or {}
+                try:
+                    _ensure_channel_metadata(cid, youtube)
+                    meta = channels_store.get_meta(cid) or {}
+                except Exception:
+                    pass
                 playlist_id = _get_uploads_playlist_id(cid, youtube)
                 if not playlist_id:
                     continue
@@ -2007,8 +2434,39 @@ def _polling_worker(run_gen=None):
                 time.sleep(0.3)
         except Exception as e:
             log(f"[Polling] Lỗi: {e}")
+        _cleanup_temp_dl(older_than_seconds=86400)
         stop_event.wait(poll_interval)
     log("[Polling] Worker stopped")
+
+
+def _ensure_channel_metadata(channel_id, youtube):
+    """Fetch and persist channel title/thumbnail/url when missing (one-time enrichment)."""
+    meta = channels_store.get_meta(channel_id) or {}
+    if meta.get("title") or meta.get("meta_attempted"):
+        return meta
+    try:
+        resp = youtube.channels().list(part="snippet", id=channel_id).execute()
+        items = resp.get("items") or []
+        if not items:
+            channels_store.update_meta(channel_id, meta_attempted=True)
+            return meta
+        sn = items[0].get("snippet") or {}
+        title = sn.get("title") or ""
+        thumbs = sn.get("thumbnails") or {}
+        thumb = ""
+        if isinstance(thumbs, dict):
+            t = thumbs.get("default") or thumbs.get("medium") or thumbs.get("high") or {}
+            thumb = t.get("url") or ""
+        channels_store.update_meta(channel_id, title=title or "Untitled",
+                                   thumbnail=thumb,
+                                   channel_url=f"https://www.youtube.com/channel/{channel_id}",
+                                   meta_attempted=True)
+        if title:
+            log(f"[Channel] Metadata: {title}")
+    except Exception as e:
+        log(f"[Channel] Metadata lỗi {channel_id}: {e}")
+        channels_store.update_meta(channel_id, meta_attempted=True)
+    return channels_store.get_meta(channel_id) or {}
 
 
 def _get_uploads_playlist_id(channel_id, youtube):
@@ -2246,25 +2704,41 @@ def add_channel_for_profile(channel_input, profile_name, folder_path):
     info = get_channel_id_from_link(channel_input, youtube)
     if not info or not info.get("id"):
         return False, "Không lấy được Channel ID."
-    channels_store.add_channel(info["id"], folder_path, profile_name=profile_name, process_short=True)
+    cid = info["id"]
+    channel_title = ""
+    channel_thumbnail = ""
+    channel_url = f"https://www.youtube.com/channel/{cid}"
     try:
-        playlist_id = info.get("playlistId") or _get_uploads_playlist_id(info["id"], youtube)
+        resp = youtube.channels().list(part="snippet,contentDetails", id=cid).execute()
+        if resp.get("items"):
+            sn = resp["items"][0].get("snippet") or {}
+            channel_title = sn.get("title") or ""
+            thumbs = sn.get("thumbnails") or {}
+            if isinstance(thumbs, dict):
+                thumb = thumbs.get("default") or thumbs.get("medium") or thumbs.get("high") or {}
+                channel_thumbnail = thumb.get("url") or ""
+    except Exception as e:
+        log(f"[Channel] Lấy metadata lỗi {cid}: {e}")
+    channels_store.add_channel(cid, folder_path, profile_name=profile_name, process_short=True,
+                               title=channel_title, thumbnail=channel_thumbnail, channel_url=channel_url)
+    try:
+        playlist_id = info.get("playlistId") or _get_uploads_playlist_id(cid, youtube)
         if playlist_id:
             response = youtube.playlistItems().list(
                 part="snippet,contentDetails",
                 playlistId=playlist_id,
                 maxResults=5
             ).execute()
-            seeded = _seed_polling_baseline(info["id"], response.get("items", []))
+            seeded = _seed_polling_baseline(cid, response.get("items", []))
             if seeded:
-                log(f"[Channel] Baseline {seeded} existing videos for {info['id']}")
+                log(f"[Channel] Baseline {seeded} existing videos for {cid}")
     except Exception as e:
-        log(f"[Channel] Baseline lỗi {info['id']}: {e}")
+        log(f"[Channel] Baseline lỗi {cid}: {e}")
     channels_store.save_now()
     if public_callback_url:
-        subscribe_websub(info["id"], public_callback_url)
-    log(f"[Channel] Added {info['id']} -> {profile_name}")
-    return True, info["id"]
+        subscribe_websub(cid, public_callback_url)
+    log(f"[Channel] Added {cid} ({channel_title or 'no title'}) -> {profile_name}")
+    return True, cid
 
 
 def download_test_video(video_input, profile_name, folder_path):
@@ -2272,16 +2746,10 @@ def download_test_video(video_input, profile_name, folder_path):
     if not video_id:
         return False, "Video URL/ID không hợp lệ."
     def run():
-        proxy = None
-        if get_config().get("proxy_rotation", True):
-            _ensure_proxy_pool_loaded()
-            proxy = _proxy_for_profile(profile_name) or _next_proxy()
-            if proxy:
-                log(f"[Proxy] {profile_name} -> {_mask_proxy(proxy)}")
-        ok = download_one(f"TEST_{profile_name}", video_id, None, datetime.now(timezone.utc).isoformat(), target_folder=folder_path, process_short=True, proxy=proxy, activity_profile=profile_name)
+        ok = download_one(f"TEST_{profile_name}", video_id, None, datetime.now(timezone.utc).isoformat(), target_folder=folder_path, process_short=True, activity_profile=profile_name)
         log(f"[Test] {'OK' if ok else 'FAIL'} {video_id} -> {profile_name}")
     threading.Thread(target=run, daemon=True).start()
-    return True, f"Đã đưa test video {video_id} vào queue tải."
+    return True, f"Đã bắt đầu tác vụ tải thử {video_id} (direct-first)."
 
 
 def get_channels():
@@ -2295,6 +2763,9 @@ def get_channels():
             "process_short": bool(meta.get("process_short", True)),
             "seen_count": len(meta.get("seen", set())),
             "last_pub_utc": meta.get("last_pub_utc"),
+            "title": meta.get("title", ""),
+            "thumbnail": meta.get("thumbnail", ""),
+            "channel_url": meta.get("channel_url", ""),
         })
     return items
 
@@ -2342,6 +2813,13 @@ def get_status():
     with _subscription_lock:
         total_subs = len(_subscription_status)
         subs_ok = sum(1 for s in _subscription_status.values() if s.get("verified_at"))
+    cookie_path = _resolve_cookies_file()
+    if cookie_path:
+        cookie_valid, cookie_reason = validate_youtube_cookie_file(cookie_path)
+        cookies_status = "ok" if cookie_valid else "invalid"
+    else:
+        cookies_status = "missing"
+        cookie_reason = "Chưa cấu hình file cookie."
     return {
         "running": _monitor_started,
         "healthy": healthy,
@@ -2356,7 +2834,9 @@ def get_status():
         "downloaded_today": downloaded_today,
         "last_error": last_error,
         "api_key_set": bool((cfg.get("api_keys") or [""])[0]),
-        "cookies_set": bool(_resolve_cookies_file()),
+        "cookies_set": bool(cookie_path),
+        "cookies_status": cookies_status,
+        "cookies_detail": cookie_reason,
         "download_workers": max(1, int(cfg.get("download_workers", 4) or 4)),
         "subscriptions_total": total_subs,
         "subscriptions_ok": subs_ok,

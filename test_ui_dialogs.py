@@ -11,6 +11,11 @@ from ui_dialogs import BatchSetProxyModal, MonetizationDetailModal, CreateEditPr
 class TestUIDialogs(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        import tkinter as tk
+        default_root = getattr(tk, "_default_root", None)
+        if default_root is not None and default_root.winfo_exists():
+            cls.root = default_root
+            return
         try:
             cls.root = ctk.CTk()
             cls.root.withdraw()
@@ -21,7 +26,8 @@ class TestUIDialogs(unittest.TestCase):
     def tearDownClass(cls):
         if cls.root:
             try:
-                cls.root.destroy()
+                for child in cls.root.winfo_children():
+                    child.destroy()
             except Exception:
                 pass
 

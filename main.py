@@ -26,6 +26,14 @@ def bundled_base_dir():
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from watchdog_service import (
+    DeliveryOutcome,
+    DeliveryState,
+    QueueItem,
+    configure_delivery_registry,
+    get_delivery_registry,
+    get_watchdog_manager,
+)
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, ttk, StringVar, Menu
 from tkinter.scrolledtext import ScrolledText
@@ -387,7 +395,6 @@ def _release_profile_operation(name, claim_id, close_confirmed=True):
 
 UPLOAD_EVENT_TIMINGS = {}
 UPLOAD_TERMINAL_RESULTS = {}
-PENDING_VIDEO_PATHS = set()
 upload_benchmark_lock = threading.Lock()
 video_event_lock = threading.Lock()
 
@@ -425,17 +432,168 @@ def _mark_upload_timing(video_path, label, value=None):
 
 
 def _claim_video_path(video_path):
-    key = _upload_timing_key(video_path)
-    with video_event_lock:
-        if key in PENDING_VIDEO_PATHS:
-            return False
-        PENDING_VIDEO_PATHS.add(key)
-        return True
+    """Legacy dedupe gate backed by the unified delivery registry."""
+    ok, _rec, _reason = get_delivery_registry().claim_delivery(video_path, "", 0, "LEGACY")
+    return ok
 
 
 def _release_video_path(video_path):
-    with video_event_lock:
-        PENDING_VIDEO_PATHS.discard(_upload_timing_key(video_path))
+    get_delivery_registry().release_delivery(video_path)
+
+
+def enqueue_video(profile_name, video_path, source="FAST_PATH", channel_id=None, youtube_video_id=None, title=None):
+    """Single coordinator for enqueueing a video into a profile's queue.
+
+    Applies at-most-once semantics per session through the unified delivery registry:
+      - profile missing / not running  -> marks WAITING_PROFILE (keeps the file)
+      - claim is atomic; only one producer (Fast Path / Watchdog / startup scan) wins
+      - generation is re-checked immediately before queue.put()
+      - any pre-enqueue failure rolls the claim back so the video can be picked up later
+    Returns (ok: bool, reason: str).
+    """
+    reg = get_delivery_registry()
+    if profile_name not in profiles:
+        reg.mark_waiting_profile(video_path, profile_name, source=source,
+                                 channel_id=channel_id, youtube_video_id=youtube_video_id)
+        return False, "profile_missing"
+    profile = profiles[profile_name]
+    lc = get_lifecycle(profile_name)
+    if not profile.get('running', False) or lc.is_cancelled:
+        reg.mark_waiting_profile(video_path, profile_name, source=source,
+                                 channel_id=channel_id, youtube_video_id=youtube_video_id)
+        update_status(f"[{profile_name}] Video đang chờ hồ sơ đích khởi động: {Path(video_path).name}")
+        return False, "waiting_profile"
+
+    gen = lc.generation
+    ok, rec, reason = reg.claim_delivery(
+        video_path, profile_name, gen, source,
+        channel_id=channel_id, youtube_video_id=youtube_video_id,
+    )
+    if not ok:
+        if reason == "tombstone":
+            update_status(f"[{profile_name}] Bỏ qua {Path(video_path).name}: đã xử lý trước đó (không tự đăng lại).")
+        return False, reason
+
+    # Generation re-check immediately before enqueue.
+    if lc.is_cancelled or lc.generation != gen or not profiles.get(profile_name, {}).get('running', False):
+        reg.release_delivery(video_path, error_code="GENERATION_CHANGED", error_detail="lifecycle changed before enqueue")
+        return False, "generation_changed"
+
+    try:
+        item = QueueItem(
+            path=str(video_path),
+            profile_name=profile_name,
+            lifecycle_generation=gen,
+            source=source,
+            delivery_id=rec.delivery_id,
+            enqueued_at=time.time(),
+        )
+        profile['queue'].put(item)
+    except Exception as e:
+        reg.release_delivery(video_path, error_code="ENQUEUE_FAILED", error_detail=str(e)[:500])
+        logging.warning(f"[{profile_name}] Enqueue thất bại, đã trả lại quyền xử lý: {e}")
+        update_status(f"[{profile_name}] Không thể đưa video vào hàng chờ: {e}")
+        return False, "enqueue_failed"
+
+    reg.transition_delivery(video_path, DeliveryState.ENQUEUED)
+    update_status(f"[{profile_name}] ({source}) Nhận video mới: {Path(video_path).name}")
+    return True, "enqueued"
+
+
+def _complete_delivery_from_upload(video_path, result, last_error, benchmark_success):
+    """Map an upload_video() result to a terminal delivery outcome.
+
+    Never auto-retries after an uncertain post; leaves a tombstone so a possibly
+    posted video is not enqueued again.
+    """
+    reg = get_delivery_registry()
+    if result is not None and getattr(result, 'outcome', None):
+        outcome_val = str(result.outcome)
+        mapping = {
+            'posted': DeliveryOutcome.POSTED,
+            'prepared': DeliveryOutcome.PREPARED,
+            'post_uncertain': DeliveryOutcome.POST_UNCERTAIN,
+            'cancelled_safe': DeliveryOutcome.CANCELLED_SAFE,
+            'cancelled_uncertain': DeliveryOutcome.CANCELLED_UNCERTAIN,
+            'rejected': DeliveryOutcome.REJECTED,
+            'login_required': DeliveryOutcome.LOGIN_REQUIRED,
+        }
+        outcome = mapping.get(outcome_val)
+        if outcome is not None:
+            reg.complete_delivery(
+                video_path,
+                outcome,
+                post_dispatched=bool(getattr(result, 'post_dispatched', False)),
+                error_code=None if outcome in (DeliveryOutcome.POSTED, DeliveryOutcome.PREPARED) else outcome_val,
+                error_detail=str(getattr(result, 'message', '') or outcome_val)[:500],
+            )
+            return
+    reg.complete_delivery(
+        video_path,
+        DeliveryOutcome.FAILED_SAFE,
+        post_dispatched=False,
+        error_code=last_error or 'unknown',
+        error_detail=str(last_error or '')[:500],
+    )
+
+
+def _watchdog_enqueue_callback(profile_name, file_path, generation):
+    """Adapter from SharedWatchdogManager's (profile, path, gen) callback to the coordinator."""
+    try:
+        enqueue_video(profile_name, file_path, source="WATCHDOG_EVENT")
+    except Exception as e:
+        logging.warning(f"[{profile_name}] Watchdog enqueue lỗi: {e}")
+
+
+def _reconcile_startup_folder(profile_name, folder, generation):
+    """Startup scan: adopt videos already present in a profile folder.
+
+    Only files with a known origin (YouTube download metadata or an existing delivery
+    record, e.g. WAITING_PROFILE) are auto-enqueued. Unknown/manual old files are left
+    untouched so we never upload user-provided files by accident.
+    """
+    reg = get_delivery_registry()
+    folder_path = Path(folder)
+    if not folder_path.is_dir():
+        return 0
+    candidates = []
+    for p in folder_path.iterdir():
+        if not p.is_file() or p.suffix.lower() not in VIDEO_EXTENSIONS:
+            continue
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            mtime = 0
+        candidates.append((mtime, p))
+    candidates.sort(key=lambda t: t[0])
+    adopted = 0
+    for _mtime, p in candidates:
+        if profile_name not in profiles or not profiles[profile_name].get('running', False):
+            break
+        ok_eligible, reason = reg.is_eligible_for_startup(p, profile_name, generation)
+        if not ok_eligible:
+            continue
+        meta = None
+        try:
+            meta = lookup_download(str(p))
+        except Exception:
+            meta = None
+        rec = reg.get_delivery(p)
+        if meta is None and rec is None:
+            continue  # unknown/manual file -> do not auto-enqueue
+        ok, _reason = enqueue_video(
+            profile_name,
+            str(p),
+            source="WATCHDOG_STARTUP",
+            channel_id=(meta or {}).get("channel_id"),
+            youtube_video_id=(meta or {}).get("video_id"),
+            title=(meta or {}).get("title"),
+        )
+        if ok:
+            adopted += 1
+        elif _reason in ("waiting_profile", "profile_missing"):
+            break
+    return adopted
 
 
 def _write_upload_benchmark(profile_name, video_path, success, reason, phases, meta=None):
@@ -2564,13 +2722,22 @@ def _treeview_sort_column(tv, col, reverse):
 # Core Helper Functions
 # =========================
 # --- CẬP NHẬT HÀM SAVE/LOAD CONFIG ĐỂ LƯU STATS ---
-def save_configs():
-    configs = build_configs_payload(profiles, projects)
-    save_configs_file(CONFIGS_FILE, configs)
-    update_project_dropdown()
+def save_configs(allow_truncate: bool = False):
+    try:
+        from config_service import get_config_service
+        svc = get_config_service(CONFIGS_FILE)
+        if svc.ui_dispatcher is None and 'root' in globals():
+            svc.ui_dispatcher = lambda cb: root.after(0, cb) if root.winfo_exists() else None
+        svc.request_save(profiles, projects, ui_callback=update_project_dropdown, allow_truncate=allow_truncate)
+    except Exception:
+        configs = build_configs_payload(profiles, projects)
+        save_configs_file(CONFIGS_FILE, configs, allow_truncate=allow_truncate)
+        update_project_dropdown()
 
 def load_configs():
     try:
+        configure_delivery_registry(app_base_dir() / "delivery_ledger.json")
+        get_watchdog_manager().enqueue_callback = _watchdog_enqueue_callback
         configs = load_configs_file(CONFIGS_FILE)
         loaded_profiles, loaded_projects = normalize_loaded_config(configs)
         runtime_profiles = build_runtime_profiles(loaded_profiles)
@@ -2588,11 +2755,14 @@ def load_configs():
         projects.clear()
         projects.update({k: set(v) for k, v in loaded_projects.items()})
         if 'Mặc định' not in projects: projects['Mặc định'] = set()
-        
+
+        # Reconcile persisted browser ownership before the first table render.
+        # Rendering calls ensure_account_uuid(), which must not generate a new
+        # UUID before an existing Profile-Patchright marker can restore it.
+        _migrate_profile_drivers()
         update_project_dropdown()
         selected_project_var.set(ALL_OPTION)
         update_profile_list()
-        _migrate_profile_drivers()
         _cleanup_expired_quarantines()
     except FileNotFoundError:
         projects['Mặc định'] = set()
@@ -3094,7 +3264,11 @@ def upload_video(profile_name, video_path):
         except Exception as benchmark_error:
             update_status(f"[{profile_name}] [WARN] Không ghi được benchmark upload: {benchmark_error}")
         finally:
-            _release_video_path(video_path)
+            try:
+                _complete_delivery_from_upload(video_path, result, last_error, benchmark_success)
+            except Exception as delivery_error:
+                update_status(f"[{profile_name}] [WARN] Không ghi được kết quả giao nhận: {delivery_error}")
+                _release_video_path(video_path)
 
 def _return_to_upload_page(profile_name):
     """Return a keep-open profile's browser to the upload page to await the next
@@ -3147,7 +3321,7 @@ def process_video_queue_thread(profile_name):
                 break
 
             try:
-                video_path = profiles[profile_name]['queue'].get(timeout=1)
+                raw_item = profiles[profile_name]['queue'].get(timeout=1)
             except queue.Empty:
                 now = time.time()
                 if IDLE_SHUTDOWN_TIMEOUT > 0:
@@ -3160,28 +3334,40 @@ def process_video_queue_thread(profile_name):
                 else:
                     idle_start = None
                 
-                # Watchdog health check
+                # Watchdog health check (shared observer)
                 if not profiles[profile_name].get('running', False):
                     continue
-                obs = profiles[profile_name].get('observer')
-                if obs and not obs.is_alive():
-                    update_status(f"[{profile_name}] Watchdog bị lỗi, khởi động lại...")
-                    folder = profiles[profile_name]['config'].get('folder_path', '')
-                    if folder:
-                        lifecycle = get_lifecycle(profile_name)
-                        observer_gen = lifecycle.generation
-                        new_obs = Observer()
-                        new_obs.schedule(VideoFolderHandler(profile_name), folder, recursive=False)
-                        new_obs.start()
-                        if not lifecycle.register_observer(observer_gen, new_obs):
-                            new_obs.stop()
-                            new_obs.join(timeout=2)
-                            continue
-                        profiles[profile_name]['observer'] = new_obs
-                        update_status(f"[{profile_name}] Watchdog đã khởi động lại.")
+                try:
+                    mgr = get_watchdog_manager()
+                    if not mgr.is_observer_alive():
+                        update_status(f"[{profile_name}] Watchdog bị lỗi, khởi động lại...")
+                        mgr.restart_observer()
+                        folder = profiles[profile_name]['config'].get('folder_path', '')
+                        if folder:
+                            lifecycle = get_lifecycle(profile_name)
+                            mgr.schedule_folder(profile_name, folder, lifecycle.generation)
+                            update_status(f"[{profile_name}] Watchdog đã khởi động lại.")
+                except Exception as e:
+                    logging.warning(f"[{profile_name}] Health check watchdog lỗi: {e}")
                 continue
 
             idle_start = None
+            # Normalize legacy str items and generation-tagged QueueItems.
+            if isinstance(raw_item, QueueItem):
+                item_gen = raw_item.lifecycle_generation
+                video_path = raw_item.path
+            else:
+                item_gen = None
+                video_path = str(raw_item)
+            # Reject stale queue items produced before a profile restart.
+            if item_gen is not None and item_gen != get_lifecycle(profile_name).generation:
+                update_status(f"[{profile_name}] Bỏ qua video cũ sau khởi động lại: {Path(video_path).name}")
+                get_delivery_registry().release_delivery(
+                    video_path, error_code="STALE_GENERATION", error_detail="queue item generation mismatch"
+                )
+                profiles[profile_name]['queue'].task_done()
+                continue
+            get_delivery_registry().transition_delivery(video_path, DeliveryState.PROCESSING)
             _mark_upload_timing(video_path, 'dequeued_at')
             update_status(f"[{profile_name}] Đã đưa video vào hàng chờ xử lý: {shorten_filename(Path(video_path).name)}")
             config = profiles[profile_name]['config']
@@ -3230,6 +3416,11 @@ def process_video_queue_thread(profile_name):
         except Exception as e:
             _set_profile_ui(profile_name, upload='Đăng lỗi', last_error=str(e))
             update_status(f"[{profile_name}] Lỗi Queue: {e}")
+            try:
+                if 'raw_item' in locals():
+                    profiles[profile_name]['queue'].task_done()
+            except Exception:
+                pass
             continue
 
 # =========================
@@ -3279,28 +3470,9 @@ def add_log_entry(message, tag="INFO", important=False):
 def update_status(message):
     tag, important_tag = classify_log_message(message)
     add_log_entry(message, tag=tag or "INFO", important=bool(important_tag))
-
-    def _update():
-        if not root.winfo_exists() or not status_text.winfo_exists(): return
-        status_text.configure(state='normal')
-        line = f"{datetime.now().strftime('%H:%M:%S')} {message}\n"
-        status_text.insert(ctk.END, line, tag)
-        trim_text_widget_lines(status_text, MAX_STATUS_LOG_LINES)
-        status_text.see(ctk.END)
-        status_text.configure(state='disabled')
-
-        try:
-            if important_log_text.winfo_exists():
-                if important_tag:
-                    important_log_text.configure(state='normal')
-                    important_log_text.insert(ctk.END, line, important_tag)
-                    trim_text_widget_lines(important_log_text, MAX_IMPORTANT_LOG_LINES)
-                    important_log_text.see(ctk.END)
-                    important_log_text.configure(state='disabled')
-        except Exception:
-            pass
     try:
-        root.after(0, _update)
+        from log_engine import get_log_engine
+        get_log_engine().post_log(message, tag=tag or "INFO", important_tag=important_tag)
     except Exception:
         pass
 
@@ -3422,7 +3594,12 @@ def update_project_dropdown():
     project_dropdown.configure(values=pl)
     if selected_project_var.get() not in pl: selected_project_var.set(ALL_OPTION)
 
+_row_tags_configured = False
+
 def _apply_row_tags():
+    global _row_tags_configured
+    if _row_tags_configured:
+        return
     try:
         tree.tag_configure('tag_ready', background='#DCFCE7', foreground='#166534')
         tree.tag_configure('tag_processing', background='#FEF3C7', foreground='#92400E')
@@ -3431,7 +3608,9 @@ def _apply_row_tags():
         tree.tag_configure('tag_running', background='#DCFCE7', foreground='#166534')
         tree.tag_configure('tag_manual', background='#DBEAFE', foreground='#1D4ED8')
         tree.tag_configure('tag_warning', background='#FFEDD5', foreground='#C2410C')
-    except Exception: pass
+        _row_tags_configured = True
+    except Exception:
+        pass
 
 def _profile_ui(name):
     if name not in profiles:
@@ -3445,7 +3624,7 @@ def _profile_ui(name):
     ui.setdefault('last_error', '')
     return ui
 
-def request_profile_refresh(delay_ms=40):
+def request_profile_refresh(delay_ms=150):
     """Coalesce table refreshes: at most one pending redraw."""
     global _profile_refresh_pending
     if _profile_refresh_pending:
@@ -3509,6 +3688,20 @@ def _set_profile_ui(name, refresh=True, **fields):
                 ui[key] = new_value
                 changed = True
     if refresh and changed:
+        try:
+            sp = selected_project_var.get() if 'selected_project_var' in globals() else ALL_OPTION
+            kw = filter_var.get().strip() if 'filter_var' in globals() else ""
+            chip = active_filter_chip_var.get() if 'active_filter_chip_var' in globals() else "ALL"
+            if sp == ALL_OPTION and not kw and chip == "ALL" and 'tree' in globals() and tree.winfo_exists():
+                cfg = profiles[name].get('config', {})
+                uuid = ensure_account_uuid(cfg)
+                if uuid in tree.get_children(''):
+                    from profile_table_engine import build_row_model
+                    model = build_row_model(name, profiles[name], monetization_cache, ensure_account_uuid)
+                    tree.item(uuid, values=model["values"], tags=model["tags"])
+                    return
+        except Exception:
+            pass
         request_profile_refresh()
 
 def _short_ui_text(value, max_len=80):
@@ -3598,11 +3791,18 @@ def _first_run_download_check():
         if not path.exists():
             missing[local_name] = info
 
-    # Upgrade case: Browser folder exists but the primary engine executable is absent
+    # Upgrade case: Browser folder exists but engine is absent or outdated/unpatched
     browser_info = RESOURCE_ASSETS.get("Browser") or {}
-    if "Browser" not in missing and browser_info.get("validate"):
-        if any(not (app_base_dir() / p).exists() for p in browser_info["validate"]):
+    from browser_engine_manager import verify_installed_engine_compatibility, clean_legacy_browser_engines
+    is_engine_compat, compat_msg = verify_installed_engine_compatibility(app_base_dir())
+    if "Browser" not in missing:
+        if not is_engine_compat:
+            clean_legacy_browser_engines(app_base_dir(), remove_primary=True)
             missing["Browser"] = browser_info
+        elif browser_info.get("validate"):
+            if any(not (app_base_dir() / p).exists() for p in browser_info["validate"]):
+                clean_legacy_browser_engines(app_base_dir(), remove_primary=True)
+                missing["Browser"] = browser_info
 
     ffmpeg_ok, ffmpeg_msg, ffmpeg_src = fh.check_ffmpeg()
     ffmpeg_needed = not ffmpeg_ok
@@ -3799,14 +3999,18 @@ def _first_run_download_check():
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _start_browser_engine_download():
+def _start_browser_engine_download(clean_first: bool = True):
     """Tải Dong Lao TikTok Browser 144 qua dialog có progress, checksum và giải nén atomic."""
     from version import (
         RESOURCE_ASSETS,
         RESOURCE_RELEASE_VERSION,
         RESOURCE_BROWSER_ENGINE_DIR,
     )
+    from browser_engine_manager import clean_legacy_browser_engines
     from ui_browser_downloader import BrowserEngineDownloadDialog
+
+    if clean_first:
+        clean_legacy_browser_engines(app_base_dir(), remove_primary=True)
 
     info = RESOURCE_ASSETS.get("Browser") or {}
     asset_name = info.get("asset", "Browser-v{version}.zip").format(version=RESOURCE_RELEASE_VERSION)
@@ -3854,18 +4058,30 @@ def _enqueue_update_ui(callback):
     _update_ui_queue.put(callback)
 
 
+MAX_UI_CALLBACKS_PER_TICK = 25
+MAX_UI_TIME_BUDGET_MS = 10.0
+
+
 def _drain_update_ui_queue():
-    try:
-        while True:
+    start_t = time.perf_counter()
+    processed_count = 0
+    while processed_count < MAX_UI_CALLBACKS_PER_TICK:
+        if (time.perf_counter() - start_t) * 1000.0 >= MAX_UI_TIME_BUDGET_MS:
+            break
+        try:
             callback = _update_ui_queue.get_nowait()
-            try:
-                callback()
-            except Exception as error:
-                update_status(f"[Update] Lỗi giao diện cập nhật: {error}")
-    except queue.Empty:
-        pass
+        except queue.Empty:
+            break
+        try:
+            callback()
+        except Exception as error:
+            update_status(f"[Update] Lỗi giao diện cập nhật: {error}")
+        processed_count += 1
+
+    has_more = not _update_ui_queue.empty()
+    next_delay = 10 if has_more else 50
     try:
-        root.after(100, _drain_update_ui_queue)
+        root.after(next_delay, _drain_update_ui_queue)
     except Exception:
         pass
 
@@ -4716,15 +4932,18 @@ def start_profile(name=None):
 
             if config.get('open_only_when_video', False):
                 profiles[name]['watch_started_at'] = time.time()
-                h = VideoFolderHandler(name)
-                o = Observer()
-                o.schedule(h, config["folder_path"], recursive=False)
-                o.start()
-                if not lc.register_observer(start_gen, o):
-                    o.stop()
-                    o.join(timeout=2)
+                try:
+                    mgr = get_watchdog_manager()
+                    ok_sched, msg = mgr.schedule_folder(name, config["folder_path"], start_gen)
+                    if not ok_sched:
+                        update_status(f"[{name}] Không thể theo dõi thư mục: {msg}")
+                        return
+                    adopted = _reconcile_startup_folder(name, config["folder_path"], start_gen)
+                    if adopted:
+                        update_status(f"[{name}] Đã tiếp nhận {adopted} video có sẵn trong thư mục.")
+                except Exception as e:
+                    update_status(f"[{name}] Lỗi khởi tạo watchdog: {e}")
                     return
-                profiles[name]['observer'] = o
                 _set_profile_ui(name, status='Đang chạy', browser='Chờ video', upload='Chờ video mới')
                 update_status(f"[{name}] Chế độ chỉ mở khi có video mới: bỏ qua video cũ, đang chờ video mới.")
                 threading.Thread(target=process_video_queue_thread, args=(name,), daemon=True).start()
@@ -4742,16 +4961,21 @@ def start_profile(name=None):
                 return
 
             if _browser_session_valid(profiles[name].get('driver')):
-                h = VideoFolderHandler(name)
-                o = Observer()
-                o.schedule(h, config["folder_path"], recursive=False)
-                o.start()
-                if not lc.register_observer(start_gen, o):
-                    o.stop()
-                    o.join(timeout=2)
+                try:
+                    mgr = get_watchdog_manager()
+                    ok_sched, msg = mgr.schedule_folder(name, config["folder_path"], start_gen)
+                    if not ok_sched:
+                        update_status(f"[{name}] Không thể theo dõi thư mục: {msg}")
+                        stop_profile(name)
+                        return
+                    profiles[name]['watch_started_at'] = time.time()
+                    adopted = _reconcile_startup_folder(name, config["folder_path"], start_gen)
+                    if adopted:
+                        update_status(f"[{name}] Đã tiếp nhận {adopted} video có sẵn trong thư mục.")
+                except Exception as e:
+                    update_status(f"[{name}] Lỗi khởi tạo watchdog: {e}")
+                    stop_profile(name)
                     return
-                profiles[name]['observer'] = o
-                profiles[name]['watch_started_at'] = time.time()
                 _set_profile_ui(name, status='Đang chạy', browser='Sẵn sàng', upload='Chờ video')
                 update_status(f"[{name}] Browser đã mở sẵn, đang chờ video mới.")
                 threading.Thread(target=process_video_queue_thread, args=(name,), daemon=True).start()
@@ -4781,6 +5005,12 @@ def _stop_profile_driver(name):
     drv_manual = profile.get('manual_driver')
     profile['manual_driver'] = None
     profile['observer'] = None
+
+    try:
+        from watchdog_service import get_watchdog_manager
+        get_watchdog_manager().unschedule_profile(name)
+    except Exception:
+        pass
 
     for token in (drv_auto, drv_manual):
         if isinstance(token, SessionToken):
@@ -6257,7 +6487,7 @@ def delete_profile():
         monetization_cache.pop(nm, None)
         deleted_count += 1
 
-    save_configs()
+    save_configs(allow_truncate=True)
     update_profile_list()
     update_status(f"[UI] Đã xoá {deleted_count} hồ sơ thành công.")
 
@@ -6649,6 +6879,21 @@ def on_closing():
         update_status(f"[YouTube] Lỗi dừng monitor khi đóng app: {e}")
 
     _shutdown_all_profiles()
+    try:
+        from log_engine import get_log_engine
+        get_log_engine().shutdown()
+    except Exception:
+        pass
+    try:
+        from config_service import get_config_service
+        get_config_service().shutdown(timeout=5.0)
+    except Exception:
+        pass
+    try:
+        from watchdog_service import get_watchdog_manager
+        get_watchdog_manager().stop()
+    except Exception:
+        pass
     root.after(500, root.destroy)
 
 def change_license_key():
@@ -7644,9 +7889,21 @@ youtube_monitor_view = ui_widgets.get('youtube_monitor_view')
 batch_download_view = ui_widgets.get('batch_download_view')
 activity_view = ui_widgets.get('activity_view')
 
+# Initialize Bounded LogEngine
+from log_engine import get_log_engine
+get_log_engine().initialize_ui(
+    root=root,
+    status_widget=status_text,
+    important_widget=important_log_text,
+    trim_func=trim_text_widget_lines,
+)
+
 def _start_youtube_monitor_safe():
     if os.environ.get('FROZEN_SMOKE_TEST', '').strip().lower() in ('1', 'true'):
         update_status("[YouTube] Smoke mode: bỏ qua monitor auto-start")
+        return
+    if 'pytest' in sys.modules or 'unittest' in sys.modules:
+        update_status("[YouTube] Test mode: bỏ qua monitor auto-start")
         return
     cfg = youtube_monitor.get_config()
     if not cfg.get('auto_start', True):

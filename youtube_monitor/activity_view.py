@@ -2,7 +2,7 @@ import webbrowser
 from tkinter import messagebox, ttk
 
 import customtkinter as ctk
-
+from ui_components import UIThemeTokens
 
 TYPE_LABELS = {
     "Tất cả": "",
@@ -19,6 +19,11 @@ STATUS_LABELS = {
 
 
 class ActivityLogView(ctk.CTkFrame):
+    """
+    ActivityLogView - Giao diện Lịch Sử Hoạt Động Video (YouTube Download & TikTok Upload).
+    Áp dụng Design System UIThemeTokens và bố cục Card chuyên nghiệp.
+    """
+
     def __init__(self, parent, handlers):
         super().__init__(parent, fg_color="transparent")
         self.handlers = handlers or {}
@@ -27,60 +32,159 @@ class ActivityLogView(ctk.CTkFrame):
         self.status_var = ctk.StringVar(value="Tất cả")
         self.search_var = ctk.StringVar(value="")
         self.summary_var = ctk.StringVar(value="Lịch sử Video")
+
         self._build()
         self.reload(force=True)
 
     def _build(self):
-        header = ctk.CTkFrame(self, corner_radius=10, fg_color="#f8fafc", border_width=1, border_color="#e5e7eb")
+        # 1. Header KPI Summary Card
+        header = ctk.CTkFrame(
+            self,
+            corner_radius=10,
+            fg_color=UIThemeTokens.BG_CARD,
+            border_width=1,
+            border_color=UIThemeTokens.BORDER_LIGHT,
+        )
         header.pack(fill="x", pady=(0, 6))
-        ctk.CTkLabel(header, textvariable=self.summary_var, font=("Segoe UI Semibold", 13), text_color="#0f172a").pack(side="left", padx=10, pady=8)
 
-        filters = ctk.CTkFrame(self, corner_radius=10, fg_color="#f8fafc", border_width=1, border_color="#e5e7eb")
+        ctk.CTkLabel(
+            header,
+            text="📜 LỊCH SỬ HOẠT ĐỘNG VIDEO",
+            font=UIThemeTokens.FONT_TITLE,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+        ).pack(side="left", padx=12, pady=8)
+
+        ctk.CTkLabel(
+            header,
+            textvariable=self.summary_var,
+            font=UIThemeTokens.FONT_BUTTON,
+            text_color=UIThemeTokens.ACCENT_PRIMARY,
+        ).pack(side="right", padx=12)
+
+        # 2. Filter Toolbar Card
+        filters = ctk.CTkFrame(
+            self,
+            corner_radius=10,
+            fg_color=UIThemeTokens.BG_CARD,
+            border_width=1,
+            border_color=UIThemeTokens.BORDER_LIGHT,
+        )
         filters.pack(fill="x", pady=(0, 6))
-        ctk.CTkLabel(filters, text="Loại:", text_color="#334155").pack(side="left", padx=(8, 4), pady=8)
-        ctk.CTkComboBox(filters, variable=self.type_var, values=list(TYPE_LABELS.keys()), width=150, height=30, command=lambda _v: self.reload(force=True)).pack(side="left", padx=4, pady=8)
-        ctk.CTkLabel(filters, text="Trạng thái:", text_color="#334155").pack(side="left", padx=(10, 4), pady=8)
-        ctk.CTkComboBox(filters, variable=self.status_var, values=list(STATUS_LABELS.keys()), width=120, height=30, command=lambda _v: self.reload(force=True)).pack(side="left", padx=4, pady=8)
-        search = ctk.CTkEntry(filters, textvariable=self.search_var, placeholder_text="Tìm tên video, link, profile, lỗi...", height=30)
-        search.pack(side="left", fill="x", expand=True, padx=(10, 6), pady=8)
-        search.bind("<Return>", lambda _e: self.reload(force=True))
-        ctk.CTkButton(filters, text="Làm mới", width=90, height=30, command=lambda: self.reload(force=True)).pack(side="left", padx=3, pady=8)
-        ctk.CTkButton(filters, text="Xóa lịch sử", width=105, height=30, fg_color="#ef4444", hover_color="#dc2626", command=self._clear).pack(side="left", padx=(3, 8), pady=8)
 
-        table_frame = ctk.CTkFrame(self, fg_color="transparent")
-        table_frame.pack(fill="both", expand=True)
-        table_frame.grid_rowconfigure(0, weight=1)
-        table_frame.grid_columnconfigure(0, weight=1)
+        filter_inner = ctk.CTkFrame(filters, fg_color="transparent")
+        filter_inner.pack(fill="x", padx=10, pady=8)
+
+        ctk.CTkLabel(
+            filter_inner,
+            text="Loại:",
+            font=UIThemeTokens.FONT_BODY,
+            text_color=UIThemeTokens.TEXT_MUTED,
+        ).pack(side="left", padx=(0, 4))
+
+        ctk.CTkComboBox(
+            filter_inner,
+            variable=self.type_var,
+            values=list(TYPE_LABELS.keys()),
+            width=150,
+            height=30,
+            font=UIThemeTokens.FONT_BODY,
+            command=lambda _v: self.reload(force=True),
+        ).pack(side="left", padx=(0, 10))
+
+        ctk.CTkLabel(
+            filter_inner,
+            text="Trạng thái:",
+            font=UIThemeTokens.FONT_BODY,
+            text_color=UIThemeTokens.TEXT_MUTED,
+        ).pack(side="left", padx=(0, 4))
+
+        ctk.CTkComboBox(
+            filter_inner,
+            variable=self.status_var,
+            values=list(STATUS_LABELS.keys()),
+            width=110,
+            height=30,
+            font=UIThemeTokens.FONT_BODY,
+            command=lambda _v: self.reload(force=True),
+        ).pack(side="left", padx=(0, 10))
+
+        search = ctk.CTkEntry(
+            filter_inner,
+            textvariable=self.search_var,
+            placeholder_text="Tìm tên video, link, profile, mã lỗi...",
+            height=30,
+            font=UIThemeTokens.FONT_BODY,
+        )
+        search.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        search.bind("<Return>", lambda _e: self.reload(force=True))
+
+        ctk.CTkButton(
+            filter_inner,
+            text="Làm mới",
+            font=UIThemeTokens.FONT_BUTTON,
+            width=80,
+            height=30,
+            fg_color=UIThemeTokens.ACCENT_PRIMARY,
+            hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
+            command=lambda: self.reload(force=True),
+        ).pack(side="left", padx=(0, 4))
+
+        ctk.CTkButton(
+            filter_inner,
+            text="Xóa lịch sử",
+            font=UIThemeTokens.FONT_BUTTON,
+            width=90,
+            height=30,
+            fg_color=UIThemeTokens.STATUS_ERROR,
+            hover_color="#b91c1c",
+            command=self._clear,
+        ).pack(side="left")
+
+        # 3. Main Data Table Card
+        table_card = ctk.CTkFrame(
+            self,
+            corner_radius=10,
+            fg_color=UIThemeTokens.BG_CARD,
+            border_width=1,
+            border_color=UIThemeTokens.BORDER_LIGHT,
+        )
+        table_card.pack(fill="both", expand=True)
+        table_card.grid_rowconfigure(0, weight=1)
+        table_card.grid_columnconfigure(0, weight=1)
+
         self.tree = ttk.Treeview(
-            table_frame,
+            table_card,
             style="Modern.Treeview",
             columns=("time", "type", "status", "profile", "video_name", "video_url", "detail", "file_path"),
             show="headings",
             selectmode="browse",
         )
         headers = (
-            ("time", "Thời gian", 140),
-            ("type", "Loại", 120),
-            ("status", "Trạng thái", 80),
-            ("profile", "Profile", 130),
-            ("video_name", "Tên video", 260),
-            ("video_url", "Link", 180),
-            ("detail", "Chi tiết", 220),
-            ("file_path", "File", 260),
+            ("time", "Thời Gian", 130),
+            ("type", "Loại Tác Vụ", 120),
+            ("status", "Trạng Thái", 85),
+            ("profile", "Profile", 120),
+            ("video_name", "Tên Video", 260),
+            ("video_url", "Link Video", 180),
+            ("detail", "Chi Tiết / Mã Lỗi", 220),
+            ("file_path", "Đường Dẫn File", 260),
         )
         for col, text, width in headers:
             self.tree.heading(col, text=text)
             self.tree.column(col, width=width, minwidth=60, stretch=col in ("video_name", "detail", "file_path"))
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
-        hsb.grid(row=1, column=0, sticky="ew")
+
+        self.tree.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
+
+        vsb = ttk.Scrollbar(table_card, orient="vertical", command=self.tree.yview)
+        vsb.grid(row=0, column=1, sticky="ns", padx=(0, 6), pady=6)
+        hsb = ttk.Scrollbar(table_card, orient="horizontal", command=self.tree.xview)
+        hsb.grid(row=1, column=0, sticky="ew", padx=(6, 0), pady=(0, 6))
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
         self.tree.bind("<Double-1>", self._open_selected_link)
-        self.tree.tag_configure("success", foreground="#166534")
-        self.tree.tag_configure("fail", foreground="#b91c1c")
-        self.tree.tag_configure("skipped", foreground="#b45309")
+        self.tree.tag_configure("success", foreground="#16a34a")
+        self.tree.tag_configure("fail", foreground="#dc2626")
+        self.tree.tag_configure("skipped", foreground="#d97706")
 
     def refresh_data(self):
         try:
@@ -95,9 +199,9 @@ class ActivityLogView(ctk.CTkFrame):
             self._last_mtime = self.handlers.get("get_mtime", lambda: 0)()
             stats = self.handlers.get("get_stats", lambda: {})()
             self.summary_var.set(
-                f"Download OK: {stats.get('download_success', 0)} | Download Fail: {stats.get('download_fail', 0)} | "
-                f"Upload OK: {stats.get('upload_success', 0)} | Upload Fail: {stats.get('upload_fail', 0)} | "
-                f"Skipped: {stats.get('download_skipped', 0) + stats.get('batch_skipped', 0)}"
+                f"Tải OK: {stats.get('download_success', 0)} | Tải Lỗi: {stats.get('download_fail', 0)} | "
+                f"Đăng OK: {stats.get('upload_success', 0)} | Đăng Lỗi: {stats.get('upload_fail', 0)} | "
+                f"Bỏ qua: {stats.get('download_skipped', 0) + stats.get('batch_skipped', 0)}"
             )
             logs = self.handlers.get("get_logs", lambda **_kw: [])(
                 limit=500,

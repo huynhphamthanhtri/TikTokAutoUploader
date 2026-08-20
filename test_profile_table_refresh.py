@@ -35,10 +35,19 @@ class ProfileTableRefreshTests(unittest.TestCase):
         self.assertIn("if refresh and changed:", block)
 
     def test_save_configs_no_longer_refreshes_table(self):
-        start = self.main_source.index("def save_configs():")
+        start = self.main_source.index("def save_configs")
         end = self.main_source.index("def load_configs():", start)
         block = self.main_source[start:end]
         self.assertNotIn("update_profile_list()", block)
+
+    def test_load_reconciles_browser_owner_before_first_table_render(self):
+        start = self.main_source.index("def load_configs():")
+        end = self.main_source.index("def _cleanup_expired_quarantines", start)
+        block = self.main_source[start:end]
+        self.assertLess(
+            block.index("_migrate_profile_drivers()"),
+            block.index("update_profile_list()"),
+        )
 
     def test_action_buttons_guards_exist(self):
         self.assertIn("def _update_action_buttons", self.main_source)

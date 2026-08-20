@@ -205,6 +205,146 @@ def _assert_within(path: Path, root: Path) -> None:
         raise ValueError(f"{path} is outside the allowed root {root}")
 
 
+def read_pak(data: bytes):
+    import struct
+    version, encoding = struct.unpack("<II", data[0:8])
+    res_count, alias_count = struct.unpack("<HH", data[8:12])
+    entries = []
+    pos = 12
+    for _ in range(res_count + 1):
+        rid, offset = struct.unpack("<HI", data[pos:pos + 6])
+        entries.append((rid, offset))
+        pos += 6
+    aliases = []
+    for _ in range(alias_count):
+        aid, entry_idx = struct.unpack("<HH", data[pos:pos + 4])
+        aliases.append((aid, entry_idx))
+        pos += 4
+    resources = {}
+    for i in range(res_count):
+        rid, offset = entries[i]
+        next_offset = entries[i + 1][1]
+        res_data = data[offset:next_offset]
+        resources[rid] = res_data
+    return version, encoding, resources, aliases
+
+
+def write_pak(version: int, encoding: int, resources: Dict[int, bytes], aliases: List) -> bytes:
+    import struct
+    sorted_rids = sorted(resources.keys())
+    res_count = len(sorted_rids)
+    alias_count = len(aliases)
+    data_start = 12 + (res_count + 1) * 6 + alias_count * 4
+    current_offset = data_start
+    entries = []
+    data_blobs = []
+    for rid in sorted_rids:
+        blob = resources[rid]
+        entries.append((rid, current_offset))
+        data_blobs.append(blob)
+        current_offset += len(blob)
+    entries.append((0, current_offset))
+    out = bytearray()
+    out.extend(struct.pack("<IIHH", version, encoding, res_count, alias_count))
+    for rid, offset in entries:
+        out.extend(struct.pack("<HI", rid, offset))
+    for aid, entry_idx in sorted(aliases, key=lambda x: x[0]):
+        out.extend(struct.pack("<HH", aid, entry_idx))
+    for blob in data_blobs:
+        out.extend(blob)
+    return bytes(out)
+
+
+def patch_pak_branding(engine_dir: Path, logo_path: Optional[Path] = None) -> Dict:
+    """Patch all Grit PAK files in engine_dir with DONGLAO branding strings and logo PNGs."""
+    import struct
+    import io
+    from PIL import Image
+
+    engine_dir = Path(engine_dir)
+    ver_dir = engine_dir / "144.0.7559.96"
+    if not ver_dir.exists():
+        return {"applied": False, "count": 0}
+
+    base_img = None
+    if logo_path and Path(logo_path).exists():
+        base_img = Image.open(logo_path).convert("RGBA")
+    else:
+        default_logo = Path(__file__).resolve().parent.parent / "assets" / "donglao_browser_logo.png"
+        if default_logo.exists():
+            base_img = Image.open(default_logo).convert("RGBA")
+
+    def _get_logo_png(w, h):
+        if not base_img:
+            return None
+        resized = base_img.resize((w, h), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        resized.save(buf, format="PNG", optimize=True)
+        return buf.getvalue()
+
+    string_replacements = [
+        (b"About HT Browser", b"About DONGLAO Browser"),
+        (b"Go to About HT Browser page", b"Go to About DONGLAO Browser page"),
+        (b"Get help with HT Browser", b"Get help with DONGLAO Browser"),
+        (b"HT Browser", b"DONGLAO Browser"),
+        (b"HT browser", b"DONGLAO Browser"),
+        (b"Telegram: @huynhthang", b"DONGLAO-APP"),
+        (b"@huynhthang", b"DONGLAO-APP"),
+        (b"huynhthang", b"DONGLAO-APP"),
+    ]
+    logo_rids = (16294, 16448, 16720, 16721, 16313, 16314, 16449, 16450, 16451, 16142, 16180, 16179, 16178, 16177)
+    patched_count = 0
+
+    locales_dir = ver_dir / "Locales"
+    if locales_dir.exists():
+        for pak in locales_dir.glob("*.pak"):
+            raw = pak.read_bytes()
+            if len(raw) < 12:
+                continue
+            v, enc, res, aliases = read_pak(raw)
+            changed = False
+            for rid in list(res.keys()):
+                val = res[rid]
+                for src, dst in string_replacements:
+                    if src not in val:
+                        continue
+                    val = val.replace(src, dst)
+                    changed = True
+                res[rid] = val
+            if not changed:
+                continue
+            pak.write_bytes(write_pak(v, enc, res, aliases))
+            patched_count += 1
+
+    for name in ("chrome_100_percent.pak", "chrome_200_percent.pak", "resources.pak"):
+        pak = ver_dir / name
+        if not pak.exists():
+            continue
+        raw = pak.read_bytes()
+        v, enc, res, aliases = read_pak(raw)
+        changed = False
+        for rid in list(res.keys()):
+            val = res[rid]
+            if val.startswith(b"\x89PNG") and len(val) >= 24 and val[12:16] == b"IHDR":
+                w, h = struct.unpack(">II", val[16:24])
+                if rid in logo_rids:
+                    png_bytes = _get_logo_png(w, h)
+                    if png_bytes:
+                        res[rid] = png_bytes
+                        changed = True
+                        for src, dst in string_replacements:
+                            if src not in val:
+                                continue
+                            res[rid] = res[rid].replace(src, dst)
+                            changed = True
+        if not changed:
+            continue
+        pak.write_bytes(write_pak(v, enc, res, aliases))
+        patched_count += 1
+
+    return {"applied": patched_count > 0, "paks_patched": patched_count}
+
+
 def patch_engine_dir(
     engine_dir: Path,
     allowed_root: Path,
@@ -231,6 +371,7 @@ def patch_engine_dir(
         report["branding"] = {
             "chrome.exe": patch_branding(chrome_exe) if chrome_exe.exists() else None,
             "chrome.dll": patch_branding(chrome_dll) if chrome_dll.exists() else None,
+            "paks": patch_pak_branding(engine_dir),
         }
     return report
 
@@ -249,6 +390,8 @@ def _verify_engine_report(report: Dict) -> List[str]:
         problems.append("license NOP patch missing")
     for which, item in (report.get("branding") or {}).items():
         if item is None:
+            continue
+        if which == "paks":
             continue
         if not item.get("applied"):
             missing = [p["source"] for p in item["pairs"] if p["count"] == 0]

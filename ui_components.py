@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import ntpath
+import tkinter as tk
 import customtkinter as ctk
 import queue
 import re
@@ -725,3 +727,227 @@ def apply_app_icon(window: Any, app_base: Optional[Any] = None) -> bool:
     except Exception:
         pass
     return True
+
+
+# ==============================================================================
+# 9. PROFILE SELECTOR COMPONENTS & PURE HELPERS
+# ==============================================================================
+
+def normalize_profile_names(raw_profiles: Any) -> List[str]:
+    """Pure helper: Trim whitespace, loại bỏ rỗng, deduplicate bảo toàn thứ tự ban đầu."""
+    if raw_profiles is None:
+        return []
+    if isinstance(raw_profiles, (str, bytes, int, float)):
+        items = [raw_profiles]
+    else:
+        try:
+            items = list(raw_profiles)
+        except Exception:
+            items = [raw_profiles]
+    return list(dict.fromkeys(
+        str(name).strip()
+        for name in items
+        if name is not None and str(name).strip()
+    ))
+
+
+def normalized_fs_path(path_value: Any) -> str:
+    """Chuẩn hóa đường dẫn Windows bằng ntpath (normcase + normpath) an toàn, không chạm filesystem."""
+    text = str(path_value or "").strip()
+    return ntpath.normcase(ntpath.normpath(text)) if text else ""
+
+
+def load_live_profile_names(handlers: Dict[str, Any]) -> Tuple[bool, Tuple[str, ...], str]:
+    """
+    Helper module-level UI-only: tải và chuẩn hóa danh sách live profiles từ handlers.
+    Phân định rõ ràng: handler thiếu/lỗi vs trả danh sách thành công.
+    """
+    if not isinstance(handlers, dict):
+        return False, (), "Handlers không hợp lệ."
+    handler = handlers.get("get_profiles")
+    if not callable(handler):
+        return False, (), "Handler get_profiles chưa được cấu hình."
+    try:
+        raw = handler()
+        values = tuple(normalize_profile_names(raw))
+    except Exception as exc:
+        return False, (), f"Không thể làm mới danh sách profile: {exc}"
+    return True, values, ""
+
+
+class ProfilePickerField(ctk.CTkFrame):
+    """
+    ProfilePickerField - Component lựa chọn profile readonly presentation-only.
+    - Hiển thị giá trị semantic từ variable hoặc placeholder mờ trong display_var riêng.
+    - Readonly display ngăn nhập trực tiếp; copy/focus cần runtime smoke test.
+    - Tự động hiển thị viền đỏ và nhãn phụ '⚠️ Không còn khả dụng' khi profile bị stale.
+    - Quản lý lifecycle trace an toàn: trace_add / trace_remove và chỉ cleanup khi event.widget is self.
+    """
+
+    def __init__(
+        self,
+        master: Any,
+        variable: ctk.StringVar,
+        command: Callable[[], None],
+        placeholder_text: str = "Chưa chọn profile",
+        button_text: str = "🔍 Chọn",
+        height: int = 30,
+        compact_button: bool = False,
+    ):
+        super().__init__(master, fg_color="transparent")
+        self.variable = variable
+        self.command = command
+        self.placeholder_text = str(placeholder_text or "Chưa chọn profile")
+        self.button_text = str(button_text or "🔍 Chọn")
+        self.field_height = int(height or 30)
+        self.compact_button = bool(compact_button)
+
+        self._profiles: Tuple[str, ...] = ()
+        self._profiles_set: frozenset[str] = frozenset()
+        self._trace_token: Optional[str] = None
+        self._is_destroying: bool = False
+
+        self.display_var = ctk.StringVar(value="")
+
+        self._build_ui()
+        self._setup_trace()
+        self.refresh_display()
+
+        self.bind("<Destroy>", self._on_destroy_event, add="+")
+
+    @property
+    def profiles(self) -> Tuple[str, ...]:
+        return self._profiles
+
+    def _build_ui(self):
+        # Entry Container Row
+        self.grid_columnconfigure(0, weight=1)
+
+        btn_width = 34 if self.compact_button else 65
+        self.btn_picker = ctk.CTkButton(
+            self,
+            text=self.button_text,
+            font=UIThemeTokens.FONT_BUTTON,
+            width=btn_width,
+            height=self.field_height,
+            fg_color=UIThemeTokens.BG_HOVER,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+            hover_color=UIThemeTokens.BORDER_LIGHT,
+            command=self.command,
+        )
+        self.btn_picker.pack(side="right", padx=(4, 0))
+
+        self.entry = ctk.CTkEntry(
+            self,
+            textvariable=self.display_var,
+            height=self.field_height,
+            font=UIThemeTokens.FONT_BODY,
+            state="readonly",
+        )
+        self.entry.pack(side="left", fill="x", expand=True)
+
+        self.lbl_status = ctk.CTkLabel(
+            self,
+            text="",
+            font=UIThemeTokens.FONT_BADGE,
+            text_color=UIThemeTokens.STATUS_ERROR,
+        )
+
+    def _setup_trace(self):
+        if self.variable and hasattr(self.variable, "trace_add"):
+            try:
+                self._trace_token = self.variable.trace_add("write", self._on_var_changed)
+            except Exception:
+                self._trace_token = None
+
+    def _cleanup_trace(self):
+        if self._trace_token and self.variable and hasattr(self.variable, "trace_remove"):
+            try:
+                self.variable.trace_remove("write", self._trace_token)
+            except Exception:
+                pass
+            self._trace_token = None
+
+    def _on_destroy_event(self, event: Any):
+        if getattr(event, "widget", None) is self:
+            self._cleanup_trace()
+
+    def destroy(self):
+        self._is_destroying = True
+        self._cleanup_trace()
+        super().destroy()
+
+    def _on_var_changed(self, *args):
+        if self._is_destroying:
+            return
+        try:
+            self.refresh_display()
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def set_profiles(self, profiles: Sequence[str]) -> bool:
+        normalized = tuple(normalize_profile_names(profiles))
+        changed = normalized != self._profiles
+        self._profiles = normalized
+        self._profiles_set = frozenset(normalized)
+        self.refresh_display()
+        return changed
+
+    def is_valid(self) -> bool:
+        val = self.get()
+        return bool(val and val in self._profiles_set)
+
+    def is_empty(self) -> bool:
+        return not bool(self.get())
+
+    def is_stale(self) -> bool:
+        val = self.get()
+        return bool(val and val not in self._profiles_set)
+
+    def get(self) -> str:
+        if self.variable and hasattr(self.variable, "get"):
+            return str(self.variable.get() or "").strip()
+        return ""
+
+    def refresh_display(self) -> None:
+        if self._is_destroying:
+            return
+        val = self.get()
+        try:
+            if not val:
+                # Empty presentation
+                self.display_var.set(self.placeholder_text)
+                self.entry.configure(
+                    text_color=UIThemeTokens.TEXT_MUTED,
+                    border_color=UIThemeTokens.BORDER_LIGHT,
+                )
+                if self.lbl_status.winfo_ismapped():
+                    self.lbl_status.pack_forget()
+            elif val in self._profiles_set:
+                # Valid presentation
+                self.display_var.set(val)
+                self.entry.configure(
+                    text_color=UIThemeTokens.TEXT_PRIMARY,
+                    border_color=UIThemeTokens.BORDER_LIGHT,
+                )
+                if self.lbl_status.winfo_ismapped():
+                    self.lbl_status.pack_forget()
+            else:
+                # Stale presentation
+                self.display_var.set(val)
+                self.entry.configure(
+                    text_color=UIThemeTokens.STATUS_ERROR,
+                    border_color=UIThemeTokens.STATUS_ERROR,
+                )
+                self.lbl_status.configure(text="⚠️ Không còn khả dụng")
+                if not self.lbl_status.winfo_ismapped():
+                    self.lbl_status.pack(side="bottom", anchor="w", pady=(2, 0))
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def focus_picker(self) -> None:
+        try:
+            if self.btn_picker.winfo_exists():
+                self.btn_picker.focus_set()
+        except Exception:
+            pass

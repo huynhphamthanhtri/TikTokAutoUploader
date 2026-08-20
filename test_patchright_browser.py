@@ -310,6 +310,29 @@ class PatchrightBrowserTests(unittest.TestCase):
         self.assertIn("old", names)
         self.assertNotIn("new", names)
 
+    def test_import_rolls_back_when_chromium_drops_all_auth_cookies(self):
+        session = self.open()
+        context = self.playwright.chromium.contexts[0]
+        old = {"name": "sessionid", "value": "old", "domain": ".tiktok.com", "path": "/"}
+        context.added_cookies.append(old)
+        original_add = context.add_cookies
+
+        async def drop_new_auth(cookies):
+            retained = [
+                cookie for cookie in cookies
+                if cookie.get("value") != "new"
+            ]
+            return await original_add(retained)
+
+        context.add_cookies = drop_new_auth
+        with self.assertRaisesRegex(RuntimeError, "did not retain"):
+            self.browser.import_cookies(
+                session.handle,
+                [{"name": "sessionid", "value": "new", "domain": ".tiktok.com", "path": "/"}],
+            ).result(2)
+        stored = [c for c in context.added_cookies if c.get("name") == "sessionid"]
+        self.assertEqual([c.get("value") for c in stored], ["old"])
+
     def test_operation_cannot_return_owned_page(self):
         session = self.open()
 

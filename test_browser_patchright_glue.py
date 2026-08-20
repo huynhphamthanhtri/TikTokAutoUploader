@@ -203,6 +203,33 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
             self.assertTrue(target.is_dir())
             self.assertFalse(legacy.exists())
 
+    def test_profile_resume_restores_missing_account_uuid_from_valid_owner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            managed = Path(temporary) / "account"
+            legacy = managed / "Profile"
+            legacy.mkdir(parents=True)
+            target = create_patchright_profile(legacy, managed, account_id="owner-uuid")
+            config = {"chrome_profile": str(legacy), "account_uuid": ""}
+
+            resumed = Path(glue.ensure_patchright_profile(config))
+
+            self.assertEqual(resumed, target)
+            self.assertEqual(config["account_uuid"], "owner-uuid")
+            self.assertEqual(config["profile_owner_state"], "verified")
+
+    def test_profile_resume_keeps_rejecting_different_account_uuid(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            managed = Path(temporary) / "account"
+            legacy = managed / "Profile"
+            legacy.mkdir(parents=True)
+            create_patchright_profile(legacy, managed, account_id="owner-uuid")
+            config = {"chrome_profile": str(legacy), "account_uuid": "other-uuid"}
+
+            with self.assertRaisesRegex(ValueError, "thuộc tài khoản khác"):
+                glue.ensure_patchright_profile(config)
+
+            self.assertEqual(config["account_uuid"], "other-uuid")
+
     def test_profile_resume_rejects_unowned_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
             legacy = Path(temporary) / "account" / "Profile"

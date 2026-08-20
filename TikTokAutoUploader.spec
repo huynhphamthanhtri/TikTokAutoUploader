@@ -113,6 +113,14 @@ hidden_imports += collect_submodules('pyngrok')
 hidden_imports += collect_submodules('googleapiclient')
 hidden_imports += collect_submodules('charset_normalizer')
 hidden_imports += collect_submodules('patchright')
+hidden_imports += [
+    'config_service',
+    'log_engine',
+    'profile_table_engine',
+    'taskbar_manager',
+    'watchdog_service',
+    'youtube_monitor.ytdlp_updater',
+]
 
 a = Analysis(
     ['main.py'],

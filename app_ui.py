@@ -191,27 +191,13 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
 
     btn_nav_youtube = SidebarButton(
         nav_container,
-        text="YouTube Monitor",
-        icon_text="📺",
+        text="YouTube Studio",
+        icon_text="🎬",
     )
     btn_nav_youtube.pack(fill="x", pady=2)
     sidebar_buttons["youtube"] = btn_nav_youtube
-
-    btn_nav_batch = SidebarButton(
-        nav_container,
-        text="Batch YouTube",
-        icon_text="📥",
-    )
-    btn_nav_batch.pack(fill="x", pady=2)
-    sidebar_buttons["batch"] = btn_nav_batch
-
-    btn_nav_history = SidebarButton(
-        nav_container,
-        text="Lịch Sử Đăng",
-        icon_text="📜",
-    )
-    btn_nav_history.pack(fill="x", pady=2)
-    sidebar_buttons["history"] = btn_nav_history
+    sidebar_buttons["batch"] = btn_nav_youtube
+    sidebar_buttons["history"] = btn_nav_youtube
 
     btn_nav_monetization = SidebarButton(
         nav_container,
@@ -223,7 +209,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
 
     btn_nav_guide = SidebarButton(
         nav_container,
-        text="Hướ Dẫn",
+        text="Hướng Dẫn",
         icon_text="📖",
     )
     btn_nav_guide.pack(fill="x", pady=2)
@@ -662,43 +648,90 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     widgets["pagination_btn_last"] = btn_last
 
     # --------------------------------------------------------------------------
-    # WORKSPACE 2: YOUTUBE MONITOR WORKSPACE
+    # WORKSPACE 2: YOUTUBE STUDIO (UNIFIED WORKSPACE WITH 3 SUB-TABS)
     # --------------------------------------------------------------------------
     youtube_workspace = ctk.CTkFrame(workspace_container, fg_color="transparent")
     youtube_workspace.grid(row=0, column=0, sticky="nsew")
     youtube_workspace.grid_remove()
+    youtube_workspace.grid_rowconfigure(1, weight=1)
+    youtube_workspace.grid_columnconfigure(0, weight=1)
 
-    youtube_body = ctk.CTkFrame(youtube_workspace, fg_color="transparent")
-    youtube_body.pack(fill="both", expand=True, padx=6, pady=6)
-    youtube_monitor_view = YouTubeMonitorView(youtube_body, handlers.get('youtube_monitor', {}))
+    # Sub-tab Navigation Bar
+    yt_subtab_bar = ctk.CTkFrame(youtube_workspace, corner_radius=10, fg_color=UIThemeTokens.BG_CARD, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT, height=40)
+    yt_subtab_bar.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 4))
+
+    yt_subtab_buttons: Dict[str, ctk.CTkButton] = {}
+    yt_subtabs = [
+        ("monitor", "📡 Giám Sát Tự Động"),
+        ("batch", "📦 Tải Hàng Loạt"),
+        ("history", "📜 Lịch Sử Video"),
+    ]
+
+    # Sub-tab Content Container
+    yt_content_container = ctk.CTkFrame(youtube_workspace, fg_color="transparent")
+    yt_content_container.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
+    yt_content_container.grid_rowconfigure(0, weight=1)
+    yt_content_container.grid_columnconfigure(0, weight=1)
+
+    # Sub-tab 1: Monitor View
+    subtab_monitor_frame = ctk.CTkFrame(yt_content_container, fg_color="transparent")
+    subtab_monitor_frame.grid(row=0, column=0, sticky="nsew")
+    youtube_monitor_view = YouTubeMonitorView(subtab_monitor_frame, handlers.get('youtube_monitor', {}))
     youtube_monitor_view.pack(fill="both", expand=True)
     widgets["youtube_monitor_view"] = youtube_monitor_view
 
-    # --------------------------------------------------------------------------
-    # WORKSPACE 3: BATCH YOUTUBE WORKSPACE
-    # --------------------------------------------------------------------------
-    batch_workspace = ctk.CTkFrame(workspace_container, fg_color="transparent")
-    batch_workspace.grid(row=0, column=0, sticky="nsew")
-    batch_workspace.grid_remove()
-
-    batch_body = ctk.CTkFrame(batch_workspace, fg_color="transparent")
-    batch_body.pack(fill="both", expand=True, padx=6, pady=6)
-    batch_download_view = BatchDownloadView(batch_body, handlers.get('youtube_monitor', {}))
+    # Sub-tab 2: Batch View
+    subtab_batch_frame = ctk.CTkFrame(yt_content_container, fg_color="transparent")
+    subtab_batch_frame.grid(row=0, column=0, sticky="nsew")
+    subtab_batch_frame.grid_remove()
+    batch_download_view = BatchDownloadView(subtab_batch_frame, handlers.get('youtube_monitor', {}))
     batch_download_view.pack(fill="both", expand=True)
     widgets["batch_download_view"] = batch_download_view
 
-    # --------------------------------------------------------------------------
-    # WORKSPACE 4: VIDEO HISTORY WORKSPACE
-    # --------------------------------------------------------------------------
-    history_workspace = ctk.CTkFrame(workspace_container, fg_color="transparent")
-    history_workspace.grid(row=0, column=0, sticky="nsew")
-    history_workspace.grid_remove()
-
-    history_body = ctk.CTkFrame(history_workspace, fg_color="transparent")
-    history_body.pack(fill="both", expand=True, padx=6, pady=6)
-    activity_view = ActivityLogView(history_body, handlers.get('activity', {}))
+    # Sub-tab 3: History View
+    subtab_history_frame = ctk.CTkFrame(yt_content_container, fg_color="transparent")
+    subtab_history_frame.grid(row=0, column=0, sticky="nsew")
+    subtab_history_frame.grid_remove()
+    activity_view = ActivityLogView(subtab_history_frame, handlers.get('activity', {}))
     activity_view.pack(fill="both", expand=True)
     widgets["activity_view"] = activity_view
+
+    yt_subtab_frames = {
+        "monitor": subtab_monitor_frame,
+        "batch": subtab_batch_frame,
+        "history": subtab_history_frame,
+    }
+
+    def _switch_youtube_subtab(subtab_key: str) -> None:
+        if subtab_key not in yt_subtab_frames:
+            subtab_key = "monitor"
+        for key, frame in yt_subtab_frames.items():
+            btn = yt_subtab_buttons.get(key)
+            if key == subtab_key:
+                frame.grid()
+                if btn:
+                    btn.configure(fg_color=UIThemeTokens.ACCENT_PRIMARY, text_color="#ffffff", hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER)
+            else:
+                frame.grid_remove()
+                if btn:
+                    btn.configure(fg_color=UIThemeTokens.BG_HOVER, text_color=UIThemeTokens.TEXT_PRIMARY, hover_color=UIThemeTokens.BORDER_LIGHT)
+
+    for key, label in yt_subtabs:
+        btn = ctk.CTkButton(
+            yt_subtab_bar,
+            text=label,
+            height=28,
+            font=UIThemeTokens.FONT_BUTTON,
+            corner_radius=6,
+            fg_color=UIThemeTokens.ACCENT_PRIMARY if key == "monitor" else UIThemeTokens.BG_HOVER,
+            text_color="#ffffff" if key == "monitor" else UIThemeTokens.TEXT_PRIMARY,
+            hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER if key == "monitor" else UIThemeTokens.BORDER_LIGHT,
+            command=lambda k=key: _switch_youtube_subtab(k),
+        )
+        btn.pack(side="left", padx=4, pady=6)
+        yt_subtab_buttons[key] = btn
+
+    widgets["switch_youtube_subtab"] = _switch_youtube_subtab
 
     # --------------------------------------------------------------------------
     # WORKSPACE 5: MONETIZATION WORKSPACE
@@ -911,15 +944,38 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     workspaces_map = {
         "profiles": (profiles_workspace, btn_nav_profiles),
         "youtube": (youtube_workspace, btn_nav_youtube),
-        "batch": (batch_workspace, btn_nav_batch),
-        "history": (history_workspace, btn_nav_history),
+        "youtube_studio": (youtube_workspace, btn_nav_youtube),
+        "batch": (youtube_workspace, btn_nav_youtube),
+        "history": (youtube_workspace, btn_nav_youtube),
         "monetization": (monetization_workspace, btn_nav_monetization),
         "guide": (guide_workspace, btn_nav_guide),
     }
 
     def switch_workspace(target_name: str) -> None:
-        for name, (ws_frame, nav_btn) in workspaces_map.items():
-            if name == target_name:
+        # Route subtabs if needed
+        if target_name in ("youtube", "monitor"):
+            _switch_youtube_subtab("monitor")
+            target_key = "youtube"
+        elif target_name == "batch":
+            _switch_youtube_subtab("batch")
+            target_key = "youtube"
+        elif target_name == "history":
+            _switch_youtube_subtab("history")
+            target_key = "youtube"
+        elif target_name == "youtube_studio":
+            target_key = "youtube"
+        else:
+            target_key = target_name
+
+        primary_workspaces = {
+            "profiles": (profiles_workspace, btn_nav_profiles),
+            "youtube": (youtube_workspace, btn_nav_youtube),
+            "monetization": (monetization_workspace, btn_nav_monetization),
+            "guide": (guide_workspace, btn_nav_guide),
+        }
+
+        for name, (ws_frame, nav_btn) in primary_workspaces.items():
+            if name == target_key:
                 ws_frame.grid()
                 nav_btn.set_active(True)
             else:
@@ -927,9 +983,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
                 nav_btn.set_active(False)
 
     btn_nav_profiles.configure(command=lambda: switch_workspace("profiles"))
-    btn_nav_youtube.configure(command=lambda: switch_workspace("youtube"))
-    btn_nav_batch.configure(command=lambda: switch_workspace("batch"))
-    btn_nav_history.configure(command=lambda: switch_workspace("history"))
+    btn_nav_youtube.configure(command=lambda: switch_workspace("youtube_studio"))
     btn_nav_monetization.configure(command=lambda: switch_workspace("monetization"))
     btn_nav_guide.configure(command=lambda: switch_workspace("guide"))
 

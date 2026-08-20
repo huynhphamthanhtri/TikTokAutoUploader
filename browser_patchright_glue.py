@@ -182,9 +182,14 @@ def ensure_patchright_profile(config):
             raise ValueError(
                 "Browser profile thuộc tài khoản khác; không được tái sử dụng"
             )
+        if owner and account_id is None:
+            account_id = owner
+            config["account_uuid"] = owner
+            config["profile_owner_state"] = "verified"
         if account_id and owner is None:
             try:
                 set_profile_owner(target, account_id)
+                config["profile_owner_state"] = "verified"
             except Exception:
                 pass
     else:
@@ -255,6 +260,34 @@ def _is_valid_executable(path):
         return bool(path) and Path(path).is_file() and Path(path).stat().st_size > 0
     except OSError:
         return False
+
+
+def _ensure_profile_executable_alias(base_exe_path: str, profile_name: str) -> str:
+    """Create a profile-specific executable alias (NTFS hardlink or copy) on Windows
+    so that Windows Taskbar assigns each profile window its own separate, distinct icon slot
+    and never collapses/groups different profiles into a single icon stack.
+    """
+    if sys.platform != "win32" or not profile_name:
+        return base_exe_path
+    try:
+        base_path = Path(base_exe_path).resolve()
+        if not base_path.exists() or not base_path.is_file():
+            return base_exe_path
+        clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', str(profile_name).strip())
+        if not clean_name:
+            return base_exe_path
+
+        alias_path = base_path.parent / f"donglao_{clean_name}.exe"
+        if not alias_path.exists():
+            try:
+                os.link(base_path, alias_path)
+            except Exception:
+                shutil.copyfile(base_path, alias_path)
+        if alias_path.exists() and alias_path.stat().st_size > 0:
+            return str(alias_path)
+    except Exception:
+        pass
+    return base_exe_path
 
 
 def resolve_browser_executable(app_base=None, profile_name=None):
@@ -347,6 +380,8 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profi
             "Không tìm thấy browser. Hãy tải tài nguyên Browser lần đầu "
             "(nút 'Tải tài nguyên') hoặc cài Google Chrome rồi thử lại."
         )
+    if resolved_pname:
+        executable = _ensure_profile_executable_alias(executable, resolved_pname)
     kwargs["executable_path"] = executable
 
     proxy = None
@@ -645,11 +680,13 @@ def authenticate_session(
     login_state = wait_page_login_state(token, timeout=timeout)
     if login_state == "authenticated":
         return "profile_session"
+    if login_state != "login_required":
+        raise LoginRequiredError(
+            "Không xác minh được trạng thái đăng nhập trên profile; giữ nguyên session và không import cookie dự phòng"
+        )
     if not allow_cookie_fallback:
         raise LoginRequiredError(
             "Profile chưa đăng nhập; hãy dùng 'Mở Chrome' để đăng nhập thủ công"
-            if login_state == "login_required"
-            else "Không xác minh được trạng thái đăng nhập trên profile"
         )
     cookies = parse_cookie(config.get("cookie_str", ""))
     if not cookies:

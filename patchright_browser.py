@@ -338,6 +338,13 @@ class PatchrightBrowser:
             except Exception:
                 pass
 
+            # Isolate Windows taskbar icons per profile (prevents taskbar button grouping/collapsing)
+            try:
+                from taskbar_manager import schedule_taskbar_isolation
+                schedule_taskbar_isolation(str(config.profile_name or Path(profile).parent.name or "profile"))
+            except Exception:
+                pass
+
             pages = list(context.pages)
             page = pages[0] if pages else await context.new_page()
             handle = SessionHandle(session_id, generation, profile, config.mode)
@@ -397,6 +404,9 @@ class PatchrightBrowser:
             await session.context.clear_cookies(domain=_TIKTOK_DOMAIN_PATTERN)
             await session.context.add_cookies(cookies)
             after = await session.context.cookies()
+            report = _build_import_report(cookies, after)
+            if report.auth_requested > 0 and report.auth_accepted == 0:
+                raise RuntimeError("Chromium did not retain any requested TikTok auth cookie")
         except Exception:
             try:
                 await session.context.clear_cookies(domain=_TIKTOK_DOMAIN_PATTERN)
@@ -404,7 +414,6 @@ class PatchrightBrowser:
             except Exception:
                 pass
             raise
-        report = _build_import_report(cookies, after)
         return OperationResult(handle, report)
 
     async def _cancel_session(self, handle: SessionHandle) -> OperationResult:

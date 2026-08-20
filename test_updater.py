@@ -1,7 +1,10 @@
+import re
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+
+from version import __version__
 
 from updater import (
     DEFAULT_RELEASE_NOTES_VI,
@@ -25,14 +28,19 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(normalize_release_notes(""), DEFAULT_RELEASE_NOTES_VI)
 
     def test_check_update_returns_release_metadata(self):
+        current = re.match(r"^(\d+)\.(\d+)\.(\d+)", __version__)
+        assert current is not None, f"__version__ không parse được: {__version__}"
+        major, minor, patch_num = current.groups()
+        next_version = f"{major}.{minor}.{int(patch_num) + 1}"
+        tag = f"v{next_version}"
         release = {
-            "tag_name": "v1.1.2",
-            "name": "Phiên bản 1.1.2",
+            "tag_name": tag,
+            "name": f"Phiên bản {next_version}",
             "body": "## Cải thiện\n- Ổn định hơn",
-            "html_url": "https://github.com/owner/repo/releases/tag/v1.1.2",
+            "html_url": f"https://github.com/owner/repo/releases/tag/{tag}",
             "published_at": "2026-08-18T00:00:00Z",
             "assets": [{
-                "name": "DONGLAO-TIKTOK-v1.1.2.zip",
+                "name": f"DONGLAO-TIKTOK-{tag}.zip",
                 "browser_download_url": "https://example.com/app.zip",
                 "size": 123,
             }],
@@ -41,8 +49,8 @@ class UpdaterTests(unittest.TestCase):
         with patch.object(updater, "get_latest_release", return_value=(release, None)):
             result = updater.check_update()
         self.assertTrue(result["has_update"])
-        self.assertEqual(result["latest_version"], "1.1.2")
-        self.assertEqual(result["release_name"], "Phiên bản 1.1.2")
+        self.assertEqual(result["latest_version"], next_version)
+        self.assertEqual(result["release_name"], f"Phiên bản {next_version}")
         self.assertIn("• Ổn định hơn", result["release_notes"])
         self.assertEqual(result["release_url"], release["html_url"])
 

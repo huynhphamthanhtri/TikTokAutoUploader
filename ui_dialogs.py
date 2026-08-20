@@ -10,8 +10,9 @@ Bao gồm:
 
 from __future__ import annotations
 
+import tkinter as tk
 import customtkinter as ctk
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from core_helpers import parse_proxy_string
 from ui_components import UIThemeTokens, redact_proxy_string, fit_and_center_dialog
@@ -815,3 +816,381 @@ class LicenseModal(ctk.CTkToplevel):
             self.on_close_app()
         else:
             self.destroy()
+
+
+# ==============================================================================
+# 5. SEARCHABLE PROFILE PICKER MODAL
+# ==============================================================================
+
+class SearchableProfilePickerModal(ctk.CTkToplevel):
+    """
+    SearchableProfilePickerModal - Hộp thoại tìm kiếm và gán Profile TikTok cho Kênh YouTube.
+    Thiết kế thuần Presentation, lọc O(N) case-insensitive, hỗ trợ điều hướng bàn phím đầy đủ.
+    """
+
+    def __init__(
+        self,
+        parent: Any,
+        profiles: Sequence[str],
+        current_profile: str = "",
+        channel_title: str = "",
+        channel_id: str = "",
+        on_confirm: Optional[Callable[[str], Tuple[bool, str]]] = None,
+        title_text: Optional[str] = None,
+        header_text: Optional[str] = None,
+        subject_text: Optional[str] = None,
+        confirm_text: Optional[str] = None,
+        return_focus_to: Optional[Any] = None,
+    ):
+        toplevel_parent = parent.winfo_toplevel() if hasattr(parent, "winfo_toplevel") else parent
+        super().__init__(toplevel_parent)
+        self.title(title_text or "Chọn Profile Đích Cho Kênh")
+        fit_and_center_dialog(self, 480, 540, parent=toplevel_parent, min_w=400, min_h=440)
+        self.transient(toplevel_parent)
+        self.grab_set()
+
+        # Immutable snapshot per modal lifecycle
+        self._all_profiles: List[str] = list(dict.fromkeys(
+            str(p).strip() for p in (profiles or []) if str(p).strip()
+        ))
+        self._filtered_profiles: List[str] = list(self._all_profiles)
+        self._iid_to_profile: Dict[str, str] = {}
+        self.current_profile: str = str(current_profile or "").strip()
+        self._pending_selected_profile: Optional[str] = self.current_profile or None
+        self._user_selected_profile: Optional[str] = None
+        self.channel_title: str = str(channel_title or "").strip()
+        self.channel_id: str = str(channel_id or "").strip()
+        self.on_confirm = on_confirm
+        self.header_text = header_text
+        self.subject_text = subject_text
+        self.confirm_text = confirm_text
+        self.return_focus_to = return_focus_to
+        self._is_submitting = False
+        self._closing = False
+
+        self.search_var = ctk.StringVar(value="")
+        self.count_var = ctk.StringVar(value="")
+        self.error_var = ctk.StringVar(value="")
+
+        self._build_ui()
+        self._populate_tree()
+
+        # Keyboard shortcuts and window protocols
+        self.protocol("WM_DELETE_WINDOW", self._handle_cancel)
+        self.bind("<Escape>", lambda _e: self._handle_cancel())
+        self.search_entry.focus_set()
+
+    def _close_modal(self):
+        """Hàm đóng modal thống nhất, giải phóng grab an toàn và schedule focus restoration."""
+        if self._closing:
+            return
+        self._closing = True
+        target = self.return_focus_to
+        owner = self.master if (self.master and hasattr(self.master, "winfo_exists") and self.master.winfo_exists()) else None
+
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+        if target and owner:
+            def _restore_focus():
+                try:
+                    if hasattr(target, "winfo_exists") and target.winfo_exists():
+                        target.focus_set()
+                except (tk.TclError, RuntimeError, Exception):
+                    pass
+            try:
+                if hasattr(owner, "winfo_exists") and owner.winfo_exists():
+                    owner.after_idle(_restore_focus)
+            except (tk.TclError, RuntimeError, Exception):
+                pass
+
+    def _build_ui(self):
+        container = ctk.CTkFrame(self, fg_color="transparent")
+        container.pack(fill="both", expand=True, padx=16, pady=14)
+
+        # 1. Header Card with Channel / Purpose Metadata
+        header_card = ctk.CTkFrame(
+            container,
+            corner_radius=10,
+            fg_color=UIThemeTokens.BG_CARD,
+            border_width=1,
+            border_color=UIThemeTokens.BORDER_LIGHT,
+        )
+        header_card.pack(fill="x", pady=(0, 10))
+
+        h_inner = ctk.CTkFrame(header_card, fg_color="transparent")
+        h_inner.pack(fill="x", padx=12, pady=10)
+
+        header_title = self.header_text or "🔄 ĐỔI PROFILE ĐÍCH CHO KÊNH"
+        ctk.CTkLabel(
+            h_inner,
+            text=header_title,
+            font=UIThemeTokens.FONT_TITLE,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 4))
+
+        if self.subject_text:
+            ctk.CTkLabel(
+                h_inner,
+                text=self.subject_text,
+                font=UIThemeTokens.FONT_BODY,
+                text_color=UIThemeTokens.TEXT_PRIMARY,
+            ).pack(anchor="w")
+        else:
+            display_name = self.channel_title if self.channel_title else (self.channel_id or "Chưa rõ")
+            ctk.CTkLabel(
+                h_inner,
+                text=f"📺 Kênh: {display_name}",
+                font=UIThemeTokens.FONT_BODY,
+                text_color=UIThemeTokens.TEXT_PRIMARY,
+            ).pack(anchor="w")
+
+        curr_text = self.current_profile or "Chưa gán"
+        if self.channel_id:
+            meta_sub = f"ID: {self.channel_id}   |   Hiện tại: {curr_text}"
+        else:
+            meta_sub = f"Đang chọn: {curr_text}"
+        ctk.CTkLabel(
+            h_inner,
+            text=meta_sub,
+            font=UIThemeTokens.FONT_SUBTITLE,
+            text_color=UIThemeTokens.TEXT_MUTED,
+        ).pack(anchor="w", pady=(2, 0))
+
+        # 2. Search Input Box
+        search_card = ctk.CTkFrame(container, fg_color="transparent")
+        search_card.pack(fill="x", pady=(0, 6))
+
+        self.search_entry = ctk.CTkEntry(
+            search_card,
+            textvariable=self.search_var,
+            placeholder_text="🔍 Tìm theo tên profile TikTok...",
+            height=32,
+            font=UIThemeTokens.FONT_BODY,
+        )
+        self.search_entry.pack(fill="x")
+        self.search_var.trace_add("write", lambda *_: self._on_search_change())
+        self.search_entry.bind("<Down>", lambda _e: self._focus_tree())
+        self.search_entry.bind("<Return>", lambda _e: self._on_search_return())
+
+        # 3. Treeview Profile Table
+        from tkinter import ttk
+        table_card = ctk.CTkFrame(
+            container,
+            corner_radius=10,
+            fg_color=UIThemeTokens.BG_CARD,
+            border_width=1,
+            border_color=UIThemeTokens.BORDER_LIGHT,
+        )
+        table_card.pack(fill="both", expand=True, pady=(0, 6))
+        table_card.grid_rowconfigure(0, weight=1)
+        table_card.grid_columnconfigure(0, weight=1)
+
+        self.tree = ttk.Treeview(
+            table_card,
+            style="Modern.Treeview",
+            columns=("profile",),
+            show="headings",
+            selectmode="browse",
+        )
+        self.tree.heading("profile", text="Tên Profile TikTok", anchor="w")
+        self.tree.column("profile", stretch=True, minwidth=180)
+        self.tree.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
+
+        vsb = ttk.Scrollbar(table_card, orient="vertical", command=self.tree.yview)
+        vsb.grid(row=0, column=1, sticky="ns", padx=(0, 6), pady=6)
+        self.tree.configure(yscrollcommand=vsb.set)
+
+        self._select_bind_id = self.tree.bind("<<TreeviewSelect>>", self._on_select)
+        self.tree.bind("<Double-1>", lambda _e: self._do_confirm())
+        self.tree.bind("<Return>", lambda _e: self._do_confirm())
+
+        # 4. Status, Count & Error Info
+        info_row = ctk.CTkFrame(container, fg_color="transparent")
+        info_row.pack(fill="x", pady=(0, 6))
+
+        self.lbl_count = ctk.CTkLabel(
+            info_row,
+            textvariable=self.count_var,
+            font=UIThemeTokens.FONT_BADGE,
+            text_color=UIThemeTokens.TEXT_MUTED,
+        )
+        self.lbl_count.pack(side="left")
+
+        self.lbl_error = ctk.CTkLabel(
+            info_row,
+            textvariable=self.error_var,
+            font=UIThemeTokens.FONT_BADGE,
+            text_color=UIThemeTokens.STATUS_ERROR,
+        )
+        self.lbl_error.pack(side="right")
+
+        # 5. Bottom Action Buttons
+        btn_row = ctk.CTkFrame(container, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(2, 0))
+
+        self.btn_cancel = ctk.CTkButton(
+            btn_row,
+            text="Hủy (Esc)",
+            font=UIThemeTokens.FONT_BUTTON,
+            height=32,
+            width=100,
+            fg_color=UIThemeTokens.BG_HOVER,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+            hover_color=UIThemeTokens.BORDER_LIGHT,
+            command=self._handle_cancel,
+        )
+        self.btn_cancel.pack(side="left")
+
+        self.btn_confirm = ctk.CTkButton(
+            btn_row,
+            text=self.confirm_text or "✓ Xác Nhận Gán",
+            font=UIThemeTokens.FONT_BUTTON,
+            height=32,
+            width=135,
+            fg_color=UIThemeTokens.ACCENT_PRIMARY,
+            hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
+            state="disabled",
+            command=self._do_confirm,
+        )
+        self.btn_confirm.pack(side="right")
+
+    def _populate_tree(self):
+        if getattr(self, "_select_bind_id", None):
+            try:
+                self.tree.unbind("<<TreeviewSelect>>", self._select_bind_id)
+            except Exception:
+                pass
+            self._select_bind_id = None
+
+        try:
+            self.tree.delete(*self.tree.get_children())
+            self._iid_to_profile.clear()
+            total = len(self._all_profiles)
+            filtered_count = len(self._filtered_profiles)
+
+            self.count_var.set(f"Hiển thị {filtered_count} / {total} profile")
+
+            if not self._filtered_profiles:
+                self.btn_confirm.configure(state="disabled")
+                return
+
+            target_profile = self._user_selected_profile if self._user_selected_profile is not None else self._pending_selected_profile
+            target_iid = None
+            for idx, p in enumerate(self._filtered_profiles):
+                iid = f"prof_{idx}"
+                self._iid_to_profile[iid] = p
+                self.tree.insert("", "end", iid=iid, values=(p,))
+                if p == target_profile and target_iid is None:
+                    target_iid = iid
+
+            # Preselect target profile if found, otherwise select first result as visual focus
+            select_iid = target_iid if target_iid else (f"prof_0" if self._filtered_profiles else None)
+            if select_iid and self.tree.exists(select_iid):
+                self.tree.selection_set(select_iid)
+                self.tree.see(select_iid)
+                self.btn_confirm.configure(state="normal")
+            else:
+                self.btn_confirm.configure(state="disabled")
+        finally:
+            self._select_bind_id = self.tree.bind("<<TreeviewSelect>>", self._on_select)
+
+    def _on_search_change(self):
+        query = self.search_var.get().strip().casefold()
+        if not query:
+            self._filtered_profiles = list(self._all_profiles)
+        else:
+            self._filtered_profiles = [p for p in self._all_profiles if query in p.casefold()]
+        self._populate_tree()
+
+    def _focus_tree(self):
+        children = self.tree.get_children()
+        if children:
+            if not self.tree.selection():
+                self.tree.selection_set(children[0])
+            self.tree.focus(self.tree.selection()[0])
+            self.tree.focus_set()
+
+    def _on_search_return(self):
+        sel = self.tree.selection()
+        if sel:
+            self._do_confirm()
+        elif self._filtered_profiles:
+            first_iid = "prof_0"
+            if self.tree.exists(first_iid):
+                self.tree.selection_set(first_iid)
+                self._do_confirm()
+
+    def _on_select(self, _event=None):
+        sel = self.tree.selection()
+        if sel:
+            selected_prof = self._get_selected_profile()
+            if selected_prof:
+                self._user_selected_profile = selected_prof
+            self.btn_confirm.configure(state="normal")
+        else:
+            self.btn_confirm.configure(state="disabled")
+
+    def _get_selected_profile(self) -> Optional[str]:
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        iid = sel[0]
+        return self._iid_to_profile.get(iid)
+
+    def _do_confirm(self):
+        if self._is_submitting or self._closing:
+            return
+
+        selected = self._get_selected_profile()
+        if not selected:
+            self.error_var.set("⚠️ Vui lòng chọn một profile từ danh sách.")
+            return
+
+        if not self.on_confirm:
+            self._close_modal()
+            return
+
+        self._is_submitting = True
+        try:
+            self.btn_confirm.configure(state="disabled")
+            self.error_var.set("")
+        except Exception:
+            pass
+
+        try:
+            ok, msg = self.on_confirm(selected)
+            if ok:
+                self._close_modal()
+            else:
+                if not self._closing and hasattr(self, "error_var") and hasattr(self, "btn_confirm"):
+                    # Nếu profile bị xóa/stale, tự động làm mới danh sách loại bỏ profile này
+                    err_text = str(msg or "Gán profile thất bại")
+                    if "không còn tồn tại" in err_text.lower() or "đã bị xóa" in err_text.lower():
+                        if selected in self._all_profiles:
+                            self._all_profiles = [p for p in self._all_profiles if p != selected]
+                            self._user_selected_profile = None
+                            self._pending_selected_profile = None
+                            self._on_search_change()
+                            # Không auto-select profile khác sau khi bị báo stale
+                            self.tree.selection_remove(*self.tree.selection())
+                    self.error_var.set(f"❌ {err_text}")
+                    self._is_submitting = False
+                    has_selection = bool(self.tree.selection() and self._get_selected_profile())
+                    self.btn_confirm.configure(state="normal" if has_selection else "disabled")
+        except Exception as e:
+            if not self._closing and hasattr(self, "error_var") and hasattr(self, "btn_confirm"):
+                self.error_var.set(f"❌ Lỗi: {e}")
+                self._is_submitting = False
+                has_selection = bool(self.tree.selection() and self._get_selected_profile())
+                self.btn_confirm.configure(state="normal" if has_selection else "disabled")
+
+    def _handle_cancel(self):
+        self._close_modal()

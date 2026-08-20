@@ -197,5 +197,72 @@ class ConfigStoreTests(unittest.TestCase):
         self.assertTrue(config['manual_login_pending'])
 
 
+    def test_save_configs_rotates_backups(self):
+        import tempfile
+        from pathlib import Path
+        from config_store import save_configs_file
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg_path = Path(td) / "configs.json"
+            # Initial write
+            payload1 = {"profiles": {"P1": {}}, "projects": {}}
+            save_configs_file(cfg_path, payload1)
+            self.assertTrue(cfg_path.exists())
+
+            # Second write -> generates .bak
+            payload2 = {"profiles": {"P1": {}, "P2": {}}, "projects": {}}
+            save_configs_file(cfg_path, payload2)
+            bak1 = Path(td) / "configs.json.bak"
+            self.assertTrue(bak1.exists())
+
+            # Third write -> generates .bak.1
+            payload3 = {"profiles": {"P1": {}, "P2": {}, "P3": {}}, "projects": {}}
+            save_configs_file(cfg_path, payload3)
+            bak2 = Path(td) / "configs.json.bak.1"
+            self.assertTrue(bak2.exists())
+
+    def test_truncation_safety_gate_blocks_unsafe_drop(self):
+        import tempfile
+        from pathlib import Path
+        from config_store import save_configs_file
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg_path = Path(td) / "configs.json"
+            # Write 5 profiles
+            payload_5 = {"profiles": {f"P_{i}": {} for i in range(5)}, "projects": {}}
+            save_configs_file(cfg_path, payload_5)
+
+            # Attempt to drop to 1 profile without allow_truncate -> must be blocked
+            payload_1 = {"profiles": {"P_0": {}}, "projects": {}}
+            with self.assertRaises(RuntimeError) as ctx:
+                save_configs_file(cfg_path, payload_1, allow_truncate=False)
+            self.assertIn("DATA PROTECTION", str(ctx.exception))
+
+            # With allow_truncate=True -> succeeds
+            save_configs_file(cfg_path, payload_1, allow_truncate=True)
+
+    def test_load_configs_auto_recovery_from_backup(self):
+        import tempfile
+        from pathlib import Path
+        from config_store import load_configs_file, save_configs_file
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg_path = Path(td) / "configs.json"
+            # Write valid 3 profiles
+            payload = {"profiles": {"P1": {}, "P2": {}, "P3": {}}, "projects": {}}
+            save_configs_file(cfg_path, payload)
+            # Second write to create .bak
+            payload2 = {"profiles": {"P1": {}, "P2": {}, "P3": {}, "P4": {}}, "projects": {}}
+            save_configs_file(cfg_path, payload2)
+
+            # Corrupt the primary file
+            cfg_path.write_text("CORRUPTED_GARBAGE_JSON{{{", encoding="utf-8")
+
+            # load_configs_file should automatically recover from .bak
+            recovered = load_configs_file(cfg_path)
+            self.assertIn("profiles", recovered)
+            self.assertTrue(len(recovered["profiles"]) >= 3)
+
+
 if __name__ == '__main__':
     unittest.main()

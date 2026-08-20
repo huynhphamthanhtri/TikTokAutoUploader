@@ -25,6 +25,8 @@ import requests
 
 DEFAULT_ENGINE_NAME = "donglao-browser-144"
 FALLBACK_ENGINE_NAME = "orbita-browser-144"
+LICENSE_PATCH_OFFSET = 0x58BCD0C
+LICENSE_NOPPED_BYTES = b"\x90" * 6
 
 
 def _app_base_dir() -> Path:
@@ -42,6 +44,102 @@ def get_browser_root_dir(app_base: Optional[Path] = None) -> Path:
     if internal_b_dir.exists():
         return internal_b_dir
     return b_dir
+
+
+def kill_running_browser_processes(app_base: Optional[Path] = None) -> int:
+    """Kill any running browser engine processes originating from the Browser directory."""
+    b_root = str(get_browser_root_dir(app_base).resolve()).lower()
+    killed = 0
+    try:
+        import psutil
+        for p in psutil.process_iter(["pid", "name", "exe"]):
+            try:
+                exe = str(p.info.get("exe") or "").lower()
+                if b_root in exe and any(k in exe for k in ("chrome", "htbrowser", "donglao", "orbita")):
+                    p.kill()
+                    killed += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except Exception:
+        pass
+    return killed
+
+
+def verify_installed_engine_compatibility(app_base: Optional[Path] = None) -> Tuple[bool, str]:
+    """Verify that the primary DONGLAO Browser engine is installed, patched with 6-NOPs, and fully branded."""
+    b_root = get_browser_root_dir(app_base)
+    engine_dir = b_root / DEFAULT_ENGINE_NAME
+    if not engine_dir.exists() or not engine_dir.is_dir():
+        return False, f"Thư mục trình duyệt '{DEFAULT_ENGINE_NAME}' chưa tồn tại."
+
+    chrome_exe = engine_dir / "chrome.exe"
+    if not chrome_exe.exists() or chrome_exe.stat().st_size == 0:
+        return False, "Thiếu tệp thực thi 'chrome.exe' hoặc tệp 0 byte."
+
+    chrome_dll = engine_dir / "144.0.7559.96" / "chrome.dll"
+    if chrome_dll.exists():
+        try:
+            with open(chrome_dll, "rb") as f:
+                f.seek(LICENSE_PATCH_OFFSET)
+                current_bytes = f.read(len(LICENSE_NOPPED_BYTES))
+            if current_bytes != LICENSE_NOPPED_BYTES:
+                return False, "Nhân trình duyệt 'chrome.dll' chưa được vá bản quyền C++ 6-NOPs."
+        except Exception as e:
+            return False, f"Không thể kiểm tra chrome.dll: {e}"
+
+    # Check branding in en-US.pak if present
+    en_pak = engine_dir / "144.0.7559.96" / "Locales" / "en-US.pak"
+    if en_pak.exists():
+        try:
+            data = en_pak.read_bytes()
+            if b"DONGLAO Browser" not in data and b"HT Browser" in data:
+                return False, "Trình duyệt chưa được cập nhật gói nhận diện thương hiệu DONGLAO Browser."
+        except Exception:
+            pass
+
+    return True, "Trình duyệt DONGLAO Browser 144 tương thích 100%."
+
+
+def clean_legacy_browser_engines(app_base: Optional[Path] = None, remove_primary: bool = False) -> List[str]:
+    """Terminate running browser processes and remove legacy or outdated engine directories."""
+    kill_running_browser_processes(app_base)
+    b_root = get_browser_root_dir(app_base)
+    if not b_root.exists():
+        return []
+
+    cleaned: List[str] = []
+    legacy_patterns = [
+        "ht-browser-144",
+        "ht-browser",
+        "orbita-browser-123",
+        "*.old.*",
+        ".engine_*.zip",
+        ".engine-extract-*",
+    ]
+    if remove_primary:
+        legacy_patterns.append(DEFAULT_ENGINE_NAME)
+
+    for item in b_root.iterdir():
+        name = item.name
+        is_target = False
+        if remove_primary and name == DEFAULT_ENGINE_NAME:
+            is_target = True
+        elif name in ("ht-browser-144", "ht-browser", "orbita-browser-123"):
+            is_target = True
+        elif ".old." in name or name.startswith(".engine"):
+            is_target = True
+
+        if is_target:
+            try:
+                if item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+                else:
+                    item.unlink(missing_ok=True)
+                cleaned.append(name)
+            except Exception:
+                pass
+
+    return cleaned
 
 
 def get_local_engine_info(app_base: Optional[Path] = None) -> Dict[str, Any]:

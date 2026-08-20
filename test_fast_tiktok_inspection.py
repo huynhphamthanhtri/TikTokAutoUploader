@@ -27,13 +27,18 @@ class TestFastTikTokInspection(unittest.TestCase):
         except Exception:
             pass
 
-    def test_inspect_worker_non_existent_profile(self):
+    @patch("main.save_configs")
+    @patch("main._save_monetization_cache")
+    def test_inspect_worker_non_existent_profile(self, mock_save_mono, mock_save_cfg):
         res = main._inspect_tiktok_account_worker("__non_existent_profile_xyz__")
         self.assertEqual(res["status"], "ERROR")
         self.assertIn("không tồn tại", res.get("error", "").lower())
 
+    @patch("main.request_profile_refresh")
+    @patch("main._save_monetization_cache")
+    @patch("main.save_configs")
     @patch("tiktok_monetization_client.TikTokMonetizationClient.fetch_all_monetization_data")
-    def test_inspect_worker_success_and_sync(self, mock_fetch):
+    def test_inspect_worker_success_and_sync(self, mock_fetch, mock_save_cfg, mock_save_mono, mock_refresh):
         mock_fetch.return_value = {
             "status": "SUCCESS",
             "profile_name": "Test Profile",
