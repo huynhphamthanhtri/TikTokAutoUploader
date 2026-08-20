@@ -246,7 +246,7 @@ class TestFastPathCoordinatorIntegration(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         ws.configure_delivery_registry(self.root / "ledger.json")
-        self.profile = "TEST_PROFILE"
+        self.profile = "FAST_PATH_TEST_PROFILE"
         import main
         self.main = main
         self.queue = None
@@ -445,7 +445,7 @@ class TestStartupReconcileCutoff(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         ws.configure_delivery_registry(self.root / "ledger.json")
-        self.profile = "TEST_PROFILE"
+        self.profile = "STARTUP_TEST_PROFILE"
         import main
         self.main = main
         self.queue = None
@@ -613,7 +613,7 @@ class TestAccountBlockStopsQueue(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         ws.configure_delivery_registry(self.root / "ledger.json")
-        self.profile = "TEST_PROFILE"
+        self.profile = "ACCOUNT_BLOCK_TEST_PROFILE"
         import main
         self.main = main
         import queue as q
