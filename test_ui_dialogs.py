@@ -11,11 +11,6 @@ from ui_dialogs import BatchSetProxyModal, MonetizationDetailModal, CreateEditPr
 class TestUIDialogs(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        import tkinter as tk
-        default_root = getattr(tk, "_default_root", None)
-        if default_root is not None and default_root.winfo_exists():
-            cls.root = default_root
-            return
         try:
             cls.root = ctk.CTk()
             cls.root.withdraw()
@@ -48,24 +43,27 @@ class TestUIDialogs(unittest.TestCase):
             selected_profiles=["prof_1", "prof_2"],
             on_save=mock_save,
         )
+        try:
+            # Input 2 lines: 1 valid with auth, 1 valid without auth, 1 invalid line
+            raw_text = "1.2.3.4:8080:admin:secretpass\n5.6.7.8:9090\ninvalid_proxy_line"
+            dialog.text_input.insert("1.0", raw_text)
+            valid, invalid = dialog._parse_lines()
 
-        # Input 2 lines: 1 valid with auth, 1 valid without auth, 1 invalid line
-        raw_text = "1.2.3.4:8080:admin:secretpass\n5.6.7.8:9090\ninvalid_proxy_line"
-        dialog.text_input.insert("1.0", raw_text)
-        valid, invalid = dialog._parse_lines()
+            self.assertEqual(len(valid), 2)
+            self.assertEqual(invalid, [3])  # Line 3 is invalid
 
-        self.assertEqual(len(valid), 2)
-        self.assertEqual(invalid, [3])  # Line 3 is invalid
+            dialog._update_preview()
+            preview_content = dialog.preview_box.get("1.0", "end")
+            self.assertNotIn("secretpass", preview_content)
+            self.assertIn("admin:***", preview_content)
 
-        dialog._update_preview()
-        preview_content = dialog.preview_box.get("1.0", "end")
-        self.assertNotIn("secretpass", preview_content)
-        self.assertIn("admin:***", preview_content)
-
-        # Apply save
-        dialog._apply_save()
-        self.assertIn("prof_1", saved_data)
-        self.assertEqual(saved_data["prof_1"]["proxy_string"], "1.2.3.4:8080:admin:secretpass")
+            # Apply save
+            dialog._apply_save()
+            self.assertIn("prof_1", saved_data)
+            self.assertEqual(saved_data["prof_1"]["proxy_string"], "1.2.3.4:8080:admin:secretpass")
+        finally:
+            if dialog.winfo_exists():
+                dialog.destroy()
 
     def test_create_edit_profile_modal_save_contract(self):
         """CreateEditProfileModal packages config and invokes on_save."""
