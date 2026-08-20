@@ -2,12 +2,14 @@
 test_ui_dialogs.py - Unit tests for ui_dialogs.py
 """
 
+import os
 import unittest
 import customtkinter as ctk
 
 from ui_dialogs import BatchSetProxyModal, MonetizationDetailModal, CreateEditProfileModal
 
 
+@unittest.skipIf(os.environ.get("CI", "").lower() == "true", "Interactive Tk dialogs are verified on a desktop runner")
 class TestUIDialogs(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
