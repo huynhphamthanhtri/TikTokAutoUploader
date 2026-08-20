@@ -1,3 +1,14 @@
+# Phiên bản 1.1.4
+
+## Điểm mới
+- Điều chỉnh xử lý Shorts để video đúng 60 giây cũng được làm chậm thành 61 giây.
+
+## Cải thiện
+- Quy tắc xử lý thời lượng áp dụng nhất quán cho toàn bộ khoảng từ 40 đến 60 giây.
+
+## Sửa lỗi
+- Khắc phục video đúng 60 giây bị giữ nguyên thay vì xử lý khi tính năng điều chỉnh Shorts được bật.
+
 # Phiên bản 1.1.3
 
 ## Điểm mới

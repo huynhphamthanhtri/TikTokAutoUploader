@@ -1838,8 +1838,8 @@ def apply_short_processing(downloaded_path, duration, process_short, log_fn=log)
     Rules:
     * ``process_short`` off -> video is kept unchanged.
     * duration ``< 40s``   -> kept unchanged.
-    * duration in ``[40s, 60s)`` -> slowed down to ``SHORT_TARGET_DURATION``.
-    * duration ``>= 60s``  -> kept unchanged.
+    * duration in ``[40s, 60s]`` -> slowed down to ``SHORT_TARGET_DURATION``.
+    * duration ``> 60s``  -> kept unchanged.
     * Unknown duration (``<= 0`` or in the slow window) is re-probed from the
       downloaded file before deciding.
 
@@ -1850,18 +1850,18 @@ def apply_short_processing(downloaded_path, duration, process_short, log_fn=log)
     processed_path, created_paths = downloaded_path, []
 
     if process_short:
-        if dur <= 0 or (SHORT_SLOW_MIN_DURATION <= dur < SHORT_SLOW_MAX_DURATION):
+        if dur <= 0 or (SHORT_SLOW_MIN_DURATION <= dur <= SHORT_SLOW_MAX_DURATION):
             actual_dur = ffmpeg_helper.probe_duration(downloaded_path)
             if actual_dur is not None and actual_dur > 0:
                 dur = actual_dur
 
-        if SHORT_SLOW_MIN_DURATION <= dur < SHORT_SLOW_MAX_DURATION:
+        if SHORT_SLOW_MIN_DURATION <= dur <= SHORT_SLOW_MAX_DURATION:
             log_fn(f"[Short] Video dài {dur:.1f}s (trong khoảng 40s-60s) -> Làm chậm đạt {SHORT_TARGET_DURATION}s")
             processed_path, created_paths = slowdown_to_min_duration_in_temp(downloaded_path, SHORT_TARGET_DURATION)
         elif dur < SHORT_SLOW_MIN_DURATION:
             log_fn(f"[Short] Video dài {dur:.1f}s (< 40s) -> Giữ nguyên thời lượng")
         else:
-            log_fn(f"[Short] Video dài {dur:.1f}s (>= 60s) -> Giữ nguyên thời lượng")
+            log_fn(f"[Short] Video dài {dur:.1f}s (> 60s) -> Giữ nguyên thời lượng")
     else:
         log_fn(f"[Short] Kênh tắt tính năng Short -> Giữ nguyên thời lượng video ({dur:.1f}s)")
 

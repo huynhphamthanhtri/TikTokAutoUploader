@@ -151,12 +151,21 @@ class TestVideoProcessing(unittest.TestCase):
         mock_slow.assert_called_once_with("v59.mp4", SHORT_TARGET_DURATION)
         self.assertEqual(result, ("slow59.mp4", ["slow59.mp4"]))
 
+    @patch("youtube_monitor.core.slowdown_to_min_duration_in_temp", return_value=("slow60.mp4", ["slow60.mp4"]))
+    @patch("youtube_monitor.core.ffmpeg_helper.probe_duration", return_value=None)
+    def test_60s_slowed_to_61s(self, mock_probe, mock_slow):
+        from youtube_monitor.core import apply_short_processing, SHORT_TARGET_DURATION
+        result = apply_short_processing("v60.mp4", 60.0, True)
+        mock_probe.assert_called_once_with("v60.mp4")
+        mock_slow.assert_called_once_with("v60.mp4", SHORT_TARGET_DURATION)
+        self.assertEqual(result, ("slow60.mp4", ["slow60.mp4"]))
+
     @patch("youtube_monitor.core.slowdown_to_min_duration_in_temp")
     @patch("youtube_monitor.core.ffmpeg_helper.probe_duration")
-    def test_60s_kept_unchanged_no_probe(self, mock_probe, mock_slow):
+    def test_60_1s_kept_unchanged_no_probe(self, mock_probe, mock_slow):
         from youtube_monitor.core import apply_short_processing
-        result = apply_short_processing("v60.mp4", 60.0, True)
-        self.assertEqual(result, ("v60.mp4", []))
+        result = apply_short_processing("v60_1.mp4", 60.1, True)
+        self.assertEqual(result, ("v60_1.mp4", []))
         mock_probe.assert_not_called()
         mock_slow.assert_not_called()
 
