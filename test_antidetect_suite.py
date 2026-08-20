@@ -3,6 +3,8 @@ test_antidetect_suite.py - Unit tests for Anti-Detect Engine upgrades.
 """
 
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from vibe_stealth_engine import (
@@ -22,12 +24,15 @@ from browser_patchright_glue import build_session_config, SessionMode
 class TestAntiDetectSuite(unittest.TestCase):
     def test_no_expose_gc_in_launch_args(self):
         """Verify that --expose-gc is strictly excluded from launch args."""
-        dummy_config = {
-            "browser_profile_path": "e:\\dummy\\path",
-            "headless": True,
-            "browser_executable": "e:\\dummy\\chrome.exe",
-        }
-        session_cfg = build_session_config(dummy_config)
+        with tempfile.TemporaryDirectory() as temporary:
+            profile_path = Path(temporary) / "profile"
+            profile_path.mkdir()
+            dummy_config = {
+                "browser_profile_path": str(profile_path),
+                "headless": True,
+                "browser_executable": str(Path(temporary) / "chrome.exe"),
+            }
+            session_cfg = build_session_config(dummy_config)
         args_str = " ".join(session_cfg.args)
         self.assertNotIn("--expose-gc", args_str, "--expose-gc must NOT be present in launch args (triggers bot detection)")
         # Make sure --max-old-space-size=256 is still retained for RAM management
@@ -35,12 +40,15 @@ class TestAntiDetectSuite(unittest.TestCase):
 
     def test_webrtc_protection_flags_in_launch_args(self):
         """Verify WebRTC anti-leak flags are present in Chromium args."""
-        dummy_config = {
-            "browser_profile_path": "e:\\dummy\\path",
-            "headless": True,
-            "browser_executable": "e:\\dummy\\chrome.exe",
-        }
-        session_cfg = build_session_config(dummy_config)
+        with tempfile.TemporaryDirectory() as temporary:
+            profile_path = Path(temporary) / "profile"
+            profile_path.mkdir()
+            dummy_config = {
+                "browser_profile_path": str(profile_path),
+                "headless": True,
+                "browser_executable": str(Path(temporary) / "chrome.exe"),
+            }
+            session_cfg = build_session_config(dummy_config)
         self.assertIn("--force-webrtc-ip-handling-policy=disable_non_proxied_udp", session_cfg.args)
         self.assertIn("--disable-webrtc-multiple-routes", session_cfg.args)
 

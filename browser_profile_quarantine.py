@@ -106,7 +106,8 @@ def _validate_owned_profile(profile):
     if not profile.is_dir() or profile.name != "Profile-Patchright":
         raise ValueError("Invalid Patchright profile directory: {}".format(profile))
     marker_data = _load_marker(profile)
-    if marker_data.get("patchright_profile") != str(profile):
+    marker_profile = marker_data.get("patchright_profile")
+    if not marker_profile or _canonical(marker_profile) != profile:
         raise ValueError("Patchright ownership marker path does not match")
     return profile, marker_data
 
@@ -182,7 +183,8 @@ def read_quarantine_manifest(quarantine_dir):
         raise ValueError("Quarantine manifest is invalid") from exc
     if not isinstance(data, dict):
         raise ValueError("Quarantine manifest must be a JSON object")
-    if data.get("quarantine_path") != str(quarantine):
+    manifest_quarantine = data.get("quarantine_path")
+    if not manifest_quarantine or _canonical(manifest_quarantine) != quarantine:
         raise ValueError("Quarantine manifest path does not match")
     return data
 

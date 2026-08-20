@@ -72,7 +72,7 @@ class TestBrowserEngineManager(unittest.TestCase):
             ht_exe.write_bytes(b"x")
 
             resolved = glue.resolve_browser_executable(app_base=base)
-            self.assertEqual(resolved, str(ht_exe))
+            self.assertTrue(os.path.samefile(resolved, ht_exe))
 
     def test_resolve_browser_executable_prefers_donglao_144(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -94,7 +94,7 @@ class TestBrowserEngineManager(unittest.TestCase):
             chrome64_exe.write_bytes(b"x")
 
             resolved = glue.resolve_browser_executable(app_base=base)
-            self.assertEqual(resolved, str(donglao_exe))
+            self.assertTrue(os.path.samefile(resolved, donglao_exe))
 
     def test_get_local_engine_info_prefers_donglao_144(self):
         with tempfile.TemporaryDirectory() as temp_dir:

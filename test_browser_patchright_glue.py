@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -125,10 +126,10 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
             chrome64_exe.write_bytes(b"x")
 
             with patch("profile_config_engine.find_ttm_profile_config", return_value={"license_key": "dummy"}):
-                self.assertEqual(
+                self.assertTrue(os.path.samefile(
                     glue.resolve_browser_executable(app_base=temporary, profile_name="AUTO 22"),
-                    str(orbita_exe),
-                )
+                    orbita_exe,
+                ))
 
     def test_resolve_chrome_win64_first(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -136,10 +137,7 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
             browser.mkdir(parents=True)
             exe = browser / "chrome.exe"
             exe.write_bytes(b"x")
-            self.assertEqual(
-                glue.resolve_browser_executable(app_base=temporary),
-                str(exe),
-            )
+            self.assertTrue(os.path.samefile(glue.resolve_browser_executable(app_base=temporary), exe))
 
     def test_resolve_bundled_beats_system_chrome(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -150,10 +148,7 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
             with patch.object(
                 glue, "_find_system_chrome_executable", return_value=r"C:\system\chrome.exe"
             ):
-                self.assertEqual(
-                    glue.resolve_browser_executable(app_base=temporary),
-                    str(bundled),
-                )
+                self.assertTrue(os.path.samefile(glue.resolve_browser_executable(app_base=temporary), bundled))
 
     def test_resolve_falls_back_to_system_chrome(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -183,10 +178,7 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
             browser.mkdir(parents=True)
             exe = browser / "chrome.exe"
             exe.write_bytes(b"x")
-            self.assertEqual(
-                glue.resolve_browser_executable(app_base=temporary),
-                str(exe),
-            )
+            self.assertTrue(os.path.samefile(glue.resolve_browser_executable(app_base=temporary), exe))
 
     def test_profile_creation_and_resume_after_legacy_delete(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -199,7 +191,7 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
             legacy.rmdir()
             resumed = Path(glue.ensure_patchright_profile(config))
 
-            self.assertEqual(resumed, target)
+            self.assertTrue(os.path.samefile(resumed, target))
             self.assertTrue(target.is_dir())
             self.assertFalse(legacy.exists())
 
@@ -213,7 +205,7 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
 
             resumed = Path(glue.ensure_patchright_profile(config))
 
-            self.assertEqual(resumed, target)
+            self.assertTrue(os.path.samefile(resumed, target))
             self.assertEqual(config["account_uuid"], "owner-uuid")
             self.assertEqual(config["profile_owner_state"], "verified")
 

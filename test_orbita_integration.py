@@ -80,10 +80,10 @@ class TestOrbitaIntegration(unittest.TestCase):
             chrome64_exe.write_bytes(b"x")
 
             resolved = glue.resolve_browser_executable(app_base=base, profile_name="AUTO 22")
-            self.assertEqual(resolved, str(orbita_exe))
+            self.assertTrue(os.path.samefile(resolved, orbita_exe))
 
             resolved_standalone = glue.resolve_browser_executable(app_base=base, profile_name="STANDALONE_PROFILE")
-            self.assertEqual(resolved_standalone, str(orbita_exe))
+            self.assertTrue(os.path.samefile(resolved_standalone, orbita_exe))
 
     def test_proxy_obj_normalization_formats(self):
         """Verify proxy object normalization handles both server URL format and host/port format."""
