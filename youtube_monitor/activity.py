@@ -176,7 +176,15 @@ def remember_download(file_path, video_id, title="", channel_id="", profile=""):
         _save_download_index(data)
 
 
-def lookup_download(file_path):
+def lookup_download(file_path, allow_basename_fallback=True):
+    """Return stored download metadata for a file.
+
+    Exact canonical-path matches always win. The basename fallback exists for legacy
+    callers (activity logging), but it is unsafe for startup reconciliation because a file
+    with the same basename in another profile/folder would be mistaken for this file.
+    Startup scans must pass ``allow_basename_fallback=False`` so only an exact path match
+    is trusted.
+    """
     if not file_path:
         return {}
     target = os.path.abspath(str(file_path))
@@ -184,6 +192,8 @@ def lookup_download(file_path):
         data = _load_download_index()
     if target in data and isinstance(data[target], dict):
         return dict(data[target])
+    if not allow_basename_fallback:
+        return {}
     target_name = os.path.basename(target).lower()
     for path, meta in data.items():
         if os.path.basename(str(path)).lower() == target_name and isinstance(meta, dict):

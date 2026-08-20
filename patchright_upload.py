@@ -134,6 +134,19 @@ OUTCOMES = frozenset(
     }
 )
 
+# Rejection scope classifier: tells the caller whether a confirmed rejection applies to
+# the whole account or only to one video. Only explicit, evidence-based account-level
+# patterns are ever classified as account_posting_blocked; a generic per-video rejection
+# must never be inferred as an account ban.
+REJECTION_SCOPE_ACCOUNT_BLOCKED = "account_posting_blocked"
+REJECTION_SCOPE_VIDEO = "video_rejected"
+REJECTION_SCOPE_UNKNOWN = "unknown_rejection"
+
+# New patterns are only added when backed by a real payload / official documentation.
+ACCOUNT_POSTING_BLOCK_PATTERNS = (
+    re.compile(r"temporarily\s+prevented\s+from\s+posting", re.IGNORECASE),
+)
+
 
 @dataclass(frozen=True)
 class UploadTimeouts:
@@ -350,6 +363,7 @@ async def upload_tiktok(
         paths = await _capture_diagnostics(page, path.name, diagnostics_dir, await _collect_upload_metadata(page))
         return result("login_required", str(error), diagnostic_paths=paths)
     except _Rejected as error:
+        response_state["rejection_scope"] = classify_rejection(response_state)
         paths = await _capture_diagnostics(page, path.name, diagnostics_dir, await _collect_upload_metadata(page))
         return result("rejected", str(error), diagnostic_paths=paths, confirmation="network_or_dom_rejection")
     except _Cancelled:
@@ -665,6 +679,27 @@ def _rejection_message(state: Mapping[str, Any]) -> str:
         if detail:
             return f"TikTok rejected the post: {detail}"
     return f"TikTok rejected the post (HTTP {state.get('http_status', 'unknown')}, status_code={state.get('status_code')})"
+
+
+def classify_rejection(state: Mapping[str, Any]) -> str:
+    """Classify a confirmed TikTok rejection into an account-level or per-video scope.
+
+    Reads only the already-captured, non-sensitive response_state (payload text, HTTP
+    status). An explicit account posting block (e.g. ``temporarily prevented from
+    posting``) maps to REJECTION_SCOPE_ACCOUNT_BLOCKED. A rejection message that is not
+    account-level maps to REJECTION_SCOPE_VIDEO; a rejection with no message at all maps
+    to REJECTION_SCOPE_UNKNOWN. Generic rejections are never upgraded to account blocks.
+    """
+    payload = state.get("payload")
+    text = ""
+    if isinstance(payload, dict):
+        text = str(payload.get("status_msg") or payload.get("message") or "")
+    text = text.strip().lower()
+    if any(pattern.search(text) for pattern in ACCOUNT_POSTING_BLOCK_PATTERNS):
+        return REJECTION_SCOPE_ACCOUNT_BLOCKED
+    if text:
+        return REJECTION_SCOPE_VIDEO
+    return REJECTION_SCOPE_UNKNOWN
 
 
 async def _collect_upload_metadata(page: Any) -> dict[str, Any]:

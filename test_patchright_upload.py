@@ -73,6 +73,17 @@ class FakeResponse:
         return {"status_code": 0}
 
 
+class FakeRejectedResponse(FakeResponse):
+    def __init__(self, payload, status=400):
+        self.url = FakeResponse.url
+        self.status = status
+        self.request = FakeRequest()
+        self._payload = payload
+
+    async def json(self):
+        return self._payload
+
+
 class FakePostRequest:
     method = "POST"
     url = "https://www.tiktok.com/api/v1/tiktok/web/project/post/submit"
@@ -484,6 +495,85 @@ class PatchrightUploadTests(unittest.IsolatedAsyncioTestCase):
         meta_path = next(Path(path) for path in result.diagnostic_paths if path.endswith(".json"))
         payload = __import__("json").loads(meta_path.read_text(encoding="utf-8"))
         self.assertEqual(payload["visible_dialogs"], [dialog_snapshot])
+
+    def test_classify_rejection_scope_categories(self):
+        from patchright_upload import (
+            REJECTION_SCOPE_ACCOUNT_BLOCKED,
+            REJECTION_SCOPE_UNKNOWN,
+            REJECTION_SCOPE_VIDEO,
+            classify_rejection,
+        )
+        # Real payload captured from TikTok account-posting block.
+        account = {
+            "payload": {
+                "status_code": 40000,
+                "status_msg": "Due to multiple Community Guideline violations, you're temporarily prevented from posting.",
+            },
+            "http_status": 200,
+        }
+        self.assertEqual(classify_rejection(account), REJECTION_SCOPE_ACCOUNT_BLOCKED)
+        # Generic per-video rejection must never be inferred as an account block.
+        generic = {"payload": {"status_msg": "Could not upload this video"}, "http_status": 400}
+        self.assertEqual(classify_rejection(generic), REJECTION_SCOPE_VIDEO)
+        # A rejection without any message is unknown, not an account block.
+        unknown = {"http_status": 400}
+        self.assertEqual(classify_rejection(unknown), REJECTION_SCOPE_UNKNOWN)
+
+    async def test_account_posting_block_classified_end_to_end(self):
+        page = FakePage()
+        payload = {
+            "status_code": 40000,
+            "status_msg": "Due to multiple Community Guideline violations, you're temporarily prevented from posting.",
+        }
+        page.post_button.on_click = lambda: page.emit_response(FakeRejectedResponse(payload, status=400))
+
+        result = await upload_tiktok(
+            page,
+            self.video,
+            timeouts=self.timeouts,
+            diagnostics_dir=None,
+        )
+
+        self.assertEqual(result.outcome, "rejected")
+        self.assertEqual(result.details.get("rejection_scope"), "account_posting_blocked")
+        self.assertEqual(page.post_button.clicks, 1)
+        self.assertIn("temporarily prevented from posting", result.message)
+        # No sensitive payload (cookies/tokens/body) leaks into the result details.
+        serialized = str(result.details)
+        self.assertNotIn("cookie", serialized.lower())
+        self.assertNotIn("sessionid", serialized.lower())
+        self.assertNotIn("csrf", serialized.lower())
+
+    async def test_generic_rejection_not_classified_as_account_block(self):
+        page = FakePage()
+        payload = {"status_code": 40001, "status_msg": "Could not upload this video"}
+        page.post_button.on_click = lambda: page.emit_response(FakeRejectedResponse(payload, status=400))
+
+        result = await upload_tiktok(
+            page,
+            self.video,
+            timeouts=self.timeouts,
+            diagnostics_dir=None,
+        )
+
+        self.assertEqual(result.outcome, "rejected")
+        self.assertEqual(result.details.get("rejection_scope"), "video_rejected")
+        self.assertEqual(page.post_button.clicks, 1)
+
+    async def test_dom_rejection_without_payload_is_unknown_scope(self):
+        page = FakePage()
+        page.locators[SELECTORS["rejection"]] = FakeLocator([FakeElement(text="Could not upload")])
+
+        result = await upload_tiktok(
+            page,
+            self.video,
+            timeouts=self.timeouts,
+            diagnostics_dir=None,
+        )
+
+        self.assertEqual(result.outcome, "rejected")
+        self.assertEqual(result.details.get("rejection_scope"), "unknown_rejection")
+        self.assertEqual(page.post_button.clicks, 1)
 
 
 if __name__ == "__main__":

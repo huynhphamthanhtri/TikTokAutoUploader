@@ -382,7 +382,7 @@ class TestFastPathCoordinatorIntegration(unittest.TestCase):
         known.write_bytes(b"k")
         unknown.write_bytes(b"m")
         original_lookup = self.main.lookup_download
-        self.main.lookup_download = lambda path: {
+        self.main.lookup_download = lambda path, allow_basename_fallback=False: {
             "channel_id": "UC_K",
             "video_id": "vid_k",
             "title": "known",
@@ -431,6 +431,312 @@ class TestFastPathCoordinatorIntegration(unittest.TestCase):
         self.assertTrue(released, "stale item must be released for re-claim")
         self.assertEqual(stale_item.lifecycle_generation, current_gen)
         self.assertGreater(get_lifecycle(self.profile).generation, current_gen)
+
+
+class TestStartupReconcileCutoff(unittest.TestCase):
+    """Startup scan must not adopt files that pre-date watching, and never trusts the
+    download-index basename fallback. Only genuinely-new files or a matching
+    WAITING_PROFILE record for the same profile may be adopted."""
+
+    def setUp(self):
+        import watchdog_service as ws
+        with ws._DELIVERY_REGISTRY_LOCK:
+            ws._GLOBAL_DELIVERY_REGISTRY = None
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        ws.configure_delivery_registry(self.root / "ledger.json")
+        self.profile = "TEST_PROFILE"
+        import main
+        self.main = main
+        self.queue = None
+        main.profiles[self.profile] = {
+            'running': False,
+            'queue': self.queue,
+            'config': {},
+        }
+        from browser_lifecycle import get_lifecycle, remove_lifecycle
+        lc = get_lifecycle(self.profile)
+        lc.begin()
+        self.generation = lc.generation
+
+    def tearDown(self):
+        import main
+        main.profiles.pop(self.profile, None)
+        try:
+            from browser_lifecycle import remove_lifecycle
+            remove_lifecycle(self.profile)
+        except Exception:
+            pass
+        import watchdog_service as ws
+        with ws._DELIVERY_REGISTRY_LOCK:
+            ws._GLOBAL_DELIVERY_REGISTRY = None
+        self.tmp.cleanup()
+
+    def _start(self, watch_started_at):
+        import queue as q
+        self.queue = q.Queue()
+        self.main.profiles[self.profile]['queue'] = self.queue
+        self.main.profiles[self.profile]['running'] = True
+        self.main.profiles[self.profile]['watch_started_at'] = watch_started_at
+        return self.queue
+
+    def _old_file(self, name):
+        p = self.root / name
+        p.write_bytes(b"old")
+        past = time.time() - 3600
+        os.utime(p, (past, past))
+        return p
+
+    def test_old_file_without_record_is_skipped_and_no_record_created(self):
+        self._start(watch_started_at=time.time())
+        old = self._old_file("old.mp4")
+        original_lookup = self.main.lookup_download
+        self.main.lookup_download = lambda path, allow_basename_fallback=False: None
+        try:
+            adopted = self.main._reconcile_startup_folder(
+                self.profile, str(self.root), get_lifecycle(self.profile).generation
+            )
+        finally:
+            self.main.lookup_download = original_lookup
+        self.assertEqual(adopted, 0)
+        self.assertTrue(self.queue.empty())
+        self.assertIsNone(get_delivery_registry().get_delivery(old))
+
+    def test_old_file_with_metadata_is_still_skipped(self):
+        self._start(watch_started_at=time.time())
+        old = self._old_file("old_meta.mp4")
+        original_lookup = self.main.lookup_download
+        self.main.lookup_download = lambda path, allow_basename_fallback=False: {
+            "channel_id": "UC_X", "video_id": "vid_old", "title": "old",
+        } if str(path) == str(old) else None
+        try:
+            adopted = self.main._reconcile_startup_folder(
+                self.profile, str(self.root), get_lifecycle(self.profile).generation
+            )
+        finally:
+            self.main.lookup_download = original_lookup
+        self.assertEqual(adopted, 0)
+        self.assertTrue(self.queue.empty())
+
+    def test_new_file_with_metadata_is_enqueued(self):
+        watch_started_at = time.time() - 3600  # profile began watching an hour ago
+        self._start(watch_started_at=watch_started_at)
+        fresh = self.root / "fresh.mp4"
+        fresh.write_bytes(b"new")
+        original_lookup = self.main.lookup_download
+        self.main.lookup_download = lambda path, allow_basename_fallback=False: {
+            "channel_id": "UC_N", "video_id": "vid_new", "title": "fresh",
+        } if str(path) == str(fresh) else None
+        try:
+            adopted = self.main._reconcile_startup_folder(
+                self.profile, str(self.root), get_lifecycle(self.profile).generation
+            )
+        finally:
+            self.main.lookup_download = original_lookup
+        self.assertEqual(adopted, 1)
+        rec = get_delivery_registry().get_delivery(fresh)
+        self.assertEqual(rec.state, DeliveryState.ENQUEUED)
+        self.assertFalse(self.queue.empty())
+
+    def test_waiting_profile_record_is_recovered_even_when_old(self):
+        self._start(watch_started_at=time.time())
+        waiting = self._old_file("waiting.mp4")
+        get_delivery_registry().mark_waiting_profile(str(waiting), self.profile, source="FAST_PATH")
+        adopted = self.main._reconcile_startup_folder(
+            self.profile, str(self.root), get_lifecycle(self.profile).generation
+        )
+        self.assertEqual(adopted, 1)
+        self.assertFalse(self.queue.empty())
+
+    def test_waiting_profile_for_other_profile_is_not_recovered(self):
+        self._start(watch_started_at=time.time())
+        waiting = self._old_file("foreign.mp4")
+        get_delivery_registry().mark_waiting_profile(str(waiting), "OTHER_PROFILE", source="FAST_PATH")
+        adopted = self.main._reconcile_startup_folder(
+            self.profile, str(self.root), get_lifecycle(self.profile).generation
+        )
+        self.assertEqual(adopted, 0)
+        self.assertTrue(self.queue.empty())
+
+    def test_tombstones_are_never_readopted(self):
+        self._start(watch_started_at=time.time())
+        for name, outcome in (("posted.mp4", DeliveryOutcome.POSTED),
+                              ("rejected.mp4", DeliveryOutcome.REJECTED),
+                              ("uncertain.mp4", DeliveryOutcome.POST_UNCERTAIN)):
+            p = self._old_file(name)
+            ok, _ = self.main.enqueue_video(self.profile, str(p), source="FAST_PATH")
+            self.assertTrue(ok)
+            get_delivery_registry().complete_delivery(str(p), outcome, post_dispatched=True)
+            self.assertEqual(get_delivery_registry().get_delivery(p).state, DeliveryState.TERMINAL)
+        # Drain the enqueue artifacts: the queue items were never consumed by a worker.
+        while not self.queue.empty():
+            self.queue.get_nowait()
+            self.queue.task_done()
+        adopted = self.main._reconcile_startup_folder(
+            self.profile, str(self.root), get_lifecycle(self.profile).generation
+        )
+        self.assertEqual(adopted, 0)
+        self.assertTrue(self.queue.empty())
+
+    def test_basename_collision_is_not_resolved_in_strict_mode(self):
+        import youtube_monitor.activity as activity
+        old_index = activity.DOWNLOAD_INDEX_JSON
+        try:
+            activity.DOWNLOAD_INDEX_JSON = self.root / "download_index.json"
+            real = self.root / "proj_a" / "clip.mp4"
+            real.parent.mkdir(parents=True, exist_ok=True)
+            activity.remember_download(str(real), "vid_real", title="real", profile="A")
+            decoy = self.root / "proj_b" / "clip.mp4"
+            decoy.parent.mkdir(parents=True, exist_ok=True)
+            activity.remember_download(str(decoy), "vid_decoy", title="decoy", profile="B")
+            imposter = self.root / "proj_c" / "clip.mp4"
+            imposter.parent.mkdir(parents=True, exist_ok=True)
+            # Legacy loose lookup wrongly resolves another profile's file by basename.
+            loose = activity.lookup_download(str(imposter))
+            self.assertTrue(loose, "legacy basename fallback resolves an unrelated file")
+            # Strict lookup must never resolve a path that was not stored exactly.
+            strict = activity.lookup_download(str(imposter), allow_basename_fallback=False)
+            self.assertEqual(strict, {})
+        finally:
+            activity.DOWNLOAD_INDEX_JSON = old_index
+
+
+class TestAccountBlockStopsQueue(unittest.TestCase):
+    """When TikTok explicitly reports an account-level posting block, the current video is
+    REJECTED and the queue is halted: no further Post dispatch, remaining files kept and
+    released to a recoverable state. Generic per-video rejections must NOT stop the queue."""
+
+    def setUp(self):
+        import watchdog_service as ws
+        with ws._DELIVERY_REGISTRY_LOCK:
+            ws._GLOBAL_DELIVERY_REGISTRY = None
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        ws.configure_delivery_registry(self.root / "ledger.json")
+        self.profile = "TEST_PROFILE"
+        import main
+        self.main = main
+        import queue as q
+        self.queue = q.Queue()
+        main.profiles[self.profile] = {
+            'running': True,
+            'queue': self.queue,
+            'config': {},
+            'uploads_today_count': 0,
+        }
+        from browser_lifecycle import get_lifecycle, remove_lifecycle
+        lc = get_lifecycle(self.profile)
+        lc.begin()
+        self.generation = lc.generation
+        # stop_profile() is license-gated in production; bypass the gate for the queue test.
+        self._license_required = main.LICENSE_REQUIRED
+        main.LICENSE_REQUIRED = False
+
+    def tearDown(self):
+        import main
+        main.LICENSE_REQUIRED = self._license_required
+        main.profiles.pop(self.profile, None)
+        try:
+            from browser_lifecycle import remove_lifecycle
+            remove_lifecycle(self.profile)
+        except Exception:
+            pass
+        import watchdog_service as ws
+        with ws._DELIVERY_REGISTRY_LOCK:
+            ws._GLOBAL_DELIVERY_REGISTRY = None
+        self.tmp.cleanup()
+
+    def _enqueue(self, name):
+        p = self.root / name
+        p.write_bytes(b"data")
+        ok, reason = self.main.enqueue_video(self.profile, str(p), source="FAST_PATH")
+        self.assertTrue(ok, reason)
+        return p
+
+    def _run_worker_until_stopped(self):
+        thread = threading.Thread(target=self.main.process_video_queue_thread, args=(self.profile,), daemon=True)
+        thread.start()
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if not self.main.profiles[self.profile].get('running', False):
+                break
+            time.sleep(0.05)
+        thread.join(timeout=5)
+        return thread
+
+    def test_account_blocked_stops_queue_and_keeps_remaining_files(self):
+        v1 = self._enqueue("one.mp4")
+        v2 = self._enqueue("two.mp4")
+        calls = []
+        original_upload = self.main.upload_video
+        original_complete = self.main._complete_delivery_from_upload
+
+        def fake_upload(profile_name, video_path):
+            calls.append(str(video_path))
+            result = SimpleNamespace(
+                outcome="rejected",
+                post_dispatched=False,
+                message=("TikTok rejected the post: Due to multiple Community Guideline "
+                         "violations, you're temporarily prevented from posting."),
+                details={"rejection_scope": "account_posting_blocked", "http_status": 200},
+            )
+            original_complete(str(video_path), result, result.message, False)
+            return "account_blocked"
+
+        self.main.upload_video = fake_upload
+        try:
+            thread = self._run_worker_until_stopped()
+        finally:
+            self.main.upload_video = original_upload
+        self.assertFalse(self.main.profiles[self.profile].get('running', False))
+        # Exactly one upload attempt: the account block halts the queue immediately.
+        self.assertEqual(calls, [str(v1)])
+        # Current video is a REJECTED tombstone.
+        rec1 = get_delivery_registry().get_delivery(v1)
+        self.assertEqual(rec1.state, DeliveryState.TERMINAL)
+        self.assertEqual(rec1.outcome, DeliveryOutcome.REJECTED)
+        # Remaining video was released to a recoverable state and its file kept.
+        rec2 = get_delivery_registry().get_delivery(v2)
+        self.assertEqual(rec2.state, DeliveryState.DISCOVERED)
+        self.assertTrue(v1.exists())
+        self.assertTrue(v2.exists())
+        self.assertEqual(self.main.profiles[self.profile]['uploads_today_count'], 0)
+
+    def test_generic_rejection_does_not_stop_the_queue(self):
+        v1 = self._enqueue("gen_one.mp4")
+        v2 = self._enqueue("gen_two.mp4")
+        calls = []
+        original_upload = self.main.upload_video
+        original_complete = self.main._complete_delivery_from_upload
+
+        def fake_upload(profile_name, video_path):
+            calls.append(str(video_path))
+            result = SimpleNamespace(
+                outcome="rejected",
+                post_dispatched=False,
+                message="TikTok rejected the post: Something went wrong",
+                details={"rejection_scope": "video_rejected"},
+            )
+            original_complete(str(video_path), result, result.message, False)
+            return False
+
+        self.main.upload_video = fake_upload
+        try:
+            thread = threading.Thread(target=self.main.process_video_queue_thread, args=(self.profile,), daemon=True)
+            thread.start()
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if set(calls) == {str(v1), str(v2)}:
+                    break
+                time.sleep(0.05)
+            self.main.profiles[self.profile]['running'] = False
+            thread.join(timeout=5)
+        finally:
+            self.main.upload_video = original_upload
+        # Both videos were attempted: a generic rejection does not halt the queue.
+        self.assertEqual(set(calls), {str(v1), str(v2)})
+        self.assertTrue(v1.exists())
+        self.assertTrue(v2.exists())
 
 
 if __name__ == "__main__":

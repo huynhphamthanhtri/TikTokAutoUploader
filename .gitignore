@@ -14,6 +14,8 @@ dist/
 # Runtime data
 configs.json
 configs.json.*-backup-*.json
+delivery_ledger.json
+delivery_ledger.json.bak
 anti_detect_report.json
 youtube_config.json
 channels.json

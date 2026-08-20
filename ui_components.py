@@ -293,29 +293,51 @@ class ProjectList(ctk.CTkScrollableFrame):
 
     def update_projects(self, project_counts: Dict[str, int], active_project: str = "Tất cả") -> None:
         self._active_project = active_project
-        # Clear existing buttons
-        for btn in self._buttons.values():
-            btn.destroy()
-        self._buttons.clear()
+        incoming = dict(project_counts)
 
-        # Render list of projects
-        for name, count in project_counts.items():
+        # Keyed reconciliation: never destroy/recreate buttons that already exist.
+        # Destroying CTk buttons on every refresh is what races their <Configure>
+        # redraw and yields "invalid command name ... ctkcanvas" TclErrors.
+
+        # 1. Destroy buttons only for projects that no longer exist.
+        for name in [n for n in self._buttons if n not in incoming]:
+            btn = self._buttons.pop(name)
+            try:
+                if btn.winfo_exists():
+                    btn.pack_forget()
+                    btn.destroy()
+            except Exception:
+                pass
+
+        # 2. Reconcile in incoming order: create new buttons, update existing in place.
+        for name, count in incoming.items():
             btn_text = f"{name} ({count})"
             is_active = (name == active_project)
-            btn = ctk.CTkButton(
-                self,
-                text=btn_text,
-                anchor="w",
-                height=32,
-                corner_radius=6,
-                font=UIThemeTokens.FONT_BUTTON,
-                fg_color=UIThemeTokens.BG_SIDEBAR_ACTIVE if is_active else "transparent",
-                text_color=UIThemeTokens.TEXT_SIDEBAR_ACTIVE if is_active else UIThemeTokens.TEXT_SIDEBAR,
-                hover_color=UIThemeTokens.BG_SIDEBAR_HOVER,
-                command=lambda p=name: self._on_clicked(p),
-            )
-            btn.pack(fill="x", padx=4, pady=1)
-            self._buttons[name] = btn
+            btn = self._buttons.get(name)
+            if btn is None:
+                btn = ctk.CTkButton(
+                    self,
+                    text=btn_text,
+                    anchor="w",
+                    height=32,
+                    corner_radius=6,
+                    font=UIThemeTokens.FONT_BUTTON,
+                    fg_color=UIThemeTokens.BG_SIDEBAR_ACTIVE if is_active else "transparent",
+                    text_color=UIThemeTokens.TEXT_SIDEBAR_ACTIVE if is_active else UIThemeTokens.TEXT_SIDEBAR,
+                    hover_color=UIThemeTokens.BG_SIDEBAR_HOVER,
+                    command=lambda p=name: self._on_clicked(p),
+                )
+                btn.pack(fill="x", padx=4, pady=1)
+                self._buttons[name] = btn
+            else:
+                btn.configure(
+                    text=btn_text,
+                    fg_color=UIThemeTokens.BG_SIDEBAR_ACTIVE if is_active else "transparent",
+                    text_color=UIThemeTokens.TEXT_SIDEBAR_ACTIVE if is_active else UIThemeTokens.TEXT_SIDEBAR,
+                )
+                # Re-pack so visual order matches the incoming order without destroying.
+                btn.pack_forget()
+                btn.pack(fill="x", padx=4, pady=1)
 
     def _on_clicked(self, project_name: str) -> None:
         self._active_project = project_name

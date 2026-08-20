@@ -546,16 +546,23 @@ def _watchdog_enqueue_callback(profile_name, file_path, generation):
 
 
 def _reconcile_startup_folder(profile_name, folder, generation):
-    """Startup scan: adopt videos already present in a profile folder.
+    """Startup scan: adopt only videos that must be resumed for THIS profile.
 
-    Only files with a known origin (YouTube download metadata or an existing delivery
-    record, e.g. WAITING_PROFILE) are auto-enqueued. Unknown/manual old files are left
-    untouched so we never upload user-provided files by accident.
+    A file is adopted when either:
+    - it is genuinely new (mtime after watch_started_at) and has a known origin, or
+    - it has an existing delivery record for this profile that is reclaimable
+      (e.g. WAITING_PROFILE queued while the profile was down).
+
+    Files that already existed before watching started are never adopted on metadata
+    alone: the download-index basename fallback is disabled here so a video belonging to
+    another profile/folder cannot be mistaken for this profile's file. Skipped files do
+    not create a delivery record, so a later manual claim stays clean.
     """
     reg = get_delivery_registry()
     folder_path = Path(folder)
     if not folder_path.is_dir():
         return 0
+    watch_started_at = profiles.get(profile_name, {}).get('watch_started_at', 0)
     candidates = []
     for p in folder_path.iterdir():
         if not p.is_file() or p.suffix.lower() not in VIDEO_EXTENSIONS:
@@ -567,18 +574,29 @@ def _reconcile_startup_folder(profile_name, folder, generation):
         candidates.append((mtime, p))
     candidates.sort(key=lambda t: t[0])
     adopted = 0
+    skipped_old = 0
     for _mtime, p in candidates:
         if profile_name not in profiles or not profiles[profile_name].get('running', False):
             break
+        rec = reg.get_delivery(p)
+        if rec is not None and rec.profile_name and rec.profile_name != profile_name:
+            # Delivery belongs to another profile; never adopt for this one.
+            skipped_old += 1
+            continue
+        is_waiting = rec is not None and rec.state == DeliveryState.WAITING_PROFILE
+        is_new_file = _mtime > watch_started_at
+        if not is_new_file and not is_waiting:
+            # File predates watching: only a matching WAITING_PROFILE record may resume it.
+            skipped_old += 1
+            continue
         ok_eligible, reason = reg.is_eligible_for_startup(p, profile_name, generation)
         if not ok_eligible:
             continue
         meta = None
         try:
-            meta = lookup_download(str(p))
+            meta = lookup_download(str(p), allow_basename_fallback=False)
         except Exception:
             meta = None
-        rec = reg.get_delivery(p)
         if meta is None and rec is None:
             continue  # unknown/manual file -> do not auto-enqueue
         ok, _reason = enqueue_video(
@@ -593,6 +611,10 @@ def _reconcile_startup_folder(profile_name, folder, generation):
             adopted += 1
         elif _reason in ("waiting_profile", "profile_missing"):
             break
+    if skipped_old:
+        update_status(f"[{profile_name}] Bỏ qua {skipped_old} video có trước khi bắt đầu theo dõi.")
+    if adopted:
+        update_status(f"[{profile_name}] Phục hồi {adopted} video đang chờ profile.")
     return adopted
 
 
@@ -3125,6 +3147,7 @@ def upload_video(profile_name, video_path):
     benchmark_post_clicked = False
     benchmark_outcome = ''
     result = None
+    account_blocked = False
     driver_reused_before = _browser_session_valid(profiles.get(profile_name, {}).get('driver'))
 
     def record_phase(name, started_at):
@@ -3203,6 +3226,15 @@ def upload_video(profile_name, video_path):
                 if result.outcome == 'login_required':
                     _set_profile_ui(profile_name, login='Cần đăng nhập lại')
                 _set_profile_ui(profile_name, upload=upload_state, last_error=last_error)
+                if result.outcome == 'rejected' and str(result.details.get('rejection_scope') or '') == 'account_posting_blocked':
+                    # Account-level posting block: TikTok explicitly says the ACCOUNT is
+                    # temporarily prevented from posting. Dispatch is pointless and harmful
+                    # for the remaining queue, so surface it as a terminal profile stop.
+                    account_blocked = True
+                    last_error = 'Tài khoản bị TikTok tạm khóa đăng; đã dừng queue.'
+                    _set_profile_ui(profile_name, upload='TikTok khóa đăng', last_error=shorten_text(last_error))
+                    update_status(f"[{profile_name}] {last_error}")
+                    break
                 if no_retry:
                     update_status(f"[{profile_name}] Không retry {short_name}: {result.outcome} ({last_error})")
                     break
@@ -3224,6 +3256,9 @@ def upload_video(profile_name, video_path):
                 update_status(f"[{profile_name}] Session lỗi trước Post, thử lại: {last_error}")
                 time.sleep(0.5)
 
+        if account_blocked:
+            _set_profile_ui(profile_name, upload='TikTok khóa đăng', last_error='Tài khoản bị TikTok tạm khóa đăng; đã dừng queue.')
+            return 'account_blocked'
         _set_profile_ui(profile_name, upload='Đăng lỗi', last_error=str(last_error or 'Không đăng được video'))
         _append_failed_upload_log(profile_name, file_name, last_error or 'failed_after_retries', outcome=last_error or 'failed_after_retries')
         return False
@@ -3304,6 +3339,38 @@ def _return_to_upload_page(profile_name):
     return False
 
 
+def _release_queued_items(profile_name):
+    """Release every queued-but-unprocessed delivery back to DISCOVERED.
+
+    Called when a profile stops because its TikTok account is temporarily blocked from
+    posting. Files stay on disk and their records remain recoverable (never stuck in
+    ENQUEUED forever); a later explicit claim or profile start can pick them up again.
+    """
+    if profile_name not in profiles:
+        return 0
+    q = profiles[profile_name].get('queue')
+    if q is None:
+        return 0
+    reg = get_delivery_registry()
+    released = 0
+    while True:
+        try:
+            item = q.get_nowait()
+        except queue.Empty:
+            break
+        try:
+            path = getattr(item, 'path', None) or item
+            reg.release_delivery(path, error_code='ACCOUNT_BLOCKED', error_detail='queue stopped: account posting blocked')
+            released += 1
+        except Exception:
+            pass
+        try:
+            q.task_done()
+        except Exception:
+            pass
+    return released
+
+
 def process_video_queue_thread(profile_name):
     idle_start = None
     lc = get_lifecycle(profile_name)
@@ -3381,6 +3448,22 @@ def process_video_queue_thread(profile_name):
             if ok == 'prepared':
                 _set_profile_ui(profile_name, upload='Dry-run OK (chưa Post)', last_error='')
                 update_status(f"[{profile_name}] Dry-run hoàn tất; không tăng số video đã đăng.")
+            elif ok == 'account_blocked':
+                _set_profile_ui(profile_name, upload='TikTok khóa đăng', last_error='Tài khoản bị TikTok tạm khóa đăng; đã dừng queue.')
+                update_status(f"[{profile_name}] Tài khoản bị TikTok tạm khóa đăng; đã dừng queue.")
+                released = _release_queued_items(profile_name)
+                if released:
+                    update_status(f"[{profile_name}] Đã trả {released} video chưa đăng về trạng thái chờ xử lý.")
+                profiles[profile_name]['queue'].task_done()
+                stop_profile(profile_name)
+                if profiles.get(profile_name, {}).get('running', False):
+                    # License guard may block stop_profile(); force the stop so the
+                    # watchdog/browser never keep running after an account block.
+                    try:
+                        _stop_profile_driver(profile_name)
+                    except Exception:
+                        pass
+                break
             elif ok:
                 profiles[profile_name]['uploads_today_count'] += 1
                 try:

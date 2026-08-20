@@ -1,3 +1,18 @@
+# Phiên bản 1.1.3
+
+## Điểm mới
+- Tự động nhận biết trạng thái TikTok tạm khóa đăng ở cấp tài khoản và dừng queue để tránh gửi thêm video.
+
+## Cải thiện
+- Startup watchdog chỉ phục hồi video hợp lệ của đúng profile và dùng đường dẫn chính xác khi đọc lịch sử tải.
+- Danh sách dự án cập nhật tại chỗ, giảm tạo lại widget khi trạng thái profile thay đổi.
+- Cảnh báo Profile-Patchright thuộc tài khoản khác có thêm hướng dẫn xử lý an toàn.
+
+## Sửa lỗi
+- Khắc phục profile vừa Start tự nhận và đăng hàng loạt video đã có sẵn trong thư mục.
+- Khắc phục queue tiếp tục thử video sau khi TikTok báo tài khoản tạm thời không được đăng.
+- Khắc phục TclError "invalid command name ... ctkcanvas" khi ProjectList refresh liên tục.
+
 # Phiên bản 1.1.2
 
 ## Điểm mới

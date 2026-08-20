@@ -180,7 +180,9 @@ def ensure_patchright_profile(config):
             owner = None
         if owner and account_id and owner != account_id:
             raise ValueError(
-                "Browser profile thuộc tài khoản khác; không được tái sử dụng"
+                "Browser profile thuộc tài khoản khác; không được tái sử dụng. "
+                "Hãy chọn đúng chrome_profile của tài khoản này, hoặc reset Profile-Patchright "
+                "bằng chức năng bảo trì Browser (không xóa/thay đổi profile tự động)."
             )
         if owner and account_id is None:
             account_id = owner
