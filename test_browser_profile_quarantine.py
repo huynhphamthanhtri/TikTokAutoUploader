@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -50,7 +51,9 @@ class QuarantineTests(unittest.TestCase):
         self.assertTrue(destination.is_dir())
         self.assertEqual(manifest["account_uuid"], "acc-123")
         self.assertEqual(manifest["profile_name"], "acc")
-        self.assertEqual(manifest["original_path"], str(account))
+        original_path = Path(manifest["original_path"])
+        self.assertEqual(original_path.name, account.name)
+        self.assertTrue(os.path.samefile(original_path.parent, account.parent))
         self.assertTrue((destination / "Cookies").is_file())
         self.assertTrue((destination / MANIFEST_NAME).is_file())
 
@@ -140,7 +143,7 @@ class QuarantineTests(unittest.TestCase):
         self.assertFalse(destination.exists())
         self.assertTrue(account.is_dir())
         self.assertTrue((account / "Cookies").is_file())
-        self.assertEqual(restored["original_path"], str(account))
+        self.assertTrue(os.path.samefile(restored["original_path"], account))
 
     def test_restore_rejects_when_target_exists(self):
         account = make_owned_profile(self.work)
@@ -156,7 +159,9 @@ class QuarantineTests(unittest.TestCase):
         destination, _manifest = quarantine_profile(
             account, account_uuid="acc-123"
         )
-        self.assertEqual(restore_target(destination), account)
+        target = restore_target(destination)
+        self.assertEqual(target.name, account.name)
+        self.assertTrue(os.path.samefile(target.parent, account.parent))
 
 
 if __name__ == "__main__":
