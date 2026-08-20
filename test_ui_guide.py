@@ -2,6 +2,7 @@
 test_ui_guide.py - Unit tests cho tab Hướng Dẫn Sử Dụng (ui_guide.py).
 """
 
+import os
 import unittest
 
 import customtkinter as ctk
@@ -58,6 +59,7 @@ class TestGuideSectionsData(unittest.TestCase):
         self.assertIn("Cookie-First", all_text)
 
 
+@unittest.skipIf(os.environ.get("CI", "").lower() == "true", "Interactive Tk rendering is verified on a desktop runner")
 class TestBuildGuideWorkspace(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
