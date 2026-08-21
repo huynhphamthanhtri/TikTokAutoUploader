@@ -2828,6 +2828,9 @@ def _migrate_profile_drivers():
 # --- BẢNG THỐNG KÊ MỚI ---
 def show_statistics_board():
     if not _license_guard(): return
+    if 'ui_widgets' in globals() and isinstance(ui_widgets, dict) and 'switch_workspace' in ui_widgets:
+        ui_widgets['switch_workspace']('statistics')
+        return
 
     dlg = ctk.CTkToplevel(root)
     dlg.title("Thống kê hoạt động")
@@ -7976,10 +7979,16 @@ def change_page_size(val):
     current_page_var.set(1)
     update_profile_list()
 
+def get_profiles_statistics_snapshot():
+    return profiles, projects
+
 activity_handlers = {
     'get_logs': get_activity_logs,
+    'get_activity_logs': get_activity_logs,
     'get_stats': get_activity_stats,
+    'get_profiles_data': get_profiles_statistics_snapshot,
     'clear': clear_activity_log,
+    'clear_stats': clear_activity_log,
     'get_mtime': get_activity_mtime,
     'get_profiles': _youtube_profile_names,
 }
@@ -8031,6 +8040,10 @@ ui_handlers = {
     'change_page_size': change_page_size,
     'youtube_monitor': youtube_monitor_handlers,
     'activity': activity_handlers,
+    'get_profiles_data': get_profiles_statistics_snapshot,
+    'get_activity_logs': get_activity_logs,
+    'clear_stats': clear_activity_log,
+    'get_mtime': get_activity_mtime,
 }
 ui_widgets = build_dashboard(root, ui_state, ui_handlers)
 

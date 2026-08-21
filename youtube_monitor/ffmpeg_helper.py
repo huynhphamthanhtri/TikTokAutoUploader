@@ -92,6 +92,44 @@ def ffprobe_path_str():
     return str(p) if p else ""
 
 
+def extract_ffmpeg_error(stderr_text: str, max_lines: int = 6, max_chars: int = 1000) -> str:
+    """
+    Trích xuất thông báo lỗi thực sự từ stderr của FFmpeg.
+    Loại bỏ phần version banner, configuration flags và thư viện build ở đầu.
+    """
+    if not stderr_text:
+        return ""
+    lines = [ln.strip() for ln in str(stderr_text).splitlines() if ln.strip()]
+    meaningful = [
+        ln for ln in lines
+        if not ln.startswith((
+            "ffmpeg version", "built with", "configuration:", "libavutil",
+            "libavcodec", "libavformat", "libavdevice", "libavfilter",
+            "libswscale", "libswresample", "libpostproc",
+        ))
+    ]
+    if meaningful:
+        tail = "\n".join(meaningful[-max_lines:])
+        return tail[:max_chars]
+    return str(stderr_text)[-max_chars:] if len(str(stderr_text)) > max_chars else str(stderr_text)
+
+
+def _probe_gpu_encoder_support(exe: Path, encoder_name: str) -> bool:
+    """Kiểm tra thực tế phần cứng máy có hỗ trợ encoder GPU hay không (1-frame probe test)."""
+    try:
+        p = subprocess.run(
+            [str(exe), "-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.05", "-c:v", encoder_name, "-f", "null", "-"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return p.returncode == 0
+    except Exception:
+        return False
+
+
 def detect_gpu_encoder():
     global _encoder_cache
     if _encoder_cache is not None:
@@ -113,8 +151,9 @@ def detect_gpu_encoder():
             encoders = p.stdout + p.stderr
             for enc in ("h264_nvenc", "h264_qsv", "h264_amf"):
                 if enc in encoders:
-                    _encoder_cache = enc
-                    return _encoder_cache
+                    if _probe_gpu_encoder_support(exe, enc):
+                        _encoder_cache = enc
+                        return _encoder_cache
         except Exception:
             pass
         _encoder_cache = "libx264"
@@ -355,7 +394,7 @@ def run_ffmpeg(args, timeout=300):
             text=True, timeout=timeout,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        return p, p.stderr[:500] if p.returncode != 0 else ""
+        return p, extract_ffmpeg_error(p.stderr) if p.returncode != 0 else ""
     except subprocess.TimeoutExpired:
         return None, "timeout"
     except Exception as e:

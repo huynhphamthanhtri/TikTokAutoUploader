@@ -102,6 +102,8 @@ class TestAppUIContract(unittest.TestCase):
             "switch_workspace",
             "guide_workspace",
             "guide_view",
+            "stats_workspace",
+            "stats_view",
         ]
 
         for key in required_keys:
@@ -114,6 +116,19 @@ class TestAppUIContract(unittest.TestCase):
             'proxy_region', 'upload', 'folder', 'last_error'
         )
         self.assertEqual(tree["columns"], expected_columns)
+
+        # Test workspace router switching to statistics and aliases
+        switch_ws = widgets["switch_workspace"]
+        switch_ws("statistics")
+        self.assertTrue(widgets["stats_workspace"].winfo_manager())
+        self.assertFalse(widgets["guide_workspace"].winfo_manager())
+
+        switch_ws("stats")
+        self.assertTrue(widgets["stats_workspace"].winfo_manager())
+
+        switch_ws("guide")
+        self.assertTrue(widgets["guide_workspace"].winfo_manager())
+        self.assertFalse(widgets["stats_workspace"].winfo_manager())
 
     def test_classify_log_message(self):
         """Log classifier returns correct base_tag and important_tag."""

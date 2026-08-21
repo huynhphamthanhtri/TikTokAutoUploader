@@ -25,6 +25,7 @@ from ui_components import (
     UIThemeTokens,
 )
 from ui_guide import build_guide_workspace
+from ui_statistics import build_statistics_workspace
 from youtube_monitor.activity_view import ActivityLogView
 from youtube_monitor.batch_view import BatchDownloadView
 from youtube_monitor.ui import YouTubeMonitorView
@@ -206,6 +207,15 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     )
     btn_nav_monetization.pack(fill="x", pady=2)
     sidebar_buttons["monetization"] = btn_nav_monetization
+
+    btn_nav_statistics = SidebarButton(
+        nav_container,
+        text="Thống Kê",
+        icon_text="📊",
+    )
+    btn_nav_statistics.pack(fill="x", pady=2)
+    sidebar_buttons["statistics"] = btn_nav_statistics
+    sidebar_buttons["stats"] = btn_nav_statistics
 
     btn_nav_guide = SidebarButton(
         nav_container,
@@ -932,11 +942,15 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     guide_workspace = ctk.CTkFrame(workspace_container, fg_color="transparent")
     guide_workspace.grid(row=0, column=0, sticky="nsew")
     guide_workspace.grid_remove()
-
-    guide_view = build_guide_workspace(guide_workspace)
-    guide_view.pack(fill="both", expand=True, padx=6, pady=6)
     widgets["guide_workspace"] = guide_workspace
-    widgets["guide_view"] = guide_view
+
+    # --------------------------------------------------------------------------
+    # WORKSPACE 7: THỐNG KÊ (STATISTICS & ANALYTICS) WORKSPACE
+    # --------------------------------------------------------------------------
+    stats_workspace = ctk.CTkFrame(workspace_container, fg_color="transparent")
+    stats_workspace.grid(row=0, column=0, sticky="nsew")
+    stats_workspace.grid_remove()
+    widgets["stats_workspace"] = stats_workspace
 
     # ==========================================================================
     # WORKSPACE ROUTER LOGIC
@@ -948,6 +962,9 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
         "batch": (youtube_workspace, btn_nav_youtube),
         "history": (youtube_workspace, btn_nav_youtube),
         "monetization": (monetization_workspace, btn_nav_monetization),
+        "statistics": (stats_workspace, btn_nav_statistics),
+        "stats": (stats_workspace, btn_nav_statistics),
+        "analytics": (stats_workspace, btn_nav_statistics),
         "guide": (guide_workspace, btn_nav_guide),
     }
 
@@ -964,6 +981,12 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
             target_key = "youtube"
         elif target_name == "youtube_studio":
             target_key = "youtube"
+        elif target_name in ("stats", "statistics", "analytics"):
+            target_key = "statistics"
+            try:
+                stats_view.reload_data(force=False)
+            except Exception:
+                pass
         else:
             target_key = target_name
 
@@ -971,6 +994,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
             "profiles": (profiles_workspace, btn_nav_profiles),
             "youtube": (youtube_workspace, btn_nav_youtube),
             "monetization": (monetization_workspace, btn_nav_monetization),
+            "statistics": (stats_workspace, btn_nav_statistics),
             "guide": (guide_workspace, btn_nav_guide),
         }
 
@@ -982,9 +1006,20 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
                 ws_frame.grid_remove()
                 nav_btn.set_active(False)
 
+    # Initialize guide view with interactive navigation callback
+    guide_view = build_guide_workspace(guide_workspace, on_navigate=switch_workspace)
+    guide_view.pack(fill="both", expand=True, padx=6, pady=6)
+    widgets["guide_view"] = guide_view
+
+    # Initialize statistics workspace view
+    stats_view = build_statistics_workspace(stats_workspace, state, handlers)
+    stats_view.pack(fill="both", expand=True, padx=6, pady=6)
+    widgets["stats_view"] = stats_view
+
     btn_nav_profiles.configure(command=lambda: switch_workspace("profiles"))
     btn_nav_youtube.configure(command=lambda: switch_workspace("youtube_studio"))
     btn_nav_monetization.configure(command=lambda: switch_workspace("monetization"))
+    btn_nav_statistics.configure(command=lambda: switch_workspace("statistics"))
     btn_nav_guide.configure(command=lambda: switch_workspace("guide"))
 
     switch_workspace("profiles")  # Default to profiles

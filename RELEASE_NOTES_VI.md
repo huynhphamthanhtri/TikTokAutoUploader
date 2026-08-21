@@ -1,3 +1,18 @@
+# Phiên bản 1.2.0
+
+## Điểm mới
+- Tab **Thống Kê & Phân Tích (📊 Analytics)** chuyên biệt: KPI tổng, bảng chi tiết theo tài khoản, bộ lọc Dự án/Thời gian, panel kiểm tra lỗi tức thì (click tài khoản → xem ngay video fail, lý do, link).
+- Hệ thống thống kê thuần (Pure Logic Engine) tách biệt hoàn toàn khỏi UI, testable 100% trên CI không cần màn hình.
+
+## Cải thiện
+- Tab **Hướng Dẫn** viết lại hoàn toàn ngôn ngữ end-user: 9 chủ đề, Filter Chips, Accordion, nút Copy mẫu an toàn, nút điều hướng đến tab tương ứng.
+- Loại bỏ thuật ngữ kỹ thuật nội bộ khỏi tài liệu người dùng.
+- Cải tiến FFmpeg helper và core logic xử lý video.
+
+## Sửa lỗi
+- Khắc phục context menu test treo CI trên Windows headless.
+- Các regression liên quan đến tải video, xử lý proxy, profile picker.
+
 # Phiên bản 1.1.5
 
 ## Điểm mới

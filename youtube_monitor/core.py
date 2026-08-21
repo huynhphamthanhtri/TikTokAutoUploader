@@ -1468,8 +1468,8 @@ def _finalize_video(input_path, out_folder, title, video_id):
             return final_path
 
         if encoder[1] != "libx264":
-            ffmpeg_helper.invalidate_encoder_cache()
-            log(f"[Finalize] GPU transcode thất bại {video_id}, fallback CPU: {err[:200]}")
+            ffmpeg_helper._encoder_cache = "libx264"
+            log(f"[Finalize] GPU transcode thất bại {video_id}, fallback CPU: {err}")
             cmd2 = ["-y", "-i", str(input_path)]
             if not has_aud:
                 cmd2 += ["-an"]
@@ -1563,7 +1563,7 @@ def slowdown_to_min_duration_in_temp(input_path, target_seconds):
     else:
         filters = ["-filter:v", f"setpts={factor:.6f}*PTS,format=yuv420p", "-an"]
     encoder = _pick_video_encoder()
-    cmd = ["ffmpeg", "-y", "-i", input_path] + filters + ["-t", str(int(target_seconds))] + encoder + ["-pix_fmt", "yuv420p", "-threads", "2", out_path]
+    cmd = ["ffmpeg", "-y", "-i", input_path] + filters + ["-t", str(int(target_seconds))] + encoder + ["-threads", "2", out_path]
     try:
         _encode_sem.acquire()
         p, err = ffmpeg_helper.run_ffmpeg(cmd[1:])
@@ -1582,11 +1582,11 @@ def slowdown_to_min_duration_in_temp(input_path, target_seconds):
         if p is None:
             log(f"[FFmpeg] slow-mo lỗi (binary): {err}")
         else:
-            log(f"[FFmpeg] slow-mo lỗi: {err[:200]}")
+            log(f"[FFmpeg] slow-mo lỗi: {err}")
         if encoder[1] != "libx264":
-            ffmpeg_helper.invalidate_encoder_cache()
+            ffmpeg_helper._encoder_cache = "libx264"
             enc = "libx264"
-            cmd2 = ["ffmpeg", "-y", "-i", input_path] + filters + ["-t", str(int(target_seconds)), "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", "-threads", "2", out_path]
+            cmd2 = ["ffmpeg", "-y", "-i", input_path] + filters + ["-t", str(int(target_seconds)), "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-threads", "2", out_path]
             p2, err2 = ffmpeg_helper.run_ffmpeg(cmd2[1:])
             if p2 and p2.returncode == 0 and os.path.exists(out_path):
                 out_dur = ffmpeg_helper.probe_duration(out_path)
@@ -1600,7 +1600,7 @@ def slowdown_to_min_duration_in_temp(input_path, target_seconds):
                     try: os.remove(input_path)
                     except Exception: pass
                     return out_path, [out_path]
-            log(f"[FFmpeg] CPU fallback also failed: {err2[:200]}")
+            log(f"[FFmpeg] CPU fallback also failed: {err2}")
     finally:
         try: _encode_sem.release()
         except Exception: pass

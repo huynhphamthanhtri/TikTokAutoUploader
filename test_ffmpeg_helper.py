@@ -84,6 +84,17 @@ class TestEncoderDetection(unittest.TestCase):
 
     @patch("youtube_monitor.ffmpeg_helper.find_ffmpeg", return_value=Path("/ffmpeg"))
     @patch("subprocess.run")
+    def test_nvenc_in_binary_but_probe_fails_falls_back_to_libx264(self, mock_run, mock_find):
+        from youtube_monitor.ffmpeg_helper import detect_gpu_encoder
+        proc_encoders = MagicMock(stdout="h264_nvenc", stderr="", returncode=0)
+        proc_probe_fail = MagicMock(stdout="", stderr="[h264_nvenc @ 0x1] Cannot load nvcuda.dll", returncode=1)
+        mock_run.side_effect = [proc_encoders, proc_probe_fail]
+
+        enc = detect_gpu_encoder()
+        self.assertEqual(enc, "libx264")
+
+    @patch("youtube_monitor.ffmpeg_helper.find_ffmpeg", return_value=Path("/ffmpeg"))
+    @patch("subprocess.run")
     def test_libx264_fallback(self, mock_run, mock_find):
         from youtube_monitor.ffmpeg_helper import detect_gpu_encoder
         mock_proc = MagicMock()
@@ -93,6 +104,26 @@ class TestEncoderDetection(unittest.TestCase):
         mock_run.return_value = mock_proc
         enc = detect_gpu_encoder()
         self.assertEqual(enc, "libx264")
+
+    def test_extract_ffmpeg_error_strips_banner(self):
+        from youtube_monitor.ffmpeg_helper import extract_ffmpeg_error
+        sample_stderr = (
+            "ffmpeg version 7.1.1-essentials_build-www.gyan.dev Copyright (c) 2000-2025 the FFmpeg developers\n"
+            "  built with gcc 14.2.0 (Rev1, Built by MSYS2 project)\n"
+            "  configuration: --enable-gpl --enable-version3 --enable-static\n"
+            "  libavutil      59. 39.100 / 59. 39.100\n"
+            "  libavcodec     61. 19.100 / 61. 19.100\n"
+            "  libavformat    61.  7.100 / 61.  7.100\n"
+            "Input #0, mov,mp4,m4a,3gp,from 'test.mp4':\n"
+            "[h264_nvenc @ 0000021c322b7c00] Cannot load nvcuda.dll\n"
+            "[h264_nvenc @ 0000021c322b7c00] The minimum required Nvidia driver for nvenc is not installed\n"
+            "Error initializing output stream 0:0 -- Error while opening encoder for output stream #0:0"
+        )
+        err = extract_ffmpeg_error(sample_stderr)
+        self.assertNotIn("ffmpeg version", err)
+        self.assertNotIn("configuration:", err)
+        self.assertIn("Cannot load nvcuda.dll", err)
+        self.assertIn("Error initializing output stream", err)
 
 
 class TestConfigMigration(unittest.TestCase):

@@ -122,6 +122,7 @@ hidden_imports += [
     'youtube_monitor.ytdlp_updater',
     'upload_preparation',
     'youtube_monitor.ngrok_owner',
+    'ui_statistics',
 ]
 
 a = Analysis(
