@@ -28,6 +28,8 @@ from googleapiclient.errors import HttpError
 
 from .activity import append_activity, remember_download
 from . import ffmpeg_helper
+from . import ngrok_helper
+from . import ngrok_owner
 
 
 def _app_root():
@@ -152,6 +154,19 @@ _monitor_started = False
 _monitor_started_epoch = None
 _monitor_gen = 0
 _monitor_gen_lock = threading.Lock()
+_monitor_state = "STOPPED"
+_monitor_state_lock = threading.Lock()
+_last_websub_ok_at = None
+_last_websub_error = ""
+_recovery_attempt = 0
+_recovery_kick = threading.Event()
+_recovery_lock = threading.Lock()
+_ngrok_auth_status = "unknown"
+_ngrok_auth_source = ""
+_ngrok_auth_lock = threading.Lock()
+MAX_RECOVERY_ATTEMPTS = 3
+RECOVERY_BACKOFF_BASE = 15
+RECOVERY_BACKOFF_MAX = 300
 _all_threads = []
 _proxy_pool = []
 _proxy_by_profile = {}
@@ -169,6 +184,8 @@ _pending_lock = threading.Lock()
 _retry_after = {}
 _finalize_lock = threading.Lock()
 _retry_lock = threading.Lock()
+_video_detected_callback = None
+_video_detected_callback_lock = threading.Lock()
 MAX_RETRIES = 4
 RETRY_DELAYS = [0, 15, 45, 120]
 RETRY_COOLDOWN = 300
@@ -1093,6 +1110,41 @@ def _seed_polling_baseline(channel_id, items):
     return seeded
 
 
+@dataclass(frozen=True)
+class VideoDetectedIntent:
+    channel_id: str
+    video_id: str
+    profile_name: str
+    published_iso: str
+    detected_iso: str
+    source: str = "WEBSUB"
+    monitor_generation: int = 0
+
+
+def set_video_detected_callback(callback):
+    """Đăng ký callback nhận sự kiện video mới được phát hiện qua WebSub.
+
+    Callback nhận một đối tượng VideoDetectedIntent. Có thể gọi lại nhiều lần,
+    callback mới nhất được dùng. Truyền None để hủy đăng ký.
+    """
+    global _video_detected_callback
+    with _video_detected_callback_lock:
+        _video_detected_callback = callback
+
+
+def _safe_emit_detection(intent):
+    if intent is None:
+        return
+    with _video_detected_callback_lock:
+        callback = _video_detected_callback
+    if callback is None:
+        return
+    try:
+        callback(intent)
+    except Exception as e:
+        log(f"[WebSub] Detection callback lỗi: {e}")
+
+
 def websub_processor_worker(run_gen=None):
     log("[WebSub] Processor started")
     while not stop_event.is_set():
@@ -1144,6 +1196,16 @@ def websub_processor_worker(run_gen=None):
             download_queue.put((chan, vid, published or None, detected_utc_iso))
             channels_store.update_watermark(chan, pub_epoch)
             log(f"[WebSub] Enqueue {vid}@{chan}")
+            intent = VideoDetectedIntent(
+                channel_id=chan,
+                video_id=vid,
+                profile_name=meta.get("profile_name", "") or "",
+                published_iso=published or "",
+                detected_iso=detected_utc_iso,
+                source="WEBSUB",
+                monitor_generation=_get_monitor_gen(),
+            )
+            _safe_emit_detection(intent)
         channels_store._dirty = True
         try:
             websub_payload_queue.task_done()
@@ -2195,9 +2257,6 @@ def subscribe_websub(channel_id, callback_url):
         log(f"[WebSub] Subscribe lỗi {channel_id}: {e}")
 
 
-from . import ngrok_helper
-
-
 def _ngrok_bin_path():
     return ngrok_helper.get_ngrok_bin_path()
 
@@ -2290,24 +2349,152 @@ def _verify_ngrok_tunnel(ngrok_url):
         return False
 
 
-def _start_ngrok(port):
+def _ngrok_public_url():
+    if not public_callback_url:
+        return None
+    return public_callback_url.rsplit("/youtube_callback", 1)[0]
+
+
+def _callback_health_ok():
+    if not _callback_port:
+        return False
+    try:
+        resp = requests.get(f"http://127.0.0.1:{_callback_port}/youtube_health", timeout=3)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _recover_ngrok(run_gen):
+    """Recreate the owned ngrok tunnel and resubscribe channels. Returns True on success."""
     global public_callback_url, public_callback_verified
-    token = os.environ.get("NGROK_AUTHTOKEN", "").strip()
-    if token:
+    log("[Ngrok] Đang khôi phục tunnel...")
+    try:
+        ngrok_owner.stop_owned_agent()
+    except Exception:
+        pass
+    if stop_event.is_set() or (run_gen is not None and _get_monitor_gen() != run_gen):
+        return False
+    ok = _start_ngrok(_callback_port or 0)
+    if not ok:
+        return False
+    if public_callback_url:
         try:
-            ngrok.set_auth_token(token)
+            channels_store.subscribe_all(public_callback_url)
         except Exception as e:
-            log(f"[Ngrok] Token lỗi: {e}")
-    ng_bin = _ngrok_bin_path()
-    if not ng_bin:
-        ok, msg = ngrok_helper.ensure_ngrok()
-        if ok:
-            ng_bin = _ngrok_bin_path()
+            log(f"[Ngrok] Resubscribe sau recovery lỗi: {e}")
+    return True
+
+
+def _wait_recovery(seconds):
+    _recovery_kick.wait(seconds)
+    _recovery_kick.clear()
+
+
+def retry_ngrok_recovery():
+    """Manual retry (UI). Forces an immediate recovery attempt."""
+    global _recovery_attempt
+    with _recovery_lock:
+        _recovery_attempt = 0
+    if not _monitor_started:
+        return False, "YouTube Monitor chưa chạy."
+    _refresh_ngrok_auth_status()
+    if _ngrok_auth_status != "ready":
+        return False, "Ngrok authtoken chưa cấu hình; cấu hình NGROK_AUTHTOKEN rồi Retry."
+    _set_monitor_state("RECOVERING")
+    _recovery_kick.set()
+    set_websub_health(False, "Đang thử khôi phục ngrok...")
+    return True, "Đang thử khôi phục ngrok..."
+
+
+def _recovery_worker(run_gen=None):
+    global _recovery_attempt
+    local_interval = 30
+    public_interval = 120
+    last_public_check = 0.0
+    while not stop_event.is_set():
+        if run_gen is not None and _get_monitor_gen() != run_gen:
+            break
+        if not _monitor_started:
+            stop_event.wait(5)
+            continue
+        health_ok = _callback_health_ok()
+        now = time.time()
+        tunnel_ok = health_ok
+        if health_ok and now - last_public_check >= public_interval:
+            last_public_check = now
+            url = _ngrok_public_url()
+            if url:
+                tunnel_ok = _verify_ngrok_tunnel(url)
+            else:
+                tunnel_ok = False
         else:
-            log(f"[Ngrok] Tự động tải ngrok lỗi: {msg}")
-    ngcfg = ngconf.PyngrokConfig(ngrok_path=ng_bin) if ng_bin else ngconf.get_default()
-    tunnel = ngrok.connect(port, "http", pyngrok_config=ngcfg)
-    ngrok_url = tunnel.public_url.rstrip("/")
+            alive, _record = ngrok_owner.owned_agent_alive()
+            if not alive:
+                tunnel_ok = False
+        if tunnel_ok:
+            with _recovery_lock:
+                _recovery_attempt = 0
+            set_websub_health(True)
+            if _monitor_state == "RECOVERING" or _monitor_state == "DEGRADED":
+                _set_monitor_state("RUNNING")
+            stop_event.wait(local_interval)
+            continue
+        with _recovery_lock:
+            _recovery_attempt += 1
+            attempt = _recovery_attempt
+        _refresh_ngrok_auth_status()
+        if _ngrok_auth_status != "ready":
+            _set_monitor_state("DEGRADED")
+            set_websub_health(False, "Ngrok authtoken chưa cấu hình; cấu hình rồi bấm Retry.")
+            log("[Ngrok] Không có authtoken hợp lệ, chuyển DEGRADED. Cấu hình token rồi Retry.")
+            _wait_recovery(300)
+            continue
+        if attempt > MAX_RECOVERY_ATTEMPTS:
+            _set_monitor_state("DEGRADED")
+            set_websub_health(False, "Ngrok tunnel không khôi phục được; cần Retry thủ công.")
+            log("[Ngrok] Hết lượt recovery, chuyển DEGRADED. Nhấn Retry để thử lại.")
+            _wait_recovery(300)
+            continue
+        _set_monitor_state("RECOVERING")
+        set_websub_health(False, f"Ngrok gián đoạn, đang khôi phục (lần {attempt}/{MAX_RECOVERY_ATTEMPTS})")
+        delay = min(RECOVERY_BACKOFF_BASE * (2 ** (attempt - 1)), RECOVERY_BACKOFF_MAX)
+        log(f"[Ngrok] Recovery lần {attempt}, thử lại sau {delay}s")
+        _wait_recovery(delay)
+        if stop_event.is_set():
+            break
+        if _recover_ngrok(run_gen):
+            with _recovery_lock:
+                _recovery_attempt = 0
+            set_websub_health(True)
+            _set_monitor_state("RUNNING")
+    log("[Ngrok] Recovery worker stopped")
+
+
+def _refresh_ngrok_auth_status():
+    global _ngrok_auth_status, _ngrok_auth_source
+    ok, msg = ngrok_owner.validate_auth_ready()
+    with _ngrok_auth_lock:
+        if ok:
+            _ngrok_auth_status = "ready"
+            _ngrok_auth_source = "environment" if "environment" in msg else "user_config"
+        else:
+            _ngrok_auth_status = "missing"
+            _ngrok_auth_source = ""
+
+
+def _start_ngrok(port):
+    global public_callback_url, public_callback_verified, last_error
+    ok, payload = ngrok_owner.start_owned_agent(
+        port,
+        _callback_instance_id or "",
+        _get_monitor_gen(),
+    )
+    if not ok:
+        log(f"[Ngrok] Start lỗi: {payload}")
+        last_error = str(payload)
+        return False
+    ngrok_url = str(payload["public_url"]).rstrip("/")
     public_callback_url = f"{ngrok_url}/youtube_callback?owner={_callback_owner_token}"
     log(f"[Ngrok] Callback: {public_callback_url}")
     if _verify_ngrok_tunnel(ngrok_url):
@@ -2315,15 +2502,12 @@ def _start_ngrok(port):
         return True
     else:
         try:
-            ngrok.disconnect(ngrok_url)
-        except Exception:
-            pass
-        try:
-            ngrok.kill()
+            ngrok_owner.stop_owned_agent()
         except Exception:
             pass
         public_callback_url = None
         public_callback_verified = False
+        last_error = "Ngrok tunnel public không phản hồi"
         return False
 
 
@@ -2358,85 +2542,8 @@ def _resubscribe_worker(run_gen=None):
                     channels_store.subscribe_all(public_callback_url)
             except Exception as e:
                 log(f"[WebSub] Resubscribe lỗi: {e}")
-        stop_event.wait(3600)
-
-
-def _polling_worker(run_gen=None):
-    log("[Polling] Worker started")
-    poll_interval = 900
-    while not stop_event.is_set():
-        if run_gen is not None and _get_monitor_gen() != run_gen:
-            log("[Polling] Generation changed, stopping")
-            break
-        if not public_callback_verified:
-            poll_interval = 120
-        else:
-            poll_interval = 900
-        with _subscription_lock:
-            has_unverified = any(s.get("verified_at") is None for s in _subscription_status.values())
-        if has_unverified:
-            poll_interval = min(poll_interval, 120)
-        try:
-            cfg = get_config()
-            keys = cfg.get("api_keys") or []
-            if not keys or not keys[0]:
-                stop_event.wait(poll_interval)
-                continue
-            youtube = get_youtube_client(keys[0])
-            active_channels = [k for k, v in channels_store.all_items().items() if v.get("active")]
-            for cid in active_channels:
-                if stop_event.is_set():
-                    break
-                meta = channels_store.get_meta(cid) or {}
-                try:
-                    _ensure_channel_metadata(cid, youtube)
-                    meta = channels_store.get_meta(cid) or {}
-                except Exception:
-                    pass
-                playlist_id = _get_uploads_playlist_id(cid, youtube)
-                if not playlist_id:
-                    continue
-                try:
-                    response = youtube.playlistItems().list(
-                        part="snippet,contentDetails",
-                        playlistId=playlist_id,
-                        maxResults=5
-                    ).execute()
-                except Exception as e:
-                    log(f"[Polling] API lỗi {cid}: {e}")
-                    continue
-                items = response.get("items", [])
-                if _channel_needs_polling_baseline(meta):
-                    seeded = _seed_polling_baseline(cid, items)
-                    if seeded:
-                        log(f"[Polling] Baseline {seeded} videos for {cid}")
-                    continue
-                seen = meta.get("seen", set())
-                for item in items:
-                    vid = _playlist_item_video_id(item)
-                    if not vid or vid in seen or _is_pending(cid, vid):
-                        continue
-                    published = _playlist_item_published(item)
-                    pub_epoch = iso_to_epoch(published) if published else None
-                    if pub_epoch and time.time() - pub_epoch > MAX_ACCEPTABLE_AGE_HOURS * 3600:
-                        channels_store.mark_seen_only(cid, vid)
-                        continue
-                    if _published_before_monitor_start(pub_epoch):
-                        _mark_pre_start_seen(cid, vid, pub_epoch, "Polling")
-                        continue
-                    if _polling_item_is_at_or_before_watermark(meta, pub_epoch):
-                        channels_store.mark_seen_only(cid, vid)
-                        continue
-                    if _try_pending(cid, vid):
-                        download_queue.put((cid, vid, published or None, datetime.now(timezone.utc).isoformat()))
-                        channels_store.update_watermark(cid, pub_epoch)
-                        log(f"[Polling] Enqueue {vid}@{cid}")
-                time.sleep(0.3)
-        except Exception as e:
-            log(f"[Polling] Lỗi: {e}")
         _cleanup_temp_dl(older_than_seconds=86400)
-        stop_event.wait(poll_interval)
-    log("[Polling] Worker stopped")
+        stop_event.wait(3600)
 
 
 def _ensure_channel_metadata(channel_id, youtube):
@@ -2558,6 +2665,7 @@ def _add_thread(t):
 def start_monitor():
     global _monitor_started, _monitor_started_epoch, _monitor_gen, last_error, _proxy_pool, _proxy_by_profile, _proxy_rr_index, _download_sem, public_callback_url, public_callback_verified
     with _state_lock:
+        _set_monitor_state("STARTING")
         if _monitor_started:
             ok, msg = get_monitor_health()
             if ok:
@@ -2594,6 +2702,7 @@ def start_monitor():
             log(f"[Monitor] {last_error}")
             channels_store.stop_autosave()
             _monitor_started_epoch = None
+            _set_monitor_state("STOPPED")
             return False, last_error
         if not _get_websub_secret():
             _stop_callback_server()
@@ -2601,6 +2710,31 @@ def start_monitor():
             last_error = "Không tạo được WebSub secret"
             log(f"[Monitor] {last_error}")
             _monitor_started_epoch = None
+            _set_monitor_state("STOPPED")
+            return False, last_error
+        auth_ok, auth_msg = ngrok_owner.validate_auth_ready()
+        _refresh_ngrok_auth_status()
+        if not auth_ok:
+            _stop_callback_server()
+            channels_store.stop_autosave()
+            last_error = auth_msg
+            log(f"[Monitor] {last_error}")
+            _monitor_started_epoch = None
+            _set_monitor_state("STOPPED")
+            return False, last_error
+        ngrok_ok = False
+        try:
+            ngrok_ok = _start_ngrok(_callback_port)
+        except Exception as e:
+            last_error = f"Ngrok: {e}"
+            log(f"[Ngrok] Start lỗi: {e}")
+        if not ngrok_ok:
+            _stop_callback_server()
+            channels_store.stop_autosave()
+            last_error = last_error or "Ngrok tunnel không hoạt động"
+            log(f"[Monitor] {last_error}")
+            _monitor_started_epoch = None
+            _set_monitor_state("STOPPED")
             return False, last_error
         t = threading.Thread(target=websub_processor_worker, args=(run_gen,), daemon=True)
         _add_thread(t)
@@ -2615,40 +2749,54 @@ def start_monitor():
         t = threading.Thread(target=_resubscribe_worker, args=(run_gen,), daemon=True)
         _add_thread(t)
         t.start()
-        ngrok_ok = False
-        try:
-            ngrok_ok = _start_ngrok(_callback_port)
-        except Exception as e:
-            last_error = f"Ngrok: {e}"
-            log(f"[Ngrok] Start lỗi: {e}")
-        if not ngrok_ok:
-            _stop_callback_server()
-            stop_event.set()
-            _join_all_threads()
-            channels_store.stop_autosave()
-            last_error = "Ngrok tunnel không hoạt động"
-            log(f"[Monitor] {last_error}")
-            _monitor_started_epoch = None
-            return False, last_error
-        channels_store.subscribe_all(public_callback_url)
-        t = threading.Thread(target=_polling_worker, args=(run_gen,), daemon=True)
+        t = threading.Thread(target=_recovery_worker, args=(run_gen,), daemon=True)
         _add_thread(t)
         t.start()
+        channels_store.subscribe_all(public_callback_url)
         _monitor_started = True
+        _set_monitor_state("RUNNING")
         return True, "YouTube Monitor đã start."
 
 
 def get_monitor_health():
     if not _monitor_started:
         return False, "Monitor chưa chạy"
+    if _monitor_state == "DEGRADED":
+        return False, "Ngrok tunnel không hoạt động; cần Retry thủ công."
+    if _monitor_state == "RECOVERING":
+        return False, "Đang khôi phục ngrok tunnel..."
     if _callback_port:
         try:
             resp = requests.get(f"http://127.0.0.1:{_callback_port}/youtube_health", timeout=2)
             if resp.status_code == 200:
+                with _subscription_lock:
+                    total_subs = len(_subscription_status)
+                    subs_ok = sum(1 for s in _subscription_status.values() if s.get("verified_at"))
+                if total_subs > 0 and subs_ok < total_subs:
+                    return True, "WebSub gián đoạn; video mới có thể bị bỏ lỡ."
                 return True, "OK"
         except Exception:
             pass
     return False, "Callback server không phản hồi"
+
+
+def get_monitor_state():
+    return _monitor_state
+
+
+def _set_monitor_state(state):
+    global _monitor_state
+    with _monitor_state_lock:
+        _monitor_state = state
+
+
+def set_websub_health(ok, error_msg=""):
+    global _last_websub_ok_at, _last_websub_error
+    if ok:
+        _last_websub_ok_at = datetime.now(timezone.utc).isoformat()
+        _last_websub_error = ""
+    else:
+        _last_websub_error = error_msg or _last_websub_error
 
 
 def _force_stop():
@@ -2656,7 +2804,7 @@ def _force_stop():
     stop_event.set()
     _stop_callback_server()
     try:
-        ngrok.kill()
+        ngrok_owner.stop_owned_agent()
     except Exception:
         pass
     _join_all_threads(timeout=3)
@@ -2677,11 +2825,12 @@ def stop_monitor():
     with _state_lock:
         if not _monitor_started:
             return True, "YouTube Monitor chưa chạy."
+        _set_monitor_state("STOPPING")
         stop_event.set()
         channels_store.stop_autosave()
         _stop_callback_server()
         try:
-            ngrok.kill()
+            ngrok_owner.stop_owned_agent()
         except Exception:
             pass
         _join_all_threads(timeout=5)
@@ -2695,6 +2844,7 @@ def stop_monitor():
         _all_threads.clear()
         _monitor_started = False
         _monitor_started_epoch = None
+        _set_monitor_state("STOPPED")
         log("[Monitor] Stopped")
     return True, "YouTube Monitor đã dừng."
 
@@ -2824,9 +2974,16 @@ def get_status():
         "running": _monitor_started,
         "healthy": healthy,
         "health_msg": health_msg,
+        "monitor_state": _monitor_state,
+        "recovery_attempt": _recovery_attempt,
+        "detection_source": "WEBSUB",
+        "last_websub_ok_at": _last_websub_ok_at,
+        "last_websub_error": _last_websub_error,
         "callback_url": public_callback_url or "",
         "callback_port": _callback_port,
         "callback_verified": public_callback_verified,
+        "ngrok_auth_status": _ngrok_auth_status,
+        "ngrok_auth_source": _ngrok_auth_source,
         "last_callback_post": last_callback_post_time,
         "channels": len(channels_store.all_items()),
         "queue": download_queue.qsize(),

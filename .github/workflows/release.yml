@@ -101,7 +101,7 @@ jobs:
           }
           $missingPattern = 'missing module named [''"](?<module>[^''"]+)[''"]'
           $criticalMissing = [regex]::Matches($content, $missingPattern) | Where-Object {
-            $_.Groups['module'].Value -match '^(main|config_store|core_helpers|browser_environment|browser_lifecycle|browser_maintenance|browser_runtime|browser_patchright_glue|browser_engine_manager|ui_browser_downloader|patchright_browser|patchright_upload|patchright_cookie_codec|patchright_profile_migration|account_io|profile_ownership|profile_config_engine|proxy_environment|browser_profile_quarantine|ui_guide|version|updater|updater_config|youtube_monitor|config_service|log_engine|profile_table_engine|taskbar_manager|watchdog_service)(\.|$)'
+            $_.Groups['module'].Value -match '^(main|config_store|core_helpers|browser_environment|browser_lifecycle|browser_maintenance|browser_runtime|browser_patchright_glue|browser_engine_manager|ui_browser_downloader|patchright_browser|patchright_upload|patchright_cookie_codec|patchright_profile_migration|account_io|profile_ownership|profile_config_engine|proxy_environment|browser_profile_quarantine|ui_guide|version|updater|updater_config|youtube_monitor|config_service|log_engine|profile_table_engine|taskbar_manager|watchdog_service|upload_preparation|youtube_monitor\.ngrok_owner)(\.|$)'
           }
           if ($criticalMissing.Count -gt 0) {
             throw "CRITICAL: Internal project modules missing! $($criticalMissing.Value -join ', ')"

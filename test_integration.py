@@ -39,8 +39,10 @@ class TestMonitorLifecycle(unittest.TestCase):
 
     def test_start_stop_restart(self):
         with patch("youtube_monitor.core.make_server") as mock_ms, \
-             patch("youtube_monitor.core.ngrok.connect") as mock_ng, \
-             patch("youtube_monitor.core.ngrok.kill") as mock_kill, \
+             patch("youtube_monitor.core.ngrok_owner.start_owned_agent") as mock_owned_start, \
+             patch("youtube_monitor.core.ngrok_owner.stop_owned_agent"), \
+             patch("youtube_monitor.core.ngrok_owner.owned_agent_alive", return_value=(True, {})), \
+             patch("youtube_monitor.core.ngrok_owner.validate_auth_ready", return_value=(True, "ready (environment)")), \
              patch("youtube_monitor.core.requests.post") as mock_post, \
              patch("youtube_monitor.core.requests.get") as mock_get, \
              patch("youtube_monitor.core._ngrok_bin_path", return_value=None), \
@@ -49,7 +51,7 @@ class TestMonitorLifecycle(unittest.TestCase):
              patch("youtube_monitor.core.worker_main", side_effect=self._wait_for_stop), \
              patch("youtube_monitor.core._retry_maintainer", side_effect=self._wait_for_stop), \
              patch("youtube_monitor.core._resubscribe_worker", side_effect=self._wait_for_stop), \
-             patch("youtube_monitor.core._polling_worker", side_effect=self._wait_for_stop):
+             patch("youtube_monitor.core._recovery_worker", side_effect=self._wait_for_stop):
 
             from youtube_monitor.core import (
                 start_monitor, stop_monitor, get_status, get_monitor_health,
@@ -60,9 +62,7 @@ class TestMonitorLifecycle(unittest.TestCase):
             mock_server.server_address = ("0.0.0.0", 5000)
             mock_ms.return_value = mock_server
 
-            mock_tunnel = MagicMock()
-            mock_tunnel.public_url = "http://abc.ngrok-free.app"
-            mock_ng.return_value = mock_tunnel
+            mock_owned_start.return_value = (True, {"public_url": "http://abc.ngrok-free.app"})
 
             def _mock_get(url, **kw):
                 resp = MagicMock()
@@ -121,8 +121,10 @@ class TestMonitorLifecycle(unittest.TestCase):
 
     def test_double_start_returns_ok(self):
         with patch("youtube_monitor.core.make_server") as mock_ms, \
-             patch("youtube_monitor.core.ngrok.connect") as mock_ng, \
-             patch("youtube_monitor.core.ngrok.kill"), \
+             patch("youtube_monitor.core.ngrok_owner.start_owned_agent") as mock_owned_start, \
+             patch("youtube_monitor.core.ngrok_owner.stop_owned_agent"), \
+             patch("youtube_monitor.core.ngrok_owner.owned_agent_alive", return_value=(True, {})), \
+             patch("youtube_monitor.core.ngrok_owner.validate_auth_ready", return_value=(True, "ready (environment)")), \
              patch("youtube_monitor.core.requests.post"), \
              patch("youtube_monitor.core.requests.get") as mock_get, \
              patch("youtube_monitor.core._ngrok_bin_path", return_value=None), \
@@ -131,7 +133,7 @@ class TestMonitorLifecycle(unittest.TestCase):
              patch("youtube_monitor.core.worker_main", side_effect=self._wait_for_stop), \
              patch("youtube_monitor.core._retry_maintainer", side_effect=self._wait_for_stop), \
              patch("youtube_monitor.core._resubscribe_worker", side_effect=self._wait_for_stop), \
-             patch("youtube_monitor.core._polling_worker", side_effect=self._wait_for_stop):
+             patch("youtube_monitor.core._recovery_worker", side_effect=self._wait_for_stop):
 
             from youtube_monitor.core import start_monitor, stop_monitor
 
@@ -139,9 +141,7 @@ class TestMonitorLifecycle(unittest.TestCase):
             mock_server.server_address = ("0.0.0.0", 5000)
             mock_ms.return_value = mock_server
 
-            mock_tunnel = MagicMock()
-            mock_tunnel.public_url = "http://abc.ngrok-free.app"
-            mock_ng.return_value = mock_tunnel
+            mock_owned_start.return_value = (True, {"public_url": "http://abc.ngrok-free.app"})
 
             def _mock_get2(url, **kw):
                 resp = MagicMock()
@@ -173,6 +173,84 @@ class TestMonitorLifecycle(unittest.TestCase):
         ok, msg = stop_monitor()
         self.assertTrue(ok)
         self.assertIn("chưa chạy", msg.lower())
+
+    def test_start_fails_before_workers_when_auth_missing(self):
+        with patch("youtube_monitor.core.make_server") as mock_ms, \
+             patch("youtube_monitor.core.ngrok_owner.validate_auth_ready", return_value=(False, "Ngrok chưa được xác thực. add-authtoken")), \
+             patch("youtube_monitor.core.requests.get") as mock_get, \
+             patch("youtube_monitor.core._load_tiktok_proxies", return_value=({}, [])):
+
+            from youtube_monitor.core import start_monitor, get_status, _all_threads
+
+            mock_server = MagicMock()
+            mock_server.server_address = ("0.0.0.0", 5000)
+            mock_ms.return_value = mock_server
+            mock_get.return_value.status_code = 200
+
+            ok, msg = start_monitor()
+            self.assertFalse(ok, f"Start should fail when ngrok auth missing: {msg}")
+            self.assertIn("authtoken", msg.lower())
+
+            status = get_status()
+            self.assertFalse(status["running"])
+            self.assertEqual(status["monitor_state"], "STOPPED")
+            self.assertIn("authtoken", status["last_error"].lower())
+
+            alive = [t for t in list(_all_threads) if t.is_alive()]
+            self.assertEqual(len(alive), 0, f"No worker should be running after auth failure: {alive}")
+
+    def test_start_fails_before_workers_when_ngrok_connect_fails(self):
+        with patch("youtube_monitor.core.make_server") as mock_ms, \
+             patch("youtube_monitor.core.ngrok_owner.validate_auth_ready", return_value=(True, "ready (environment)")), \
+             patch("youtube_monitor.core.ngrok_owner.start_owned_agent", return_value=(False, "Ngrok authtoken bị từ chối (ERR_NGROK_4018).")), \
+             patch("youtube_monitor.core.requests.get") as mock_get, \
+             patch("youtube_monitor.core._load_tiktok_proxies", return_value=({}, [])):
+
+            from youtube_monitor.core import start_monitor, get_status, _all_threads
+
+            mock_server = MagicMock()
+            mock_server.server_address = ("0.0.0.0", 5000)
+            mock_ms.return_value = mock_server
+            mock_get.return_value.status_code = 200
+
+            ok, msg = start_monitor()
+            self.assertFalse(ok, f"Start should fail when ngrok connect fails: {msg}")
+            self.assertIn("4018", msg)
+
+            status = get_status()
+            self.assertFalse(status["running"])
+            self.assertEqual(status["monitor_state"], "STOPPED")
+            self.assertIn("4018", status["last_error"])
+
+            alive = [t for t in list(_all_threads) if t.is_alive()]
+            self.assertEqual(len(alive), 0, f"No worker should be running after ngrok failure: {alive}")
+
+    def test_start_fails_before_workers_when_tunnel_verify_fails(self):
+        with patch("youtube_monitor.core.make_server") as mock_ms, \
+             patch("youtube_monitor.core.ngrok_owner.validate_auth_ready", return_value=(True, "ready (environment)")), \
+             patch("youtube_monitor.core.ngrok_owner.start_owned_agent", return_value=(True, {"public_url": "http://abc.ngrok-free.app"})), \
+             patch("youtube_monitor.core.ngrok_owner.stop_owned_agent"), \
+             patch("youtube_monitor.core.requests.get") as mock_get, \
+             patch("youtube_monitor.core._verify_ngrok_tunnel", return_value=False), \
+             patch("youtube_monitor.core._load_tiktok_proxies", return_value=({}, [])):
+
+            from youtube_monitor.core import start_monitor, get_status, _all_threads
+
+            mock_server = MagicMock()
+            mock_server.server_address = ("0.0.0.0", 5000)
+            mock_ms.return_value = mock_server
+            mock_get.return_value.status_code = 200
+
+            ok, msg = start_monitor()
+            self.assertFalse(ok, f"Start should fail when tunnel verify fails: {msg}")
+            self.assertIn("tunnel", msg.lower())
+
+            status = get_status()
+            self.assertFalse(status["running"])
+            self.assertEqual(status["monitor_state"], "STOPPED")
+
+            alive = [t for t in list(_all_threads) if t.is_alive()]
+            self.assertEqual(len(alive), 0, f"No worker should be running after verify failure: {alive}")
 
 
 if __name__ == "__main__":

@@ -120,6 +120,8 @@ hidden_imports += [
     'taskbar_manager',
     'watchdog_service',
     'youtube_monitor.ytdlp_updater',
+    'upload_preparation',
+    'youtube_monitor.ngrok_owner',
 ]
 
 a = Analysis(

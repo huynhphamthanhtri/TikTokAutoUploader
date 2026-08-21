@@ -28,7 +28,7 @@ class ProxyConfigurationTests(unittest.TestCase):
     def test_each_new_browser_is_verified_without_process_cache(self):
         self.assertNotIn("PROXY_OK_CACHE", self.source)
         self.assertIn("Đang check IP trên browser mới", self.source)
-        self.assertEqual(self.source.count("browser_glue.verify_exit_ip("), 3)
+        self.assertEqual(self.source.count("browser_glue.verify_exit_ip("), 4)
 
         cookie_flow = self.source[
             self.source.index("def _capture_tiktok_cookies_worker"):
@@ -38,11 +38,15 @@ class ProxyConfigurationTests(unittest.TestCase):
             self.source.index("def ensure_driver"):
             self.source.index("def upload_video")
         ]
+        prewarm_flow = self.source[
+            self.source.index("def _prewarm_browser"):
+            self.source.index("def _on_video_detected")
+        ]
         manual_flow = self.source[
             self.source.index("def open_browser"):
             self.source.index("def _wait_and_close_driver")
         ]
-        for flow in (cookie_flow, automation_flow, manual_flow):
+        for flow in (cookie_flow, automation_flow, prewarm_flow, manual_flow):
             self.assertIn("open_session", flow)
             self.assertIn("verify_exit_ip", flow)
 

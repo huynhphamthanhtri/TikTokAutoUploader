@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from patchright_upload import SELECTORS, UploadTimeouts, upload_tiktok
+from patchright_upload import SELECTORS, UploadTimeouts, upload_surface_ready, upload_tiktok
 
 
 class FakeElement:
@@ -574,6 +574,69 @@ class PatchrightUploadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.outcome, "rejected")
         self.assertEqual(result.details.get("rejection_scope"), "unknown_rejection")
         self.assertEqual(page.post_button.clicks, 1)
+
+
+class UploadSurfaceReadyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ready_when_upload_surface_visible(self):
+        page = FakePage()
+        self.assertTrue(await upload_surface_ready(page))
+
+    async def test_not_ready_when_login_page(self):
+        page = FakePage()
+        page.url = "https://www.tiktok.com/login"
+        self.assertFalse(await upload_surface_ready(page))
+
+    async def test_not_ready_when_login_form_visible(self):
+        page = FakePage()
+        page.locators[SELECTORS["login"]] = FakeLocator([FakeElement(visible=True)])
+        self.assertFalse(await upload_surface_ready(page))
+
+    async def test_not_ready_when_no_surface(self):
+        page = FakePage()
+        page.locators[SELECTORS["file_input"]] = FakeLocator()
+        page.locators[SELECTORS["upload_surface"]] = FakeLocator()
+        self.assertFalse(await upload_surface_ready(page))
+
+    async def test_not_ready_on_exception(self):
+        page = FakePage()
+        def boom(*_a, **_k):
+            raise RuntimeError("stale session")
+        page.locator = boom
+        self.assertFalse(await upload_surface_ready(page))
+
+    async def test_upload_skips_goto_when_surface_already_ready(self):
+        page = FakePage()
+        page.post_button.on_click = lambda: page.emit_response(FakeResponse())
+        page.url = "https://www.tiktok.com/tiktokstudio/upload"
+
+        async def counting_goto(url, **kwargs):
+            raise AssertionError("goto should be skipped when surface is ready")
+
+        page.goto = counting_goto
+        timeouts = UploadTimeouts(
+            page_ready=0.2,
+            editor_ready=0.2,
+            confirmation=0.5,
+            poll_interval=0.001,
+            navigation_ms=200,
+            popup_dismiss_timeout=0.2,
+            popup_dismiss_max_rounds=3,
+            pre_dispatch_clear_timeout=0.2,
+        )
+        video = Path(tempfile.mkdtemp()) / "video.mp4"
+        video.write_bytes(b"video")
+        try:
+            result = await upload_tiktok(
+                page,
+                video,
+                timeouts=timeouts,
+                diagnostics_dir=None,
+            )
+        finally:
+            video.unlink(missing_ok=True)
+        self.assertEqual(result.outcome, "posted")
+        self.assertEqual(page.post_button.clicks, 1)
+        self.assertEqual(result.details["timings"].get("goto_seconds"), 0.0)
 
 
 if __name__ == "__main__":

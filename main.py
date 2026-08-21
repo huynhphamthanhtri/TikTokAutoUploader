@@ -78,6 +78,7 @@ from browser_maintenance import (
 )
 import browser_patchright_glue as browser_glue
 from browser_patchright_glue import ProfileBusyError, SessionSetupError, SessionToken
+from upload_preparation import UploadPreparationCoordinator
 from profile_runtime_status import (
     RuntimeSignals,
     build_runtime_snapshot,
@@ -273,6 +274,8 @@ _profile_refresh_pending = False
 _tree_sort_state = None
 _cookie_check_batch = {"active": False, "cancel": False}
 _inspection_batch = {"active": False}
+
+_preparation_coordinator = UploadPreparationCoordinator(max_workers=2)
 
 from browser_lifecycle import get_lifecycle, remove_lifecycle
 
@@ -3012,6 +3015,11 @@ def ensure_driver(profile_name, lifecycle_gen=None):
     if lifecycle_gen is None:
         lifecycle_gen = lc.generation
 
+    prepared = _preparation_coordinator.await_result(profile_name, lifecycle_gen)
+    if prepared is not None and _browser_session_valid(prepared):
+        profiles[profile_name]['driver'] = prepared
+        return prepared
+
     for attempt in range(DRIVER_INIT_RETRIES):
         if lc.is_cancelled or not lc.is_current(lifecycle_gen):
             update_status(f"[{profile_name}] Lifecycle đã bị hủy, không mở session.")
@@ -3133,6 +3141,81 @@ def ensure_driver(profile_name, lifecycle_gen=None):
             time.sleep(DRIVER_INIT_RETRY_DELAY)
 
     return None
+
+def _prewarm_browser(profile_name, lifecycle_gen, cancel_event):
+    """Fast background browser warm-up for a WebSub-detected video.
+
+    Opens the persistent profile session and navigates to the TikTok upload
+    URL, then verifies login and proxy exit-IP. Only publishes the session
+    (register + driver publish) when the lifecycle generation is still current
+    and both verifications pass. Raises on any failure so the coordinator marks
+    the attempt FAILED and the upload path falls back to ensure_driver.
+    """
+    if profile_name not in profiles or not profiles[profile_name].get('running', False):
+        raise SessionSetupError("Profile không chạy")
+    lc = get_lifecycle(profile_name)
+    if lc.is_cancelled or not lc.is_current(lifecycle_gen):
+        raise RuntimeError("Lifecycle cancelled")
+    config = profiles[profile_name]['config']
+    if not config.get('open_only_when_video', False):
+        raise SessionSetupError("Profile không ở chế độ chỉ mở khi có video")
+    if _browser_session_valid(profiles[profile_name].get('driver')):
+        return profiles[profile_name]['driver']
+
+    proxy_data = None
+    if config.get('use_proxy', False):
+        proxy_data = parse_proxy_string(config.get('proxy_string', ''))
+        if not proxy_data:
+            raise SessionSetupError("Proxy sai định dạng; từ chối mở browser trực tiếp")
+
+    profile_path = browser_glue.ensure_patchright_profile(config)
+    _sync_patchright_migration(config)
+    save_configs()
+    token = browser_glue.open_session(config, profile_name)
+    token.generation = lifecycle_gen
+    try:
+        if cancel_event.is_set() or lc.is_cancelled or not lc.is_current(lifecycle_gen):
+            raise RuntimeError("Lifecycle cancelled during prewarm")
+        update_status(f"[{profile_name}] Prewarm: mở browser sẵn (WebSub)")
+        _set_profile_ui(profile_name, browser='Đang mở (prewarm)', last_error='')
+        browser_glue.navigate(token, TIKTOK_UPLOAD_URL)
+
+        if proxy_data:
+            is_match, current_ip = browser_glue.verify_exit_ip(token, proxy_data['ip'])
+            if not is_match:
+                raise SessionSetupError("Prewarm: proxy exit IP không khớp")
+            _set_profile_ui(profile_name, proxy=f"OK: {current_ip}")
+
+        login_state = browser_glue.wait_page_login_state(token, timeout=30)
+        if login_state != 'authenticated':
+            raise SessionSetupError("Prewarm: chưa xác minh được đăng nhập")
+
+        if not lc.register_automation(lifecycle_gen, token):
+            raise RuntimeError("Lifecycle changed before session publish")
+        profiles[profile_name]['driver'] = token
+        _set_profile_ui(profile_name, status='Đang chạy', browser='Sẵn sàng', upload='Chờ video')
+        update_status(f"[{profile_name}] Prewarm sẵn sàng: {profile_path}")
+        return token
+    except Exception:
+        token.set_cancelled()
+        try:
+            token.quit()
+        except Exception:
+            pass
+        raise
+
+
+def _on_video_detected(intent):
+    """WebSub detection callback: schedule a fast browser prewarm for the target profile."""
+    profile_name = getattr(intent, 'profile_name', '') or ''
+    if not profile_name or profile_name not in profiles:
+        return
+    if not profiles[profile_name].get('running', False):
+        return
+    lc = get_lifecycle(profile_name)
+    if lc.is_cancelled:
+        return
+    _preparation_coordinator.submit(profile_name, lc.generation, _prewarm_browser)
 
 # =========================
 # Upload Logic
@@ -5082,6 +5165,7 @@ def _stop_profile_driver(name):
     stop_gen = lc.generation
     profile['running'] = False
     running_profiles.discard(name)
+    _preparation_coordinator.cancel_profile(name)
 
     drv_auto = profile.get('driver')
     profile['driver'] = None
@@ -6958,9 +7042,13 @@ def on_closing():
 
     try:
         youtube_monitor.stop_monitor()
+        youtube_monitor.set_video_detected_callback(None)
     except Exception as e:
         update_status(f"[YouTube] Lỗi dừng monitor khi đóng app: {e}")
 
+    for name in list(profiles.keys()):
+        _preparation_coordinator.cancel_profile(name)
+    _preparation_coordinator.shutdown()
     _shutdown_all_profiles()
     try:
         from log_engine import get_log_engine
@@ -7737,6 +7825,9 @@ def _youtube_start_monitor():
 def _youtube_stop_monitor():
     return youtube_monitor.stop_monitor()
 
+def _youtube_retry_ngrok():
+    return youtube_monitor.retry_ngrok_recovery()
+
 youtube_monitor_handlers = {
     'get_profiles': _youtube_profile_names,
     'get_status': youtube_monitor.get_status,
@@ -7751,6 +7842,7 @@ youtube_monitor_handlers = {
     'batch_download_latest': _youtube_batch_download_latest,
     'start': _youtube_start_monitor,
     'stop': _youtube_stop_monitor,
+    'retry_ngrok': _youtube_retry_ngrok,
     'add_channel': _youtube_add_channel,
     'set_profile': _youtube_set_profile,
     'download_test': _youtube_download_test,
@@ -7994,7 +8086,18 @@ def _start_youtube_monitor_safe():
         return
     def _run():
         try:
+            if _shutting_down:
+                return
             ok, msg = youtube_monitor.start_monitor()
+            if _shutting_down:
+                if ok:
+                    try:
+                        youtube_monitor.stop_monitor()
+                    except Exception:
+                        pass
+                return
+            if ok:
+                youtube_monitor.set_video_detected_callback(_on_video_detected)
             update_status(f"[YouTube] {msg}")
         except Exception as e:
             update_status(f"[YouTube] Auto-start lỗi: {e}")

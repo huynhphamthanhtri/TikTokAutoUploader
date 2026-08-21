@@ -14,6 +14,7 @@ dist/
 # Runtime data
 configs.json
 configs.json.*-backup-*.json
+configs.json.bak*
 delivery_ledger.json
 delivery_ledger.json.bak
 anti_detect_report.json
@@ -31,6 +32,10 @@ updater_config.json
 upload_benchmarks.jsonl
 monetization_cache.json
 patchright_diagnostics/
+youtube_monitor_ngrok/
+
+# Test artifacts
+test_results*.xml
 
 # User data
 Auto_Data/

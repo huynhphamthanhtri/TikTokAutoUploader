@@ -36,6 +36,7 @@ class YouTubeMonitorView(ctk.CTkFrame):
         self._channels_snapshot = None
         self._first_channel_render = True
         self._is_stacked_layout = False
+        self._context_channel_id: Optional[str] = None
 
         # State Variables
         self.status_var = ctk.StringVar(value="Monitor: Chưa chạy")
@@ -226,16 +227,16 @@ class YouTubeMonitorView(ctk.CTkFrame):
         self.tree.tag_configure("tag_inactive", foreground="#64748b")
         self.tree.tag_configure("tag_group", font=("Segoe UI Semibold", 10))
 
-        # Context Menu for Channel Rows
+        # Context Menu for Channel Rows (single instance, commands read _context_channel_id)
         self.ctx_menu = TkMenu(self, tearoff=0, font=("Segoe UI", 9))
-        self.ctx_menu.add_command(label="🌐 Mở kênh trên YouTube", command=self._open_channel_link)
-        self.ctx_menu.add_command(label="📁 Mở thư mục lưu video", command=self._open_folder)
+        self.ctx_menu.add_command(label="🌐 Mở kênh trên YouTube", command=lambda: self._open_channel_link())
+        self.ctx_menu.add_command(label="📁 Mở thư mục lưu video", command=lambda: self._open_folder())
         self.ctx_menu.add_separator()
-        self.ctx_menu.add_command(label="🔄 Đổi Profile đích...", command=self._open_profile_picker)
-        self.ctx_menu.add_command(label="⚡ Bật/Tắt theo dõi kênh", command=self._toggle_active)
-        self.ctx_menu.add_command(label="✂️ Bật/Tắt điều chỉnh 40-60s", command=self._toggle_short)
+        self.ctx_menu.add_command(label="🔄 Đổi Profile đích...", command=lambda: self._open_profile_picker())
+        self.ctx_menu.add_command(label="⚡ Bật/Tắt theo dõi kênh", command=lambda: self._toggle_active())
+        self.ctx_menu.add_command(label="✂️ Bật/Tắt điều chỉnh 40-60s", command=lambda: self._toggle_short())
         self.ctx_menu.add_separator()
-        self.ctx_menu.add_command(label="🗑️ Xóa kênh khỏi danh sách", command=self._remove_with_confirm)
+        self.ctx_menu.add_command(label="🗑️ Xóa kênh khỏi danh sách", command=lambda: self._remove_with_confirm())
 
         # 2B. RIGHT COLUMN: Control Panel Cards
         self.right_col = ctk.CTkScrollableFrame(
@@ -284,6 +285,16 @@ class YouTubeMonitorView(ctk.CTkFrame):
             fg_color=UIThemeTokens.STATUS_ERROR,
             hover_color="#b91c1c",
             command=self._stop,
+        ).pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        ctk.CTkButton(
+            ops_btn_row,
+            text="🔄 Retry Ngrok",
+            font=UIThemeTokens.FONT_BUTTON,
+            height=32,
+            fg_color=UIThemeTokens.STATUS_WARN_BG,
+            hover_color="#92400e",
+            command=self._retry_ngrok,
         ).pack(side="left", fill="x", expand=True, padx=(4, 0))
 
         # CARD 2: Thêm Kênh Nhanh (Add Channel)
@@ -666,35 +677,70 @@ class YouTubeMonitorView(ctk.CTkFrame):
             return False, f"Kênh '{cid}' không còn tồn tại trong danh sách theo dõi."
         return True, ""
 
-    def _build_context_menu(self, iid: str) -> tk.Menu:
-        menu = tk.Menu(self.tree, tearoff=0)
-        menu.add_command(label="🌐 Mở Kênh YouTube", command=lambda cid=iid: self._open_channel_link(cid=cid))
-        menu.add_command(label="📂 Mở Thư Mục Lưu Video", command=lambda cid=iid: self._open_folder(cid=cid))
-        menu.add_command(label="🎯 Đổi Profile đích...", command=lambda cid=iid: self._open_profile_picker(cid=cid))
-        menu.add_separator()
-        menu.add_command(label="⏯️ Bật/Tắt Theo Dõi", command=lambda cid=iid: self._toggle_active(cid=cid))
-        menu.add_command(label="⚡ Bật/Tắt Shorts Chỉ Định", command=lambda cid=iid: self._toggle_short(cid=cid))
-        menu.add_separator()
-        menu.add_command(label="🗑️ Xóa Kênh", command=lambda cid=iid: self._remove_with_confirm(cid=cid))
-        return menu
+    def _resolve_target_channel(self, cid: Optional[str] = None, require_tree: bool = False) -> Optional[str]:
+        """Resolve the target channel ID from explicit argument, context menu click, selection, or tree selection.
+
+        Args:
+            cid: Explicit channel ID. If provided, used directly (optionally validated against tree).
+            require_tree: If True, require the channel to exist in the tree. Only applies when cid is NOT explicitly provided.
+        """
+        explicit_cid = cid is not None
+        if explicit_cid:
+            target = cid
+        elif self._context_channel_id:
+            target = self._context_channel_id
+        elif self.selected_channel_id:
+            target = self.selected_channel_id
+        else:
+            sel = self.tree.selection()
+            target = sel[0] if sel else None
+
+        if not target or target.startswith("__group__"):
+            return None
+        if require_tree and not explicit_cid and not self.tree.exists(target):
+            return None
+        return target
+
+    def _refresh_channels_after_action(self, preferred_cid: Optional[str] = None) -> bool:
+        """Refresh channel data from live handler and re-render. Returns True if refresh succeeded."""
+        get_ch_fn = self.handlers.get("get_channels")
+        if not get_ch_fn or not callable(get_ch_fn):
+            self.append_log("Không thể làm mới danh sách kênh: handler 'get_channels' chưa cấu hình", error=True)
+            return False
+        try:
+            live_channels = list(get_ch_fn() or [])
+        except Exception as e:
+            self.append_log(f"Lỗi khi tải danh sách kênh: {e}", error=True)
+            return False
+
+        if not hasattr(live_channels, "__iter__") or isinstance(live_channels, (str, bytes)):
+            self.append_log("Dữ liệu danh sách kênh không hợp lệ", error=True)
+            return False
+
+        self._channels_data = [c for c in live_channels if isinstance(c, dict)]
+        self._channels_snapshot = None
+        self._render_current_channels()
+
+        # Restore selection if preferred_cid still exists
+        if preferred_cid and self.tree.exists(preferred_cid):
+            self.tree.selection_set(preferred_cid)
+            self.tree.focus(preferred_cid)
+            self.selected_channel_id = preferred_cid
+        return True
 
     def _show_context_menu(self, event):
         iid = self.tree.identify_row(event.y)
         if not iid or iid.startswith("__group__"):
             return
         self.tree.selection_set(iid)
+        self.tree.focus(iid)
         self.selected_channel_id = iid
-
-        menu = self._build_context_menu(iid)
+        self._context_channel_id = iid
         try:
-            menu.tk_popup(event.x_root, event.y_root)
+            self.ctx_menu.post(event.x_root, event.y_root)
         finally:
             try:
-                menu.grab_release()
-            except (tk.TclError, Exception):
-                pass
-            try:
-                menu.destroy()
+                self.ctx_menu.grab_release()
             except (tk.TclError, Exception):
                 pass
 
@@ -734,7 +780,13 @@ class YouTubeMonitorView(ctk.CTkFrame):
 
         healthy = status.get("healthy", False) if status.get("running") else False
         if status.get("running"):
-            if healthy:
+            mon_state = status.get("monitor_state", "RUNNING")
+            if mon_state == "DEGRADED":
+                health_text = "DEGRADED - cần Retry ngrok"
+            elif mon_state == "RECOVERING":
+                attempt = status.get("recovery_attempt", 0)
+                health_text = f"Đang khôi phục ngrok (lần {attempt})"
+            elif healthy:
                 ngrok_ok = status.get("callback_verified", False)
                 subs_total = status.get("subscriptions_total", 0)
                 subs_ok = status.get("subscriptions_ok", 0)
@@ -772,6 +824,10 @@ class YouTubeMonitorView(ctk.CTkFrame):
         cb_parts = [f"Port: {port}" if port else ""]
         if cb_url:
             cb_parts.append(f"Ngrok: {'OK' if status.get('callback_verified') else '?'}")
+        else:
+            auth_status = status.get("ngrok_auth_status", "unknown")
+            if auth_status != "ready":
+                cb_parts.append("Ngrok: cần authtoken")
         if last_post:
             cb_parts.append(f"POST: {last_post[11:19] if len(last_post) > 19 else last_post}")
         self.callback_var.set(f"Callback: {' | '.join(cb_parts) if cb_parts else '-'}")
@@ -988,30 +1044,54 @@ class YouTubeMonitorView(ctk.CTkFrame):
         self._first_channel_render = False
 
     def _open_channel_link(self, event=None, cid: Optional[str] = None):
-        if cid is not None:
-            channel_id = cid
-        elif event and hasattr(event, "y"):
-            channel_id = self.tree.identify_row(event.y)
-        else:
-            sel = self.tree.selection()
-            channel_id = sel[0] if sel else ""
-
-        if not channel_id or channel_id.startswith("__group__"):
+        target_cid = self._resolve_target_channel(cid, require_tree=True)
+        if not target_cid:
             return
-        webbrowser.open(f"https://www.youtube.com/channel/{channel_id}")
+
+        # Get channel metadata from live data first, then cache
+        channel_item = next((c for c in self._channels_data if c.get("channel_id") == target_cid), {})
+        channel_url = channel_item.get("channel_url", "").strip()
+        if channel_url:
+            url = channel_url
+        else:
+            url = f"https://www.youtube.com/channel/{target_cid}"
+
+        try:
+            ok = webbrowser.open(url)
+            if not ok:
+                self.append_log(f"Không mở được kênh YouTube: {url} (trình duyệt mặc định không phản hồi)", error=True)
+        except Exception as e:
+            self.append_log(f"Lỗi khi mở kênh YouTube: {e}", error=True)
 
     def _open_folder(self, cid: Optional[str] = None):
-        target_cid = cid if cid is not None else self.selected_channel_id
-        if not target_cid or target_cid.startswith("__group__"):
+        target_cid = self._resolve_target_channel(cid, require_tree=True)
+        if not target_cid:
             return
-        folder = self.tree.set(target_cid, "folder") if self.tree.exists(target_cid) else ""
-        if folder and os.path.exists(folder):
+
+        # Get folder from channel metadata first (may have full path), fallback to tree
+        channel_item = next((c for c in self._channels_data if c.get("channel_id") == target_cid), {})
+        folder = channel_item.get("folder", "").strip()
+        if not folder:
+            folder = self.tree.set(target_cid, "folder") if self.tree.exists(target_cid) else ""
+
+        if not folder:
+            self.append_log(f"Kênh {target_cid} chưa có thư mục lưu video được cấu hình", error=True)
+            return
+
+        folder = os.path.normpath(folder)
+        if not os.path.exists(folder):
+            self.append_log(f"Thư mục không tồn tại: {folder}", error=True)
+            return
+
+        try:
             os.startfile(folder)
+        except Exception as e:
+            self.append_log(f"Lỗi khi mở thư mục: {e}", error=True)
 
     def _open_profile_picker(self, cid: Optional[str] = None):
         """Mở Searchable Profile Picker Modal để đổi Profile đích cho kênh đang chọn."""
-        target_cid = cid if cid is not None else self.selected_channel_id
-        if not target_cid or target_cid.startswith("__group__"):
+        target_cid = self._resolve_target_channel(cid, require_tree=True)
+        if not target_cid:
             return
 
         # Tra cứu metadata kênh từ cache an toàn
@@ -1039,13 +1119,8 @@ class YouTubeMonitorView(ctk.CTkFrame):
             ok, msg = self._run_handler("set_profile", target_cid, new_profile)
             if ok:
                 self.append_log(f"Đã gán profile '{new_profile}' cho kênh {target_cid}", error=False)
-                self._channels_snapshot = None
-                # Cập nhật metadata cục bộ và render lại
-                for c in self._channels_data:
-                    if c.get("channel_id") == target_cid:
-                        c["profile_name"] = new_profile
-                        break
-                self._render_current_channels()
+                # Refresh từ live data để lấy cả folder/profile mới
+                self._refresh_channels_after_action(preferred_cid=target_cid)
             return ok, msg
 
         SearchableProfilePickerModal(
@@ -1128,6 +1203,12 @@ class YouTubeMonitorView(ctk.CTkFrame):
     def _stop(self):
         threading.Thread(
             target=lambda: self._append_threadsafe(self._run_handler("stop")[1]),
+            daemon=True,
+        ).start()
+
+    def _retry_ngrok(self):
+        threading.Thread(
+            target=lambda: self._append_threadsafe(self._run_handler("retry_ngrok")[1]),
             daemon=True,
         ).start()
 
@@ -1259,42 +1340,63 @@ class YouTubeMonitorView(ctk.CTkFrame):
         threading.Thread(target=_run, daemon=True).start()
 
     def _toggle_active(self, cid: Optional[str] = None):
-        target_cid = cid if cid is not None else self.selected_channel_id
-        if not target_cid or target_cid.startswith("__group__"):
+        target_cid = self._resolve_target_channel(cid, require_tree=True)
+        if not target_cid:
             return
         valid, err = self._validate_channel_live_fail_closed(target_cid)
         if not valid:
-            self.append_log(f"Không thể đổi trạng thái: {err}", error=True)
+            self.append_log(f"Không thể đổi trạng thái theo dõi: {err}", error=True)
             return
-        self.append_log(self._run_handler("toggle_active", target_cid)[1])
+        ok, msg = self._run_handler("toggle_active", target_cid)
+        if ok:
+            self.append_log(f"Đã đổi trạng thái theo dõi kênh {target_cid}: {msg}", error=False)
+            self._refresh_channels_after_action(preferred_cid=target_cid)
+        else:
+            self.append_log(f"Lỗi đổi trạng thái theo dõi {target_cid}: {msg}", error=True)
 
     def _toggle_short(self, cid: Optional[str] = None):
-        target_cid = cid if cid is not None else self.selected_channel_id
-        if not target_cid or target_cid.startswith("__group__"):
+        target_cid = self._resolve_target_channel(cid, require_tree=True)
+        if not target_cid:
             return
         valid, err = self._validate_channel_live_fail_closed(target_cid)
         if not valid:
             self.append_log(f"Không thể đổi trạng thái Shorts: {err}", error=True)
             return
-        self.append_log(self._run_handler("toggle_short", target_cid)[1])
+        ok, msg = self._run_handler("toggle_short", target_cid)
+        if ok:
+            self.append_log(f"Đã đổi trạng thái Shorts kênh {target_cid}: {msg}", error=False)
+            self._refresh_channels_after_action(preferred_cid=target_cid)
+        else:
+            self.append_log(f"Lỗi đổi trạng thái Shorts {target_cid}: {msg}", error=True)
 
     def _remove_with_confirm(self, cid: Optional[str] = None):
-        target_cid = cid if cid is not None else self.selected_channel_id
-        if not target_cid or target_cid.startswith("__group__"):
+        target_cid = self._resolve_target_channel(cid, require_tree=True)
+        if not target_cid:
             return
         valid, err = self._validate_channel_live_fail_closed(target_cid)
         if not valid:
             self.append_log(f"Không thể xóa kênh: {err}", error=True)
             return
-        if messagebox.askyesno("Xác nhận xóa kênh", f"Bạn có chắc muốn xóa kênh {target_cid} khỏi danh sách theo dõi?"):
+        # Get channel title for confirmation dialog
+        channel_item = next((c for c in self._channels_data if c.get("channel_id") == target_cid), {})
+        title = channel_item.get("title", target_cid)
+        if messagebox.askyesno("Xác nhận xóa kênh", f"Bạn có chắc muốn xóa kênh '{title}' ({target_cid}) khỏi danh sách theo dõi?"):
             self._remove(target_cid=target_cid)
 
     def _remove(self, target_cid: Optional[str] = None):
-        cid = target_cid if target_cid is not None else self.selected_channel_id
-        if not cid or cid.startswith("__group__"):
+        cid = self._resolve_target_channel(target_cid, require_tree=True)
+        if not cid:
             return
         valid, err = self._validate_channel_live_fail_closed(cid)
         if not valid:
             self.append_log(f"Không thể xóa kênh: {err}", error=True)
             return
-        self.append_log(self._run_handler("remove_channel", cid)[1])
+        ok, msg = self._run_handler("remove_channel", cid)
+        if ok:
+            self.append_log(f"Đã xóa kênh {cid}: {msg}", error=False)
+            # Clear context and selection since channel is removed
+            self._context_channel_id = None
+            self.selected_channel_id = None
+            self._refresh_channels_after_action(preferred_cid=None)
+        else:
+            self.append_log(f"Lỗi xóa kênh {cid}: {msg}", error=True)

@@ -289,8 +289,12 @@ async def upload_tiktok(
         _raise_if_cancelled(cancellation_event)
         await report(f"Opening TikTok upload page for {path.name}")
         _t = time.perf_counter()
-        await page.goto(upload_url, wait_until="domcontentloaded", timeout=cfg.navigation_ms)
-        timings["goto_seconds"] = time.perf_counter() - _t
+        if await upload_surface_ready(page):
+            timings["goto_seconds"] = 0.0
+            await report("Upload surface already ready, skipping navigation")
+        else:
+            await page.goto(upload_url, wait_until="domcontentloaded", timeout=cfg.navigation_ms)
+            timings["goto_seconds"] = time.perf_counter() - _t
 
         _t = time.perf_counter()
         page_state = await _wait_for_page_state(page, cancellation_event, cfg)
@@ -400,6 +404,26 @@ async def _wait_for_page_state(page: Any, cancellation_event: Any, cfg: UploadTi
     if _is_login_url(str(getattr(page, "url", ""))):
         return "login"
     raise TimeoutError(f"TikTok upload page was not ready within {cfg.page_ready:g}s")
+
+
+async def upload_surface_ready(page: Any) -> bool:
+    """Fast DOM check: is the upload surface already visible on the live page?
+
+    Returns True only when the upload surface (file input or upload card) is
+    currently visible and the page is not a login page. This lets the upload
+    path reuse the already-navigated prewarmed session instead of issuing a
+    second navigation. The result is never trusted absolutely: a missing/blank
+    surface falls back to the regular navigation path."""
+    try:
+        if _is_login_url(str(getattr(page, "url", ""))):
+            return False
+        if await _has_visible(page.locator(SELECTORS["login"])):
+            return False
+        return await _has_visible(page.locator(SELECTORS["file_input"])) or await _has_visible(
+            page.locator(SELECTORS["upload_surface"])
+        )
+    except Exception:
+        return False
 
 
 async def _wait_for_editor(

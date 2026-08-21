@@ -1,3 +1,20 @@
+# Phiên bản 1.1.5
+
+## Điểm mới
+- Tự động chuẩn bị browser khi WebSub phát hiện video mới.
+- Bổ sung owned ngrok agent, tự phục hồi tunnel và Retry thủ công.
+
+## Cải thiện
+- Tái sử dụng browser và upload surface đã sẵn sàng để giảm thời gian chuẩn bị đăng.
+- Context menu YouTube Monitor cập nhật trạng thái ngay sau thao tác.
+- Ngrok chỉ dừng process do ứng dụng sở hữu.
+
+## Sửa lỗi
+- Khắc phục context menu bị hủy trước khi callback chạy.
+- Khắc phục action áp dụng sai kênh khi selection thay đổi.
+- Khắc phục lỗi mở link/thư mục không có phản hồi.
+- Khắc phục tunnel ngrok gián đoạn nhưng monitor không thể phục hồi.
+
 # Phiên bản 1.1.4
 
 ## Điểm mới

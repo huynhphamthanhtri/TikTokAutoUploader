@@ -451,7 +451,7 @@ class TestYouTubeMonitorViewPhase2(unittest.TestCase):
         parent.destroy()
 
     def test_show_context_menu_creates_dynamic_tk_menu_with_closures(self):
-        """_show_context_menu builds dynamic Tk Menu whose closures capture the clicked iid independently of subsequent selection changes."""
+        """_show_context_menu uses single instance menu; commands capture clicked iid via _context_channel_id."""
         handlers = {
             "get_channels": lambda: [{"channel_id": "UC_CLICKED"}, {"channel_id": "UC_MUTATED"}],
             "toggle_active": MagicMock(return_value=(True, "Toggled")),
@@ -463,45 +463,61 @@ class TestYouTubeMonitorViewPhase2(unittest.TestCase):
         view.tree.insert("", "end", iid="UC_CLICKED", values=("Title", "@handle", "Prof", "0", "0", "0", "C:/f"))
         view.tree.insert("", "end", iid="UC_MUTATED", values=("Title 2", "@handle2", "Prof", "0", "0", "0", "C:/f"))
 
-        # Build dynamic menu directly using helper
-        menu = view._build_context_menu("UC_CLICKED")
+        # Simulate right-click on UC_CLICKED
+        class FakeEvent:
+            def __init__(self, x_root, y_root, y):
+                self.x_root = x_root
+                self.y_root = y_root
+                self.y = y
 
-        # Mutate selection after menu construction
+        event = FakeEvent(100, 100, 20)  # y=20 should hit first row
+        view._show_context_menu(event)
+
+        # Verify _context_channel_id was set to clicked row
+        self.assertEqual(view._context_channel_id, "UC_CLICKED")
+
+        # Mutate selection after menu opened
         view.selected_channel_id = "UC_MUTATED"
         view.tree.selection_set("UC_MUTATED")
 
-        # Extract callbacks attached to menu commands and invoke them
+        # The instance menu commands should still target UC_CLICKED via _context_channel_id
+        # Extract commands from the instance menu
         commands = {}
-        for i in range(menu.index("end") + 1):
+        for i in range(view.ctx_menu.index("end") + 1):
             try:
-                if menu.type(i) == "command":
-                    lbl = menu.entrycget(i, "label")
-                    cmd = menu.entrycget(i, "command")
+                if view.ctx_menu.type(i) == "command":
+                    lbl = view.ctx_menu.entrycget(i, "label")
+                    cmd = view.ctx_menu.entrycget(i, "command")
                     commands[lbl] = cmd
             except Exception:
                 pass
 
-        self.assertIn("⏯️ Bật/Tắt Theo Dõi", commands)
-        self.assertIn("⚡ Bật/Tắt Shorts Chỉ Định", commands)
-        self.assertIn("🗑️ Xóa Kênh", commands)
+        self.assertIn("⚡ Bật/Tắt theo dõi kênh", commands)
+        self.assertIn("✂️ Bật/Tắt điều chỉnh 40-60s", commands)
+        self.assertIn("🗑️ Xóa kênh khỏi danh sách", commands)
 
-        # Invoke toggle command from menu closure
-        cmd_toggle = commands["⏯️ Bật/Tắt Theo Dõi"]
+        # Invoke toggle command from menu - should target UC_CLICKED not UC_MUTATED
+        cmd_toggle = commands["⚡ Bật/Tắt theo dõi kênh"]
         view.tk.call(cmd_toggle)
         handlers["toggle_active"].assert_called_with("UC_CLICKED")
 
-        # Invoke short toggle command from menu closure
-        cmd_short = commands["⚡ Bật/Tắt Shorts Chỉ Định"]
+        # Invoke short toggle command from menu
+        cmd_short = commands["✂️ Bật/Tắt điều chỉnh 40-60s"]
         view.tk.call(cmd_short)
         handlers["toggle_short"].assert_called_with("UC_CLICKED")
 
-        # Invoke remove command from menu closure
-        cmd_remove = commands["🗑️ Xóa Kênh"]
+        # Invoke remove command from menu
+        cmd_remove = commands["🗑️ Xóa kênh khỏi danh sách"]
         with patch("tkinter.messagebox.askyesno", return_value=True):
             view.tk.call(cmd_remove)
             handlers["remove_channel"].assert_called_with("UC_CLICKED")
 
-        menu.destroy()
+        # Menu should still exist (not destroyed)
+        try:
+            view.ctx_menu.index("end")
+        except tk.TclError:
+            self.fail("Context menu was destroyed unexpectedly")
+
         parent.destroy()
 
     def test_open_channel_link_with_keyword_cid_and_empty_string(self):
