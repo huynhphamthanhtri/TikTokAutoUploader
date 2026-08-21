@@ -470,8 +470,17 @@ class TestYouTubeMonitorViewPhase2(unittest.TestCase):
                 self.y_root = y_root
                 self.y = y
 
-        event = FakeEvent(100, 100, 20)  # y=20 should hit first row
-        view._show_context_menu(event)
+        event = FakeEvent(100, 100, 20)
+
+        # Mock post and grab_release to avoid real Tk popup on CI (blocks on headless Windows runners)
+        with patch.object(view.ctx_menu, "post") as mock_post, \
+             patch.object(view.ctx_menu, "grab_release") as mock_grab_release:
+            view._show_context_menu(event)
+
+            # Verify post called with coordinates
+            mock_post.assert_called_once_with(100, 100)
+            # Verify grab_release called in finally
+            mock_grab_release.assert_called_once()
 
         # Verify _context_channel_id was set to clicked row
         self.assertEqual(view._context_channel_id, "UC_CLICKED")
@@ -517,6 +526,129 @@ class TestYouTubeMonitorViewPhase2(unittest.TestCase):
             view.ctx_menu.index("end")
         except tk.TclError:
             self.fail("Context menu was destroyed unexpectedly")
+
+        parent.destroy()
+
+    def test_show_context_menu_empty_row_no_post(self):
+        """Empty row (identify_row returns empty) does not call post and leaves _context_channel_id unchanged."""
+        handlers = {"get_channels": lambda: [{"channel_id": "UC_1"}]}
+        parent = ctk.CTkFrame(self.root)
+        view = YouTubeMonitorView(parent, handlers)
+        view.tree.insert("", "end", iid="UC_1", values=("Title", "@handle", "Prof", "0", "0", "0", "C:/f"))
+
+        class FakeEvent:
+            def __init__(self, x_root, y_root, y):
+                self.x_root = x_root
+                self.y_root = y_root
+                self.y = y
+
+        event = FakeEvent(100, 100, 500)  # y outside any row -> identify_row returns ""
+
+        with patch.object(view.ctx_menu, "post") as mock_post, \
+             patch.object(view.ctx_menu, "grab_release") as mock_grab_release:
+            view._show_context_menu(event)
+
+            mock_post.assert_not_called()
+            mock_grab_release.assert_not_called()
+
+        # _context_channel_id should remain None
+        self.assertIsNone(view._context_channel_id)
+
+        parent.destroy()
+
+    def test_show_context_menu_group_row_no_post(self):
+        """Group row (iid starts with __group__) does not call post and leaves _context_channel_id unchanged."""
+        handlers = {"get_channels": lambda: [{"channel_id": "UC_1", "profile_name": "Prof1"}]}
+        parent = ctk.CTkFrame(self.root)
+        view = YouTubeMonitorView(parent, handlers)
+        # Set channel data directly to ensure grouped rendering
+        view._channels_data = [{"channel_id": "UC_1", "profile_name": "Prof1", "title": "Test Channel", "active": True, "process_short": True, "seen_count": 0, "folder": "C:/f"}]
+        view._render_current_channels()
+
+        group_iid = None
+        for iid in view.tree.get_children(""):
+            if iid.startswith("__group__"):
+                group_iid = iid
+                break
+
+        self.assertIsNotNone(group_iid, "Group row should exist after rendering")
+
+        class FakeEvent:
+            def __init__(self, x_root, y_root, y):
+                self.x_root = x_root
+                self.y_root = y_root
+                self.y = y
+
+        # Need to find y coordinate for the group row - use a mock to force identify_row
+        original_identify_row = view.tree.identify_row
+        try:
+            view.tree.identify_row = lambda y: group_iid
+
+            event = FakeEvent(100, 100, 20)
+
+            with patch.object(view.ctx_menu, "post") as mock_post, \
+                 patch.object(view.ctx_menu, "grab_release") as mock_grab_release:
+                view._show_context_menu(event)
+
+                mock_post.assert_not_called()
+                mock_grab_release.assert_not_called()
+
+            self.assertIsNone(view._context_channel_id)
+        finally:
+            view.tree.identify_row = original_identify_row
+
+        parent.destroy()
+
+    def test_show_context_menu_post_failure_calls_grab_release(self):
+        """When post raises tk.TclError, grab_release is still called in finally."""
+        handlers = {"get_channels": lambda: [{"channel_id": "UC_1"}]}
+        parent = ctk.CTkFrame(self.root)
+        view = YouTubeMonitorView(parent, handlers)
+        view.tree.insert("", "end", iid="UC_1", values=("Title", "@handle", "Prof", "0", "0", "0", "C:/f"))
+
+        class FakeEvent:
+            def __init__(self, x_root, y_root, y):
+                self.x_root = x_root
+                self.y_root = y_root
+                self.y = y
+
+        event = FakeEvent(100, 100, 20)
+
+        with patch.object(view.ctx_menu, "post", side_effect=tk.TclError("display connection failed")) as mock_post, \
+             patch.object(view.ctx_menu, "grab_release") as mock_grab_release:
+            try:
+                view._show_context_menu(event)
+            except tk.TclError:
+                pass  # Expected: post() raises, exception propagates
+
+            mock_post.assert_called_once_with(100, 100)
+            mock_grab_release.assert_called_once()
+
+        parent.destroy()
+
+    def test_show_context_menu_does_not_destroy_menu(self):
+        """_show_context_menu never calls destroy on the menu instance."""
+        handlers = {"get_channels": lambda: [{"channel_id": "UC_1"}]}
+        parent = ctk.CTkFrame(self.root)
+        view = YouTubeMonitorView(parent, handlers)
+        view.tree.insert("", "end", iid="UC_1", values=("Title", "@handle", "Prof", "0", "0", "0", "C:/f"))
+
+        class FakeEvent:
+            def __init__(self, x_root, y_root, y):
+                self.x_root = x_root
+                self.y_root = y_root
+                self.y = y
+
+        event = FakeEvent(100, 100, 20)
+
+        with patch.object(view.ctx_menu, "post") as mock_post, \
+             patch.object(view.ctx_menu, "grab_release") as mock_grab_release, \
+             patch.object(view.ctx_menu, "destroy") as mock_destroy:
+            view._show_context_menu(event)
+
+            mock_post.assert_called_once_with(100, 100)
+            mock_grab_release.assert_called_once()
+            mock_destroy.assert_not_called()
 
         parent.destroy()
 
