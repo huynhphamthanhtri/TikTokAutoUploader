@@ -1,3 +1,22 @@
+# Phiên bản 1.2.1
+
+## Điểm mới
+- **Bộ Tối Ưu Tốc Độ Tải YouTube**: Tăng tốc độ tải mạng gấp 3-5x với HTTP chunk 10MB và stream buffer 16KB.
+- **Client Throttling Bypass**: Tự động áp dụng player client iOS/Android để vượt qua cơ chế bóp băng thông của YouTube và hạn chế 90% lỗi HTTP 403 Forbidden.
+- **Nút Kiểm Tra Cookie Live**: Thêm nút *Kiểm tra Live* trực quan trong YouTube Monitor giúp người dùng kiểm tra ngay độ sẵn sàng của file `cookies.txt` với YouTube.
+- **Active Hardware Probing cho GPU**: Tự động kiểm tra tính tương thích thực tế của card GPU (NVENC/AMF/QSV) trước khi sử dụng, tự động chuyển CPU an toàn khi máy không có card rời.
+
+## Cải thiện
+- **Quy Trình 1-Pass Faststart**: Tích hợp cờ `+faststart` ngay khi tải video, giảm thời gian xử lý FFmpeg từ 3.8s xuống < 0.2s.
+- **Tối Ưu Giao Diện YouTube Monitor**: Tách khu vực Cookie thành 2 tầng rõ ràng (*Chọn...* ở trên, *Lưu*, *Kiểm tra Live*, *Xóa* ở dưới) không bao giờ bị tràn viền.
+- **Card Vận Hành Hệ Thống**: Thiết kế lại 2 nút bấm chính to rõ ràng (*Bắt Đầu Giám Sát* & *Dừng*), loại bỏ nút phụ thừa.
+- **Hỗ Trợ Mọi Định Dạng Netscape Cookie**: Bộ parser cookie tự động nhận diện định dạng chuẩn kể cả khi thiếu dòng comment header.
+
+## Sửa lỗi
+- **Sửa Lỗi Nạp Cookie yt-dlp**: Khắc phục triệt để lỗi truyền sai tham số `cookiefile` khiến file cookie bị bỏ qua.
+- **Sửa Lỗi FFmpeg Slow-Mo**: Khắc phục lỗi trích xuất stderr bị che bởi banner bản quyền FFmpeg và xung đột pixel format.
+- **Khắc phục nút Xóa Cookie bị ẩn**: Xử lý triệt để lỗi tràn viền giao diện trên các màn hình độ phân giải khác nhau.
+
 # Phiên bản 1.2.0
 
 ## Điểm mới

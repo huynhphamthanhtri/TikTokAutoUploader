@@ -2,6 +2,7 @@ from .core import (
     add_channel_for_profile,
     batch_download_latest,
     check_and_save_api_key,
+    check_youtube_cookie_live,
     download_test_video,
     find_latest_video,
     get_channels,
@@ -18,6 +19,7 @@ from .core import (
     stop_monitor,
     toggle_channel_active,
     toggle_channel_short,
+    validate_youtube_cookie_file,
 )
 from .activity import (
     append_activity,

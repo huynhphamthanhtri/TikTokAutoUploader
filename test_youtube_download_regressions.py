@@ -291,9 +291,10 @@ class TestBuildYtdlpOpts(unittest.TestCase):
 
     def test_cookies_not_attached_when_disallowed(self):
         from youtube_monitor.core import _build_ytdlp_opts, YtdlpAttempt, FORMAT_FAST_720P
-        base = {"format": FORMAT_FAST_720P, "outtmpl": "x", "extractor_args": {"youtube": {"skip": ["hls"]}}, "cookies": "c:/tmp/c.txt"}
+        base = {"format": FORMAT_FAST_720P, "outtmpl": "x", "extractor_args": {"youtube": {"skip": ["hls"]}}, "cookies": "c:/tmp/c.txt", "cookiefile": "c:/tmp/c.txt"}
         opts = _build_ytdlp_opts(base, YtdlpAttempt("a", "direct", "", False, FORMAT_FAST_720P), tempfile.gettempdir())
         self.assertNotIn("cookies", opts)
+        self.assertNotIn("cookiefile", opts)
 
     @patch("youtube_monitor.core._resolve_cookies_file", return_value="c:/tmp/c.txt")
     def test_cookies_attached_when_allowed(self, _cf):
@@ -301,12 +302,80 @@ class TestBuildYtdlpOpts(unittest.TestCase):
         base = {"format": FORMAT_FAST_720P, "outtmpl": "x", "extractor_args": {"youtube": {"skip": ["hls"]}}}
         opts = _build_ytdlp_opts(base, YtdlpAttempt("a", "direct", "", True, FORMAT_FAST_720P), tempfile.gettempdir())
         self.assertEqual(opts["cookies"], "c:/tmp/c.txt")
+        self.assertEqual(opts["cookiefile"], "c:/tmp/c.txt")
+
+    def test_validate_youtube_cookie_file_formats(self):
+        from youtube_monitor.core import validate_youtube_cookie_file
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(".youtube.com\tTRUE\t/\tTRUE\t2147483647\tLOGIN_INFO\tAFmmF2sw...\n")
+            valid_no_header = f.name
+
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write("# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t2147483647\tOTHER\t123\n")
+            no_yt_domain = f.name
+
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write("# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t100000\tSID\t123\n")
+            expired_yt = f.name
+
+        try:
+            ok, msg = validate_youtube_cookie_file(valid_no_header)
+            self.assertTrue(ok)
+            self.assertIn("cookie đăng nhập", msg or "")
+
+            ok_no_yt, _ = validate_youtube_cookie_file(no_yt_domain)
+            self.assertFalse(ok_no_yt)
+
+            ok_exp, _ = validate_youtube_cookie_file(expired_yt)
+            self.assertFalse(ok_exp)
+        finally:
+            for p in (valid_no_header, no_yt_domain, expired_yt):
+                try: os.unlink(p)
+                except Exception: pass
+
+    @patch("youtube_monitor.core.YoutubeDL")
+    @patch("youtube_monitor.core._resolve_cookies_file")
+    def test_check_youtube_cookie_live_success(self, mock_resolve, mock_ydl_cls):
+        from youtube_monitor.core import check_youtube_cookie_live
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(".youtube.com\tTRUE\t/\tTRUE\t2147483647\tLOGIN_INFO\tAFmmF2sw...\n")
+            tmp_path = f.name
+
+        mock_resolve.return_value = tmp_path
+        mock_ydl_instance = MagicMock()
+        mock_ydl_instance.extract_info.return_value = {"id": "dQw4w9WgXcQ"}
+        mock_ydl_cls.return_value.__enter__.return_value = mock_ydl_instance
+
+        try:
+            ok, msg = check_youtube_cookie_live(tmp_path)
+            self.assertTrue(ok)
+            self.assertIn("Live OK", msg)
+        finally:
+            try: os.unlink(tmp_path)
+            except Exception: pass
 
     def test_alt_client_extractor_args(self):
         from youtube_monitor.core import _build_ytdlp_opts, YtdlpAttempt, FORMAT_FAST_720P
         base = {"format": FORMAT_FAST_720P, "outtmpl": "x", "extractor_args": {"youtube": {"skip": ["hls"]}}}
         opts = _build_ytdlp_opts(base, YtdlpAttempt("a", "direct", "", False, FORMAT_FAST_720P, player_client="android_vr"), tempfile.gettempdir())
         self.assertEqual(opts["extractor_args"]["youtube"]["player_client"], ["android_vr"])
+        self.assertEqual(opts["extractor_args"]["youtube"]["skip"], ["hls"])
+
+    def test_ytdlp_throughput_and_faststart_opts_present(self):
+        from youtube_monitor.core import _build_ytdlp_opts, YtdlpAttempt, FORMAT_FAST_720P
+        base = {
+            "format": FORMAT_FAST_720P,
+            "outtmpl": "x",
+            "http_chunk_size": 10485760,
+            "buffersize": 16384,
+            "postprocessor_args": {"Merger": ["-movflags", "+faststart"]},
+            "extractor_args": {"youtube": {"player_client": ["ios", "android", "web"], "skip": ["hls"]}},
+        }
+        opts = _build_ytdlp_opts(base, YtdlpAttempt("a", "direct", "", False, FORMAT_FAST_720P), tempfile.gettempdir())
+        self.assertEqual(opts["http_chunk_size"], 10485760)
+        self.assertEqual(opts["buffersize"], 16384)
+        self.assertEqual(opts["postprocessor_args"], {"Merger": ["-movflags", "+faststart"]})
+        self.assertEqual(opts["extractor_args"]["youtube"]["player_client"], ["ios", "android", "web"])
         self.assertEqual(opts["extractor_args"]["youtube"]["skip"], ["hls"])
 
 

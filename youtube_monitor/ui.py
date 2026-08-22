@@ -269,9 +269,9 @@ class YouTubeMonitorView(ctk.CTkFrame):
 
         ctk.CTkButton(
             ops_btn_row,
-            text="▶ Bắt Đầu",
+            text="▶ Bắt Đầu Giám Sát",
             font=UIThemeTokens.FONT_BUTTON,
-            height=32,
+            height=34,
             fg_color=UIThemeTokens.STATUS_LIVE,
             hover_color="#15803d",
             command=self._start,
@@ -281,21 +281,12 @@ class YouTubeMonitorView(ctk.CTkFrame):
             ops_btn_row,
             text="⏹ Dừng",
             font=UIThemeTokens.FONT_BUTTON,
-            height=32,
+            height=34,
+            width=80,
             fg_color=UIThemeTokens.STATUS_ERROR,
             hover_color="#b91c1c",
             command=self._stop,
-        ).pack(side="left", fill="x", expand=True, padx=(4, 0))
-
-        ctk.CTkButton(
-            ops_btn_row,
-            text="🔄 Retry Ngrok",
-            font=UIThemeTokens.FONT_BUTTON,
-            height=32,
-            fg_color=UIThemeTokens.STATUS_WARN_BG,
-            hover_color="#92400e",
-            command=self._retry_ngrok,
-        ).pack(side="left", fill="x", expand=True, padx=(4, 0))
+        ).pack(side="right", padx=(4, 0))
 
         # CARD 2: Thêm Kênh Nhanh (Add Channel)
         card_add = ctk.CTkFrame(
@@ -409,7 +400,7 @@ class YouTubeMonitorView(ctk.CTkFrame):
         ).pack(anchor="w", padx=10, pady=(2, 2))
 
         cookie_row = ctk.CTkFrame(card_cfg, fg_color="transparent")
-        cookie_row.pack(fill="x", padx=10, pady=(0, 6))
+        cookie_row.pack(fill="x", padx=10, pady=(0, 4))
 
         self.cookie_entry = ctk.CTkEntry(
             cookie_row,
@@ -418,36 +409,51 @@ class YouTubeMonitorView(ctk.CTkFrame):
             height=28,
             font=UIThemeTokens.FONT_BODY,
         )
-        self.cookie_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.cookie_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
         ctk.CTkButton(
             cookie_row,
-            text="Chọn",
+            text="Chọn...",
             font=UIThemeTokens.FONT_BUTTON,
-            width=50,
+            width=65,
             height=28,
             command=self._choose_cookie_file,
-        ).pack(side="left", padx=2)
+        ).pack(side="right")
+
+        cookie_actions_row = ctk.CTkFrame(card_cfg, fg_color="transparent")
+        cookie_actions_row.pack(fill="x", padx=10, pady=(0, 6))
 
         ctk.CTkButton(
-            cookie_row,
+            cookie_actions_row,
             text="Lưu",
             font=UIThemeTokens.FONT_BUTTON,
-            width=45,
+            width=70,
             height=28,
             command=self._save_cookie_file,
-        ).pack(side="left", padx=2)
+        ).pack(side="left", padx=(0, 4))
+
+        self.btn_check_cookie = ctk.CTkButton(
+            cookie_actions_row,
+            text="Kiểm tra Live",
+            font=UIThemeTokens.FONT_BUTTON,
+            width=100,
+            height=28,
+            fg_color=UIThemeTokens.ACCENT_PRIMARY,
+            hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
+            command=self._check_cookie_file,
+        )
+        self.btn_check_cookie.pack(side="left", padx=(0, 4))
 
         ctk.CTkButton(
-            cookie_row,
+            cookie_actions_row,
             text="Xóa",
             font=UIThemeTokens.FONT_BUTTON,
-            width=40,
+            width=60,
             height=28,
             fg_color=UIThemeTokens.STATUS_ERROR,
             hover_color="#b91c1c",
             command=self._clear_cookie_file,
-        ).pack(side="left")
+        ).pack(side="right")
 
         # Duration Limit Row
         dur_row = ctk.CTkFrame(card_cfg, fg_color="transparent")
@@ -1281,6 +1287,30 @@ class YouTubeMonitorView(ctk.CTkFrame):
         self.cookie_var.set("")
         self.cookie_display_var.set("Chưa chọn cookie")
         self.append_log(self._run_handler("set_cookies_file", "")[1])
+
+    def _check_cookie_file(self):
+        path = self.cookie_var.get().strip()
+        self.append_log("[Cookies] Đang kiểm tra tính hợp lệ & kết nối Live của cookie YouTube...")
+
+        def run():
+            check_fn = self.handlers.get("check_cookies", None)
+            if callable(check_fn):
+                ok, msg = check_fn(path if path else None)
+            else:
+                from .core import check_youtube_cookie_live
+                ok, msg = check_youtube_cookie_live(path if path else None)
+
+            self._append_threadsafe(f"[Cookies] {msg}", error=not ok)
+            try:
+                from tkinter import messagebox
+                if ok:
+                    messagebox.showinfo("Kiểm Tra Cookie YouTube", f"✅ THÀNH CÔNG:\n\n{msg}")
+                else:
+                    messagebox.showwarning("Kiểm Tra Cookie YouTube", f"⚠️ KHÔNG KHẢ DỤNG:\n\n{msg}\n\nVui lòng xuất lại file cookies.txt từ trình duyệt đăng nhập YouTube.")
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _save_max_minutes(self):
         value = self.max_minutes_var.get().strip()

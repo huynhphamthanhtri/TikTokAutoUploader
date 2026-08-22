@@ -7841,6 +7841,7 @@ youtube_monitor_handlers = {
     'get_logs': youtube_monitor.get_logs,
     'save_api_key': youtube_monitor.check_and_save_api_key,
     'set_cookies_file': youtube_monitor.set_cookies_file,
+    'check_cookies': youtube_monitor.check_youtube_cookie_live,
     'set_max_video_minutes': youtube_monitor.set_max_video_minutes,
     'batch_download_latest': _youtube_batch_download_latest,
     'start': _youtube_start_monitor,

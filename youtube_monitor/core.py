@@ -561,33 +561,85 @@ def validate_youtube_cookie_file(path):
         return False, "Đường dẫn cookie không phải file."
     try:
         with open(p, "r", encoding="utf-8", errors="replace") as f:
-            head = f.read(16384)
+            content = f.read(65536)
     except Exception as e:
         return False, f"Không đọc được file cookie: {e}"
-    if "# Netscape HTTP Cookie File" not in head and "# HTTP Cookie File" not in head:
-        return False, "File cookie không đúng định dạng Netscape."
-    lines = [line for line in head.splitlines() if line.strip() and not line.strip().startswith("#")]
+
+    lines = [line.strip() for line in content.splitlines() if line.strip() and not line.strip().startswith("#")]
     if not lines:
-        return False, "File cookie rỗng (không có entry)."
-    yt_lines = [line for line in lines if ".youtube.com" in line or ".google.com" in line]
-    if not yt_lines:
-        return False, "Không có cookie cho domain YouTube/Google."
+        return False, "File cookie rỗng (không có entry hợp lệ)."
+
+    yt_entries = []
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) >= 6:
+            domain = fields[0].lower()
+            if "youtube.com" in domain or "google.com" in domain:
+                yt_entries.append(fields)
+
+    if not yt_entries:
+        return False, "Không tìm thấy cookie cho domain YouTube hoặc Google (.youtube.com / .google.com)."
+
     now = time.time()
     valid_yt = 0
     expired_yt = 0
-    for line in yt_lines:
-        fields = line.split("\t")
+    has_auth_cookie = False
+    auth_cookie_names = {"login_info", "sid", "hsid", "ssid", "apisid", "sapisid", "__secure-1psid", "__secure-3psid"}
+
+    for fields in yt_entries:
         try:
             expires = int(fields[4]) if len(fields) > 4 else 0
         except Exception:
             expires = 0
+
+        cookie_name = fields[5].lower() if len(fields) > 5 else ""
+        if cookie_name in auth_cookie_names:
+            has_auth_cookie = True
+
         if expires > 0 and expires < now:
             expired_yt += 1
         else:
             valid_yt += 1
+
     if valid_yt == 0:
-        return False, "Cookie YouTube/Google đã hết hạn."
-    return True, f"Có {valid_yt} entry YouTube/Google chưa hết hạn (chưa xác minh live)."
+        return False, f"Tất cả {expired_yt} cookie YouTube/Google trong file đã hết hạn."
+
+    auth_msg = " (Đã có cookie đăng nhập)" if has_auth_cookie else ""
+    return True, f"Tìm thấy {valid_yt} cookie YouTube/Google hợp lệ{auth_msg}."
+
+
+def check_youtube_cookie_live(path=None):
+    """Kiểm tra tính hợp lệ và khả năng kết nối live của file cookie YouTube với yt-dlp."""
+    resolved = path or _resolve_cookies_file()
+    if not resolved:
+        return False, "Chưa chọn hoặc cấu hình file cookie."
+
+    ok, reason = validate_youtube_cookie_file(resolved)
+    if not ok:
+        return False, f"File cookie không hợp lệ: {reason}"
+
+    try:
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "cookiefile": str(resolved),
+            "cookies": str(resolved),
+            "socket_timeout": 12,
+            "extractor_args": {"youtube": {"skip": ["hls"]}},
+        }
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info("https://www.youtube.com/watch?v=dQw4w9WgXcQ", download=False)
+            if info and info.get("id"):
+                return True, f"Cookie YouTube sẵn sàng & Live OK! ({reason})"
+        return True, f"Cookie YouTube hợp lệ: {reason}"
+    except Exception as e:
+        err_msg = str(e)
+        if "confirm you are not a bot" in err_msg.lower() or "sign in" in err_msg.lower():
+            return False, f"Cookie bị YouTube yêu cầu xác minh bot: {err_msg[:120]}"
+        if "403" in err_msg:
+            return False, f"Cookie bị lỗi 403 Forbidden: {err_msg[:120]}"
+        return False, f"Kiểm tra live cookie thất bại: {err_msg[:120]}"
 
 
 def _ytdlp_alternate_client():
@@ -618,8 +670,10 @@ def _build_ytdlp_opts(base_opts, attempt, attempt_dir):
     if attempt.use_cookies:
         cookies = _resolve_cookies_file()
         if cookies:
+            opts["cookiefile"] = cookies
             opts["cookies"] = cookies
     else:
+        opts.pop("cookiefile", None)
         opts.pop("cookies", None)
     if attempt.player_client:
         ea = {}
@@ -1666,6 +1720,7 @@ def _fetch_video_duration(video_id, retries=2):
     }
     cookies = _resolve_cookies_file()
     if cookies:
+        opts["cookiefile"] = cookies
         opts["cookies"] = cookies
     last_error = None
     for attempt in range(max(1, int(retries or 1))):
@@ -1706,6 +1761,7 @@ def find_latest_video(channel_link, max_seconds=0, scan_limit=BATCH_SCAN_LIMIT):
     }
     cookies = _resolve_cookies_file()
     if cookies:
+        opts["cookiefile"] = cookies
         opts["cookies"] = cookies
     try:
         with YoutubeDL(opts) as ydl:
@@ -1971,8 +2027,11 @@ def _download_one_result(channel_id, video_id, published_iso=None, detected_iso=
             "nocheckcertificate": True,
             "windowsfilenames": True,
             "concurrent_fragment_downloads": cf,
+            "http_chunk_size": 10485760,
+            "buffersize": 16384,
+            "postprocessor_args": {"Merger": ["-movflags", "+faststart"]},
             "cachedir": str(staging / ".ydl_cache"),
-            "extractor_args": {"youtube": {"skip": ["hls"]}},
+            "extractor_args": {"youtube": {"player_client": ["ios", "android", "web"], "skip": ["hls"]}},
             "check_formats": False,
             "merge_output_format": "mp4",
         }

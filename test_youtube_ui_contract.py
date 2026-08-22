@@ -84,6 +84,7 @@ class TestYouTubeUIContract(unittest.TestCase):
         view.refresh_data()
         self.assertEqual(view.cookie_var.get(), "C:/path/to/my_cookies.txt")
         self.assertEqual(view.cookie_display_var.get(), "my_cookies.txt")
+        self.assertIsNotNone(view.btn_check_cookie)
 
         # 3. Verify Context menu entries
         self.assertIsNotNone(view.ctx_menu)
