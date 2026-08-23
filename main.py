@@ -7837,6 +7837,8 @@ youtube_monitor_handlers = {
     'get_channels': youtube_monitor.get_channels,
     'get_cookies_file': youtube_monitor.get_cookies_file,
     'get_max_video_minutes': _youtube_get_max_video_minutes,
+    'get_video_quality': youtube_monitor.get_video_quality,
+    'set_video_quality': youtube_monitor.set_video_quality,
     'get_profile_folder': _youtube_get_profile_folder,
     'get_logs': youtube_monitor.get_logs,
     'save_api_key': youtube_monitor.check_and_save_api_key,

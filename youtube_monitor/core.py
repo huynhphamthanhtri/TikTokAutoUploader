@@ -64,7 +64,9 @@ SHORT_SLOW_MAX_DURATION = 60.0
 SHORT_TARGET_DURATION = 61.0
 MIN_SECONDS = 61
 LOOP_MIN_DURATION = 60
-RESUBSCRIBE_LEAD_TIME_HOURS = 12
+RESUBSCRIBE_LEAD_TIME_HOURS = 24
+RESUBSCRIBE_CHECK_SECONDS = 900
+MONITOR_START_GRACE_SECONDS = 300
 MAX_ACCEPTABLE_AGE_HOURS = int(os.environ.get("MAX_ACCEPTABLE_AGE_HOURS", "12"))
 WATERMARK_SLACK_MINUTES = int(os.environ.get("WATERMARK_SLACK_MINUTES", "30"))
 SEEN_MAX_PER_CHANNEL = 1200
@@ -81,12 +83,33 @@ FORMAT_COMPAT_720P = (
     "bv[height<=720]+ba/"
     "b[height<=720]"
 )
+FORMAT_FAST_1080P = (
+    "bv[height<=1080][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
+    "bv[height<=1080][ext=mp4]+ba[ext=m4a]/"
+    "bv[height<=1080][vcodec^=avc1]+ba/"
+    "b[height<=1080][ext=mp4][vcodec^=avc1]/"
+    "b[height<=1080][ext=mp4]/"
+    "b[height<=1080]"
+)
+FORMAT_COMPAT_1080P = (
+    "bv[height<=1080]+ba/"
+    "b[height<=1080]"
+)
+
+
+def _quality_format_selectors(quality):
+    q = str(quality or "").strip().lower()
+    if q == "1080p":
+        return FORMAT_FAST_1080P, FORMAT_COMPAT_1080P
+    return FORMAT_FAST_720P, FORMAT_COMPAT_720P
+
 
 CONFIG_DEFAULTS = {
     "api_keys": [],
     "ngrok_port": NGROK_PORT_DEFAULT,
     "download_workers": 4,
     "max_video_minutes": 0,
+    "video_quality": "720p",
     "auto_start": True,
     "cookies_file": "",
     "proxy_rotation": True,
@@ -291,6 +314,26 @@ def set_max_video_minutes(minutes):
     text = "không giới hạn" if value == 0 else f"{value} phút"
     log(f"[Config] Max video: {text}")
     return True, f"Đã lưu giới hạn: {text}."
+
+
+def get_video_quality():
+    try:
+        q = str(get_config().get("video_quality", "720p")).strip().lower()
+        return "1080p" if q == "1080p" else "720p"
+    except Exception:
+        return "720p"
+
+
+def set_video_quality(quality):
+    q = str(quality or "").strip().lower()
+    if q not in ("720p", "1080p"):
+        return False, "Chất lượng video không hợp lệ (chỉ chấp nhận 720p hoặc 1080p)."
+    cfg = get_config()
+    cfg["video_quality"] = q
+    _save_config(cfg)
+    label = "Tối đa 1080p (Sắc nét)" if q == "1080p" else "Tối đa 720p (Nhanh)"
+    log(f"[Config] Chất lượng video: {label}")
+    return True, f"Đã lưu chất lượng video: {label}."
 
 
 def _format_duration(seconds):
@@ -693,14 +736,16 @@ def _build_attempt_plan(profile_name, explicit_proxy=None):
     use_cookies = cookie_policy not in ("never", "off", "none")
     cookie_available = bool(_resolve_cookies_file())
     proxy_fallback = bool(cfg.get("youtube_proxy_fallback", False))
+    quality = get_video_quality()
+    fast_fmt, compat_fmt = _quality_format_selectors(quality)
 
     attempts = [
         YtdlpAttempt(
-            "direct-primary", "direct", "", False, FORMAT_FAST_720P,
+            "direct-primary", "direct", "", False, fast_fmt,
             "direct anonymous",
         ),
         YtdlpAttempt(
-            "direct-alt-format", "direct", "", False, FORMAT_COMPAT_720P,
+            "direct-alt-format", "direct", "", False, compat_fmt,
             "403 -> alternate format",
             triggers=(FAILURE_HTTP_403, FAILURE_FORMAT_UNAVAILABLE),
         ),
@@ -708,14 +753,14 @@ def _build_attempt_plan(profile_name, explicit_proxy=None):
     alt_client = _ytdlp_alternate_client()
     if alt_client:
         attempts.append(YtdlpAttempt(
-            "direct-alt-client", "direct", "", False, FORMAT_FAST_720P,
+            "direct-alt-client", "direct", "", False, fast_fmt,
             "403 -> alternate client",
             player_client=alt_client,
             triggers=(FAILURE_HTTP_403,),
         ))
     if use_cookies and cookie_available:
         attempts.append(YtdlpAttempt(
-            "direct-cookies", "direct", "", True, FORMAT_FAST_720P,
+            "direct-cookies", "direct", "", True, fast_fmt,
             "auth/403 -> cookies",
             triggers=(FAILURE_HTTP_403, FAILURE_AUTH_REQUIRED, FAILURE_YOUTUBE_BLOCK),
         ))
@@ -726,7 +771,7 @@ def _build_attempt_plan(profile_name, explicit_proxy=None):
         proxy = explicit_proxy
     if proxy:
         attempts.append(YtdlpAttempt(
-            "proxy-exact", "proxy", proxy, False, FORMAT_FAST_720P,
+            "proxy-exact", "proxy", proxy, False, fast_fmt,
             "proxy fallback",
             triggers=(FAILURE_HTTP_403, FAILURE_YOUTUBE_BLOCK, FAILURE_PROXY_TRANSPORT, FAILURE_TRANSIENT_NETWORK),
         ))
@@ -1137,7 +1182,9 @@ def _polling_item_is_at_or_before_watermark(meta, pub_epoch):
 
 
 def _published_before_monitor_start(pub_epoch):
-    return pub_epoch is not None and _monitor_started_epoch is not None and pub_epoch < _monitor_started_epoch
+    if pub_epoch is None or _monitor_started_epoch is None:
+        return False
+    return pub_epoch < (_monitor_started_epoch - MONITOR_START_GRACE_SECONDS)
 
 
 def _mark_pre_start_seen(channel_id, video_id, pub_epoch, source):
@@ -2016,8 +2063,10 @@ def _download_one_result(channel_id, video_id, published_iso=None, detected_iso=
         cf = max(1, int(cfg.get("concurrent_fragments", 8)))
         attempts = _build_attempt_plan(profile_name, explicit_proxy)
         multi = len(attempts) > 1
+        quality = get_video_quality()
+        fast_fmt, _compat_fmt = _quality_format_selectors(quality)
         base_opts = {
-            "format": FORMAT_FAST_720P,
+            "format": fast_fmt,
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
@@ -2602,7 +2651,7 @@ def _resubscribe_worker(run_gen=None):
             except Exception as e:
                 log(f"[WebSub] Resubscribe lỗi: {e}")
         _cleanup_temp_dl(older_than_seconds=86400)
-        stop_event.wait(3600)
+        stop_event.wait(RESUBSCRIBE_CHECK_SECONDS)
 
 
 def _ensure_channel_metadata(channel_id, youtube):
@@ -3054,6 +3103,7 @@ def get_status():
         "cookies_status": cookies_status,
         "cookies_detail": cookie_reason,
         "download_workers": max(1, int(cfg.get("download_workers", 4) or 4)),
+        "video_quality": get_video_quality(),
         "subscriptions_total": total_subs,
         "subscriptions_ok": subs_ok,
         "subscriptions_degraded": total_subs - subs_ok,

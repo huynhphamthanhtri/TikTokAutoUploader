@@ -708,6 +708,7 @@ class TestAccountBlockStopsQueue(unittest.TestCase):
         calls = []
         original_upload = self.main.upload_video
         original_complete = self.main._complete_delivery_from_upload
+        original_set_profile_ui = self.main._set_profile_ui
 
         def fake_upload(profile_name, video_path):
             calls.append(str(video_path))
@@ -721,6 +722,9 @@ class TestAccountBlockStopsQueue(unittest.TestCase):
             return False
 
         self.main.upload_video = fake_upload
+        # This queue regression runs without Tk's event loop; UI refresh is not part
+        # of the delivery contract and can otherwise block the worker thread.
+        self.main._set_profile_ui = lambda *_args, **_kwargs: None
         try:
             thread = threading.Thread(target=self.main.process_video_queue_thread, args=(self.profile,), daemon=True)
             thread.start()
@@ -733,6 +737,7 @@ class TestAccountBlockStopsQueue(unittest.TestCase):
             thread.join(timeout=5)
         finally:
             self.main.upload_video = original_upload
+            self.main._set_profile_ui = original_set_profile_ui
         # Both videos were attempted: a generic rejection does not halt the queue.
         self.assertEqual(set(calls), {str(v1), str(v2)})
         self.assertTrue(v1.exists())

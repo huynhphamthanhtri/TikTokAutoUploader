@@ -169,11 +169,21 @@ class TestPollingBackfillPrevention(unittest.TestCase):
 
     def test_published_before_monitor_start_is_rejected(self):
         from youtube_monitor.core import _published_before_monitor_start
-        with patch("youtube_monitor.core._monitor_started_epoch", 100.0):
-            self.assertTrue(_published_before_monitor_start(99.0))
-            self.assertFalse(_published_before_monitor_start(100.0))
-            self.assertFalse(_published_before_monitor_start(101.0))
+        # Base monitor start at 1000.0, grace window 300s -> cutoff is 700.0
+        with patch("youtube_monitor.core._monitor_started_epoch", 1000.0):
+            # 301 seconds before start -> rejected
+            self.assertTrue(_published_before_monitor_start(699.0))
+            # Exactly 300 seconds before start -> accepted
+            self.assertFalse(_published_before_monitor_start(700.0))
+            # 299 seconds before start -> accepted
+            self.assertFalse(_published_before_monitor_start(701.0))
+            # After start -> accepted
+            self.assertFalse(_published_before_monitor_start(1001.0))
+            # Missing publish timestamp -> accepted (False)
             self.assertFalse(_published_before_monitor_start(None))
+        # Missing monitor start timestamp -> accepted (False)
+        with patch("youtube_monitor.core._monitor_started_epoch", None):
+            self.assertFalse(_published_before_monitor_start(500.0))
 
     def test_mark_pre_start_seen_updates_state(self):
         from youtube_monitor.core import _mark_pre_start_seen

@@ -1,3 +1,18 @@
+# Phiên bản 1.2.2
+
+## Điểm mới
+- Chọn chất lượng tải YouTube trực tiếp trong Monitor: **Tối đa 720p (Nhanh)** hoặc **Tối đa 1080p (Sắc nét)**.
+- Video được xuất bản tối đa 5 phút trước lúc bắt đầu Monitor vẫn được xét xử lý để giảm nguy cơ bỏ lỡ do độ trễ WebSub.
+
+## Cải thiện
+- Mọi lượt tải lại trực tiếp, định dạng tương thích, cookie, player client và proxy đều giữ cùng mức chất lượng đã chọn.
+- WebSub gia hạn lease sớm hơn (trước 24 giờ) và kiểm tra lại mỗi 15 phút.
+- Giá trị chất lượng không hợp lệ tự trở về 720p an toàn.
+
+## Sửa lỗi
+- Khắc phục video mới bị loại chỉ vì chênh lệch nhỏ giữa thời điểm xuất bản và lúc Start Monitor.
+- Khắc phục các lượt fallback tải video không đồng bộ với chất lượng người dùng đã chọn.
+
 # Phiên bản 1.2.1
 
 ## Điểm mới

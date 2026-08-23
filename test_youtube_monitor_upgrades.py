@@ -54,9 +54,21 @@ class TestWebSubNeedsResubscribe(unittest.TestCase):
         self.assertTrue(core._needs_resubscribe("UCX"))
 
     def test_lease_near_expiry_needs_resubscribe(self):
-        soon = (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat()
+        # 23h59m59s -> within 24h lead time -> renewal required
+        soon = (datetime.now(timezone.utc) + timedelta(hours=23, minutes=59, seconds=59)).isoformat()
         self._set_status({"verified_at": "now", "lease_expires_at": soon})
         self.assertTrue(core._needs_resubscribe("UCX"))
+
+    def test_lease_beyond_24h_does_not_need_resubscribe(self):
+        # 24h00m05s -> beyond 24h lead time -> renewal not required
+        far = (datetime.now(timezone.utc) + timedelta(hours=24, minutes=0, seconds=5)).isoformat()
+        self._set_status({"verified_at": "now", "lease_expires_at": far})
+        self.assertFalse(core._needs_resubscribe("UCX"))
+
+    def test_resubscribe_constants(self):
+        self.assertEqual(core.RESUBSCRIBE_LEAD_TIME_HOURS, 24)
+        self.assertEqual(core.RESUBSCRIBE_CHECK_SECONDS, 900)
+        self.assertEqual(core.MONITOR_START_GRACE_SECONDS, 300)
 
 
 class TestChannelMetadata(unittest.TestCase):

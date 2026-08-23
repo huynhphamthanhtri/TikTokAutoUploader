@@ -107,6 +107,10 @@ class TestYouTubeUIContract(unittest.TestCase):
         view._on_configure(mock_event_narrow)
         self.assertTrue(view._is_stacked_layout)
 
+        # 5. Verify Video Quality Control
+        self.assertIsNotNone(view.quality_menu)
+        self.assertIn(view.video_quality_var.get(), ("720p", "1080p"))
+
         parent.destroy()
 
     def test_batch_download_view_structure(self):

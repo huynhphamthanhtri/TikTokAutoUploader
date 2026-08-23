@@ -47,6 +47,7 @@ class YouTubeMonitorView(ctk.CTkFrame):
         self.cookie_var = ctk.StringVar(value="")
         self.cookie_display_var = ctk.StringVar(value="Chưa chọn cookie")
         self.max_minutes_var = ctk.StringVar(value="0")
+        self.video_quality_var = ctk.StringVar(value="720p")
         self.channel_filter_var = ctk.StringVar(value="Tất cả")
         self.search_var = ctk.StringVar(value="")
         self.channel_view_mode_var = ctk.StringVar(value="grouped")
@@ -54,6 +55,7 @@ class YouTubeMonitorView(ctk.CTkFrame):
         self._build()
         self.refresh_profiles()
         self._load_max_minutes()
+        self._load_video_quality()
 
         # Bind responsive layout handler
         self.bind("<Configure>", self._on_configure)
@@ -485,6 +487,27 @@ class YouTubeMonitorView(ctk.CTkFrame):
             command=self._save_max_minutes,
         ).pack(side="left")
 
+        # Download Quality Row
+        quality_row = ctk.CTkFrame(card_cfg, fg_color="transparent")
+        quality_row.pack(fill="x", padx=10, pady=(0, 6))
+
+        ctk.CTkLabel(
+            quality_row,
+            text="Độ phân giải tải:",
+            font=UIThemeTokens.FONT_BODY,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+        ).pack(side="left", padx=(0, 6))
+
+        self.quality_menu = ctk.CTkOptionMenu(
+            quality_row,
+            values=["Tối đa 720p (Nhanh)", "Tối đa 1080p (Sắc nét)"],
+            font=UIThemeTokens.FONT_BODY,
+            height=28,
+            command=self._on_quality_change,
+        )
+        self.quality_menu.set("Tối đa 720p (Nhanh)")
+        self.quality_menu.pack(side="left", fill="x", expand=True)
+
         # Diagnostics & Status Badges
         diag_frame = ctk.CTkFrame(card_cfg, corner_radius=6, fg_color=UIThemeTokens.BG_HOVER)
         diag_frame.pack(fill="x", padx=10, pady=(0, 6))
@@ -893,6 +916,21 @@ class YouTubeMonitorView(ctk.CTkFrame):
             self.max_minutes_var.set(str(self.handlers.get("get_max_video_minutes", lambda: 0)()))
         except Exception:
             self.max_minutes_var.set("0")
+
+    def _load_video_quality(self):
+        try:
+            val = self.handlers.get("get_video_quality", lambda: "720p")()
+            display_val = "Tối đa 1080p (Sắc nét)" if str(val).strip().lower() == "1080p" else "Tối đa 720p (Nhanh)"
+            if hasattr(self, "quality_menu"):
+                self.quality_menu.set(display_val)
+            self.video_quality_var.set("1080p" if str(val).strip().lower() == "1080p" else "720p")
+        except Exception:
+            try:
+                if hasattr(self, "quality_menu"):
+                    self.quality_menu.set("Tối đa 720p (Nhanh)")
+                self.video_quality_var.set("720p")
+            except Exception:
+                pass
 
     def _on_channel_filter_change(self, _value=None):
         self._channels_snapshot = None
@@ -1320,6 +1358,29 @@ class YouTubeMonitorView(ctk.CTkFrame):
             if ok:
                 try:
                     self.after(0, lambda: self.max_minutes_var.set(str(value)))
+                except Exception:
+                    pass
+            self._append_threadsafe(msg, error=not ok)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_quality_change(self, choice):
+        target_q = "1080p" if "1080p" in str(choice).lower() else "720p"
+        old_q = self.video_quality_var.get()
+        if target_q == old_q:
+            return
+
+        def run():
+            ok, msg = self._run_handler("set_video_quality", target_q)
+            if ok:
+                try:
+                    self.after(0, lambda: self.video_quality_var.set(target_q))
+                except Exception:
+                    pass
+            else:
+                old_display = "Tối đa 1080p (Sắc nét)" if old_q == "1080p" else "Tối đa 720p (Nhanh)"
+                try:
+                    self.after(0, lambda: self.quality_menu.set(old_display))
                 except Exception:
                     pass
             self._append_threadsafe(msg, error=not ok)

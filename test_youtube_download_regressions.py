@@ -748,5 +748,82 @@ class TestGetStatusCookieState(unittest.TestCase):
         self.assertEqual(status["cookies_status"], "invalid")
 
 
+class TestVideoQualityConfigAndPlans(unittest.TestCase):
+    def setUp(self):
+        import youtube_monitor.core as core
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        self.tmp.close()
+        self.orig_config_json = core.CONFIG_JSON
+        core.CONFIG_JSON = Path(self.tmp.name)
+
+    def tearDown(self):
+        import youtube_monitor.core as core
+        core.CONFIG_JSON = self.orig_config_json
+        try:
+            os.remove(self.tmp.name)
+        except Exception:
+            pass
+
+    def test_quality_defaults_to_720p(self):
+        import youtube_monitor.core as core
+        self.assertEqual(core.get_video_quality(), "720p")
+
+    def test_set_video_quality_valid_persists(self):
+        import youtube_monitor.core as core
+        ok, msg = core.set_video_quality("1080p")
+        self.assertTrue(ok)
+        self.assertIn("1080p", msg)
+        self.assertEqual(core.get_video_quality(), "1080p")
+
+        ok2, msg2 = core.set_video_quality("720p")
+        self.assertTrue(ok2)
+        self.assertEqual(core.get_video_quality(), "720p")
+
+    def test_set_video_quality_invalid_rejected_with_vietnamese(self):
+        import youtube_monitor.core as core
+        core.set_video_quality("1080p")
+        ok, msg = core.set_video_quality("4k")
+        self.assertFalse(ok)
+        self.assertIn("không hợp lệ", msg)
+        self.assertEqual(core.get_video_quality(), "1080p")
+
+    def test_quality_format_selectors_mapping(self):
+        import youtube_monitor.core as core
+        fast_720, compat_720 = core._quality_format_selectors("720p")
+        self.assertEqual(fast_720, core.FORMAT_FAST_720P)
+        self.assertEqual(compat_720, core.FORMAT_COMPAT_720P)
+
+        fast_1080, compat_1080 = core._quality_format_selectors("1080p")
+        self.assertEqual(fast_1080, core.FORMAT_FAST_1080P)
+        self.assertEqual(compat_1080, core.FORMAT_COMPAT_1080P)
+
+        # Unknown / invalid falls back safely to 720p
+        fast_fallback, compat_fallback = core._quality_format_selectors("corrupt_value")
+        self.assertEqual(fast_fallback, core.FORMAT_FAST_720P)
+        self.assertEqual(compat_fallback, core.FORMAT_COMPAT_720P)
+
+    def test_build_attempt_plan_honors_configured_quality(self):
+        import youtube_monitor.core as core
+        # 1. 720p plan
+        core.set_video_quality("720p")
+        attempts_720 = core._build_attempt_plan("test_profile", explicit_proxy="http://proxy:8080")
+        primary_720 = [a for a in attempts_720 if a.name == "direct-primary"][0]
+        alt_fmt_720 = [a for a in attempts_720 if a.name == "direct-alt-format"][0]
+        proxy_720 = [a for a in attempts_720 if a.name == "proxy-exact"][0]
+        self.assertEqual(primary_720.format_selector, core.FORMAT_FAST_720P)
+        self.assertEqual(alt_fmt_720.format_selector, core.FORMAT_COMPAT_720P)
+        self.assertEqual(proxy_720.format_selector, core.FORMAT_FAST_720P)
+
+        # 2. 1080p plan
+        core.set_video_quality("1080p")
+        attempts_1080 = core._build_attempt_plan("test_profile", explicit_proxy="http://proxy:8080")
+        primary_1080 = [a for a in attempts_1080 if a.name == "direct-primary"][0]
+        alt_fmt_1080 = [a for a in attempts_1080 if a.name == "direct-alt-format"][0]
+        proxy_1080 = [a for a in attempts_1080 if a.name == "proxy-exact"][0]
+        self.assertEqual(primary_1080.format_selector, core.FORMAT_FAST_1080P)
+        self.assertEqual(alt_fmt_1080.format_selector, core.FORMAT_COMPAT_1080P)
+        self.assertEqual(proxy_1080.format_selector, core.FORMAT_FAST_1080P)
+
+
 if __name__ == "__main__":
     unittest.main()
