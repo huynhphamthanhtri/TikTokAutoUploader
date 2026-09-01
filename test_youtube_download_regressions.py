@@ -590,11 +590,31 @@ class TestDownloadOneChain(unittest.TestCase):
                     return {"title": "T", "duration": 30}, path, ""
                 with patch("youtube_monitor.core._run_ytdlp_download", side_effect=fake_run):
                     with patch("youtube_monitor.core._finalize_video", side_effect=lambda p, o, t, v: p):
-                        mock_main = MagicMock()
-                        with patch.dict("sys.modules", {"main": mock_main}):
+                        with patch("youtube_monitor.core._safe_emit_video_ready") as emit_ready:
                             outcome = _download_one_result("c", "v")
         self.assertTrue(outcome.ok)
-        mock_main.enqueue_video.assert_not_called()
+        emit_ready.assert_not_called()
+
+    def test_profiled_success_emits_ready_intent_without_importing_main(self):
+        import inspect
+        from youtube_monitor.core import _download_one_result
+        import youtube_monitor.core as core
+        self.assertNotIn("import main", inspect.getsource(core._download_one_result))
+        with tempfile.TemporaryDirectory() as folder:
+            with self._patches(folder, meta_profile="P"):
+                def fake_run(video_id, url, opts):
+                    path = os.path.join(os.path.dirname(opts["outtmpl"]), "ok.mp4")
+                    with open(path, "wb") as f:
+                        f.write(b"x")
+                    return {"title": "T", "duration": 30}, path, ""
+                with patch("youtube_monitor.core._run_ytdlp_download", side_effect=fake_run), \
+                     patch("youtube_monitor.core._finalize_video", side_effect=lambda p, o, t, v: p), \
+                     patch("youtube_monitor.core._safe_emit_video_ready", return_value=(True, "enqueued")) as emit_ready:
+                    outcome = _download_one_result("UC1", "vid1")
+        self.assertTrue(outcome.ok)
+        intent = emit_ready.call_args.args[0]
+        self.assertEqual(intent.profile_name, "P")
+        self.assertEqual(intent.youtube_video_id, "vid1")
 
 
 class TestWorkerRetryDecisions(unittest.TestCase):

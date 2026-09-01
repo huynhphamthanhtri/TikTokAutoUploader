@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from core_helpers import parse_proxy_string
+from tls_client_engine import create_tls_session
 
 
 # ==============================================================================
@@ -127,11 +128,15 @@ class TikTokMonetizationClient:
         self.region = str(region).strip().upper()
         self.base_host = resolve_webcast_base_host(self.region)
 
-        # Setup requests Session with Proxy
-        self.session = requests.Session()
-        self._setup_proxy()
+        # Setup TLS Spoofing Session with Proxy & Impersonation (curl_cffi)
+        self.session = create_tls_session(
+            impersonate="chrome124",
+            proxy_cfg=self.config,
+            timeout=self.timeout,
+        )
 
     def _setup_proxy(self) -> None:
+        pass
         if not self.config.get("use_proxy"):
             return
         p_str = self.config.get("proxy_string", "").strip()
@@ -208,6 +213,10 @@ class TikTokMonetizationClient:
             "crp_views": 0,
             "crp_views_threshold": 100000,
             "crp_all_met": False,
+            "views_30d": 0,
+            "videos_30d": 0,
+            "likes_30d": 0,
+            "views_30d_fmt": "0",
             "crp_rpm": 0.0,
             "crp_qualified_views": 0,
             "crp_estimated_revenue": 0.0,

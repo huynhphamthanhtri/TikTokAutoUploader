@@ -422,6 +422,17 @@ class SelectionActionBar(ctk.CTkFrame):
             command=handlers.get("check_cookie"),
         ).pack(side="left", padx=3)
 
+        ctk.CTkButton(
+            self,
+            text="📁 Gán DA",
+            width=80,
+            height=28,
+            font=UIThemeTokens.FONT_BUTTON,
+            fg_color="#0284c7",
+            hover_color="#0369a1",
+            command=handlers.get("assign_to_project"),
+        ).pack(side="left", padx=3)
+
     def set_selection_count(self, count: int) -> None:
         self.count_var.set(f"Đã chọn: {count}")
 

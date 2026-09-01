@@ -217,10 +217,12 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
             create_patchright_profile(legacy, managed, account_id="owner-uuid")
             config = {"chrome_profile": str(legacy), "account_uuid": "other-uuid"}
 
-            with self.assertRaisesRegex(ValueError, "thuộc tài khoản khác"):
+            with self.assertRaises(glue.PatchrightOwnershipConflict) as caught:
                 glue.ensure_patchright_profile(config)
 
             self.assertEqual(config["account_uuid"], "other-uuid")
+            self.assertEqual(caught.exception.marker_owner, "owner-uuid")
+            self.assertEqual(caught.exception.config_owner, "other-uuid")
 
     def test_profile_resume_rejects_unowned_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -508,6 +510,79 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "navigation failed"):
                 glue.navigate(token, "https://example.test")
 
+    def test_studio_analytics_operation_uses_owned_page(self):
+        token = glue.SessionToken("account", object(), glue.SessionMode.AUTOMATION, "profile")
+
+        class FakePage:
+            url = "https://www.tiktok.com/tiktokstudio/content"
+
+            async def goto(self, url, **_kwargs):
+                self.url = url
+
+            async def evaluate(self, script, payload):
+                self.script = script
+                self.payload = payload
+                return {"state": "SUCCESS", "totals": {"views": 10, "likes": 2, "comments": 1, "shares": 1, "videos": 1}}
+
+        page = FakePage()
+
+        async def invoke(operation):
+            return await operation(page)
+
+        with patch.object(glue, "run_operation", side_effect=lambda _token, operation, timeout: __import__('asyncio').run(invoke(operation))):
+            result = glue.fetch_tiktok_studio_analytics(token, cutoff_epoch=100, max_pages=2, timeout=20)
+
+        self.assertEqual(result["state"], "SUCCESS")
+        self.assertEqual(page.payload, {"cutoffEpoch": 100, "maxPages": 2})
+        self.assertIn("aid=1988&app_name=tiktok_creator_center&device_platform=web_pc", page.script)
+        self.assertIn("type: 1", page.script)
+        self.assertIn("conditions: {post_status: 1}", page.script)
+        self.assertIn("x-secsdk-csrf-token", page.script)
+
+    def test_studio_observation_redacts_request_values(self):
+        token = glue.SessionToken("account", object(), glue.SessionMode.AUTOMATION, "profile")
+
+        class FakeRequest:
+            url = "https://www.tiktok.com/tiktok/creator/manage/item_list/v1/?aid=1988&token=secret"
+            method = "POST"
+            headers = {"Cookie": "secret", "X-SecSDK-CSRF-Token": "secret"}
+            post_data = '{"count":20,"conditions":{"post_status":1}}'
+
+        class FakePage:
+            url = "https://www.tiktok.com/tiktokstudio/content"
+
+            def on(self, event, callback):
+                if not hasattr(self, "handlers"):
+                    self.handlers = {}
+                self.handlers[event] = callback
+
+            def remove_listener(self, event, _callback):
+                self.handlers.pop(event, None)
+
+            async def goto(self, _url, **_kwargs):
+                self.handlers["request"](FakeRequest())
+
+            async def evaluate(self, _script, _payload):
+                return {"state": "SUCCESS", "totals": {"views": 0, "likes": 0, "comments": 0, "shares": 0, "videos": 0}}
+
+        page = FakePage()
+
+        async def invoke(operation):
+            return await operation(page)
+
+        async def no_sleep(_seconds):
+            return None
+
+        with patch.object(glue.asyncio, "sleep", new=no_sleep), \
+             patch.object(glue, "run_operation", side_effect=lambda _token, operation, timeout: __import__('asyncio').run(invoke(operation))):
+            result = glue.fetch_tiktok_studio_analytics(token, cutoff_epoch=100, timeout=20)
+
+        observed = result["observed_request_shapes"][0]
+        self.assertEqual(observed["query_keys"], ["aid", "token"])
+        self.assertEqual(observed["header_names"], ["cookie", "x-secsdk-csrf-token"])
+        self.assertEqual(observed["body_shape"], {"count": "number", "conditions": {"post_status": "number"}})
+        self.assertNotIn("secret", str(observed))
+
     def test_is_login_url_matches_only_login_paths(self):
         self.assertTrue(glue._is_login_url("https://www.tiktok.com/login"))
         self.assertTrue(glue._is_login_url("https://www.tiktok.com/login/"))
@@ -609,7 +684,7 @@ class BrowserPatchrightGlueTests(unittest.TestCase):
             }
             session = glue.build_session_config(config)
             self.assertIn("--renderer-process-limit=2", session.args)
-            self.assertIn("--js-flags=--max-old-space-size=256", session.args)
+            self.assertNotIn("--js-flags=--max-old-space-size=256", session.args)
             self.assertNotIn("--expose-gc", " ".join(session.args))
             self.assertIn("--force-webrtc-ip-handling-policy=disable_non_proxied_udp", session.args)
             self.assertIn("--disable-webrtc-multiple-routes", session.args)

@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict
 from ui_components import (
     CollapsibleLogDrawer,
     ProjectList,
+    SelectionActionBar,
     SidebarButton,
     SummaryCard,
     UIThemeTokens,
@@ -263,9 +264,8 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     project_list_view = ProjectList(
         sidebar,
         on_select_project=_on_sidebar_project_selected,
-        height=140,
     )
-    project_list_view.pack(fill="x", padx=6, pady=2)
+    project_list_view.pack(fill="both", expand=True, padx=6, pady=2)
     widgets["project_list_view"] = project_list_view
 
     # Bottom Settings in Sidebar
@@ -562,7 +562,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     tree = ttk.Treeview(
         table_frame,
         style="Modern.Treeview",
-        columns=('name', 'tiktok', 'cookie_st', 'activity', 'monetization', 'proxy_region', 'upload', 'folder', 'last_error'),
+        columns=('name', 'tiktok', 'cookie_st', 'activity', 'monetization', 'analytics', 'proxy_region', 'upload', 'folder', 'last_error'),
         show="headings",
         selectmode="extended",
     )
@@ -571,6 +571,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     tree.heading('cookie_st', text='Cookie', command=lambda: handlers['sort_tree'](tree, 'cookie_st', False))
     tree.heading('activity', text='Trạng Thái', command=lambda: handlers['sort_tree'](tree, 'activity', False))
     tree.heading('monetization', text='Kiếm Tiền / KYC', command=lambda: handlers['sort_tree'](tree, 'monetization', False))
+    tree.heading('analytics', text='Views 30D | Follow', command=lambda: handlers['sort_tree'](tree, 'analytics', False))
     tree.heading('proxy_region', text='Proxy / Vùng', command=lambda: handlers['sort_tree'](tree, 'proxy_region', False))
     tree.heading('upload', text='Tiến Độ Đăng', command=lambda: handlers['sort_tree'](tree, 'upload', False))
     tree.heading('folder', text='Thư Mục Video', command=lambda: handlers['sort_tree'](tree, 'folder', False))
@@ -581,6 +582,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     tree.column('cookie_st', width=105, minwidth=85, anchor='center', stretch=False)
     tree.column('activity', width=110, minwidth=95, anchor='center', stretch=False)
     tree.column('monetization', width=130, minwidth=100, anchor='center', stretch=False)
+    tree.column('analytics', width=165, minwidth=130, anchor='center', stretch=False)
     tree.column('proxy_region', width=140, minwidth=100, anchor='center', stretch=False)
     tree.column('upload', width=115, minwidth=95, anchor='center', stretch=False)
     tree.column('folder', width=130, minwidth=80, stretch=False)
@@ -593,6 +595,16 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     hsb.grid(row=1, column=0, sticky='ew')
     tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
     widgets["tree"] = tree
+
+    # Selection Action Bar (Thanh thao tác khi chọn 1..N hồ sơ)
+    action_bar_handlers = {
+        "start_selected": handlers.get("start_selected", lambda: None),
+        "stop_selected": handlers.get("stop_selected", lambda: None),
+        "check_cookie": handlers.get("check_cookie_live", lambda: None),
+        "assign_to_project": handlers.get("assign_to_project", lambda: None),
+    }
+    selection_action_bar = SelectionActionBar(table_card, handlers=action_bar_handlers)
+    widgets["selection_action_bar"] = selection_action_bar
 
     # Pagination Bar (Dưới đáy bảng hồ sơ)
     pagination_bar = ctk.CTkFrame(table_card, fg_color="transparent", height=32)
@@ -806,6 +818,17 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
 
     ctk.CTkButton(
         mono_tb_inner,
+        text="📊 Cập Nhật Views & Follower",
+        width=145,
+        height=32,
+        font=UIThemeTokens.FONT_BUTTON,
+        fg_color="#7c3aed",
+        hover_color="#6d28d9",
+        command=handlers.get('refresh_selected_analytics', lambda: None),
+    ).pack(side="left", padx=3)
+
+    ctk.CTkButton(
+        mono_tb_inner,
         text="🔄 Cập Nhật Đã Chọn",
         width=130,
         height=32,
@@ -901,7 +924,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     mono_tree = ttk.Treeview(
         mono_body,
         style="Modern.Treeview",
-        columns=('name', 'tiktok', 'region', 'crp_status', 'balance', 'payout_status', 'tax_status', 'kyc_status', 'payment_method', 'freshness'),
+        columns=('name', 'tiktok', 'region', 'crp_status', 'views_30d', 'follower_count', 'balance', 'payout_status', 'tax_status', 'kyc_status', 'payment_method', 'freshness'),
         show="headings",
         selectmode="extended",
     )
@@ -909,6 +932,8 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     mono_tree.heading('tiktok', text='TikTok ID')
     mono_tree.heading('region', text='Khu Vực')
     mono_tree.heading('crp_status', text='Quỹ Kiếm Tiền (CRP)')
+    mono_tree.heading('views_30d', text='Views 30D')
+    mono_tree.heading('follower_count', text='Follower')
     mono_tree.heading('balance', text='Số Dư ($)')
     mono_tree.heading('payout_status', text='Trạng Thái Payout')
     mono_tree.heading('tax_status', text='Khai Báo Thuế')
@@ -920,6 +945,8 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     mono_tree.column('tiktok', width=115, minwidth=85, anchor="w")
     mono_tree.column('region', width=60, minwidth=45, anchor="center")
     mono_tree.column('crp_status', width=160, minwidth=110, anchor="center")
+    mono_tree.column('views_30d', width=90, minwidth=70, anchor="e")
+    mono_tree.column('follower_count', width=90, minwidth=70, anchor="e")
     mono_tree.column('balance', width=80, minwidth=65, anchor="e")
     mono_tree.column('payout_status', width=115, minwidth=85, anchor="center")
     mono_tree.column('tax_status', width=115, minwidth=85, anchor="center")
@@ -1088,6 +1115,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     status_text.tag_configure('WARN', foreground='orange')
     status_text.tag_configure('ERROR', foreground='red')
     widgets['status_text'] = status_text
+    log_drawer.set_expanded(True)
 
     # Super Context Menu for Profiles Tree
     ctx_menu = Menu(root, tearoff=0)
@@ -1095,12 +1123,14 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     ctx_menu.add_command(label="Kiểm tra Cookie (Đã chọn)", command=handlers['check_cookie_live'])
     ctx_menu.add_command(label="Kiểm tra thông tin TikTok", command=handlers['inspect_tiktok_account'])
     ctx_menu.add_command(label="💰 Kiểm tra Thu nhập / KYC / CRP", command=handlers.get('check_monetization_selected', handlers.get('refresh_selected_monetization', lambda: None)))
+    ctx_menu.add_command(label="📊 Cập nhật Views & Follower", command=handlers.get('refresh_selected_analytics', lambda: None))
     ctx_menu.add_separator()
     ctx_menu.add_command(label="Sửa", command=handlers['edit_profile'])
     ctx_menu.add_command(label="Xem chi tiết", command=handlers['view_profile_details'])
     ctx_menu.add_command(label="📂 Mở thư mục Profile (User Data)", command=handlers.get('open_profile_folder', lambda: None))
     ctx_menu.add_command(label="Copy Folder Video", command=handlers['copy_folder_path'])
     ctx_menu.add_command(label="Copy Link Kênh", command=handlers['copy_channel_link'])
+    ctx_menu.add_command(label="📁 Gán vào dự án...", command=handlers['assign_to_project'])
     ctx_menu.add_separator()
     ctx_menu.add_command(label="📋 Sao chép TikTok UID", command=handlers.get('copy_tiktok_uid', lambda: None))
     ctx_menu.add_command(label="📋 Sao chép Chuỗi Proxy", command=handlers.get('copy_proxy_string', lambda: None))
@@ -1118,6 +1148,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     mono_ctx_menu = Menu(root, tearoff=0)
     mono_ctx_menu.add_command(label="🔍 Xem Chi Tiết Toàn Diện (Monetization & KYC)", command=handlers.get('view_monetization_details', lambda: None))
     mono_ctx_menu.add_command(label="🔄 Kiểm Tra Lại Tài Khoản Này", command=handlers.get('refresh_selected_monetization', lambda: None))
+    mono_ctx_menu.add_command(label="📊 Cập nhật Views & Follower", command=handlers.get('refresh_selected_analytics', lambda: None))
     mono_ctx_menu.add_command(label="🚀 Gửi Duyệt Quỹ Kiếm Tiền (CRP)", command=handlers.get('apply_crp_selected', lambda: None))
     mono_ctx_menu.add_separator()
     mono_ctx_menu.add_command(label="📋 Sao chép TikTok UID", command=handlers.get('copy_tiktok_uid', lambda: None))

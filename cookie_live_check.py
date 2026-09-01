@@ -179,7 +179,7 @@ def check_cookie_fast_http(cookie_raw, proxy_cfg=None, timeout=8.0):
     """
     import requests
     from tiktok_monetization_client import build_cookie_string
-    from core_helpers import parse_proxy_string
+    from tls_client_engine import create_tls_session
 
     cookie_str = build_cookie_string(cookie_raw)
     if not cookie_str:
@@ -195,17 +195,11 @@ def check_cookie_fast_http(cookie_raw, proxy_cfg=None, timeout=8.0):
     if not auth_tuple:
         return CookieCheckState.DEAD, "Cookie thiếu token xác thực chính (sessionid)", ()
 
-    session = requests.Session()
-    if proxy_cfg and proxy_cfg.get("use_proxy") and proxy_cfg.get("proxy_string"):
-        parsed = parse_proxy_string(proxy_cfg["proxy_string"])
-        if parsed and parsed.get("ip") and parsed.get("port"):
-            p_type = str(proxy_cfg.get("proxy_type", "http")).lower()
-            u, p = parsed.get("user"), parsed.get("pass")
-            if u and p:
-                p_url = f"{p_type}://{u}:{p}@{parsed['ip']}:{parsed['port']}"
-            else:
-                p_url = f"{p_type}://{parsed['ip']}:{parsed['port']}"
-            session.proxies = {"http": p_url, "https": p_url}
+    session = create_tls_session(
+        impersonate="chrome124",
+        proxy_cfg=proxy_cfg,
+        timeout=timeout,
+    )
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.7559.96 Safari/537.36",

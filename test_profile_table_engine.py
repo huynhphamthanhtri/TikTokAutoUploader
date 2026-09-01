@@ -54,6 +54,21 @@ class TestProfileTableEngine(unittest.TestCase):
         engine.mark_dirty("TEST_A")
         self.assertEqual(engine.get_revision("TEST_A"), 2)
 
+    def test_analytics_display_uses_cached_metrics_and_stale_marker(self):
+        profile = {"config": {"tiktok_id": "channel"}, "ui": {}}
+        model = build_row_model(
+            "TEST_ANALYTICS",
+            profile,
+            {"TEST_ANALYTICS": {"analytics": {"state": "NETWORK_ERROR", "views_30d": 12345, "follower_count": 678}}},
+        )
+
+        self.assertEqual(model["values"][5], "👁 12,345 (cũ) | 👥 678 (cũ)")
+        self.assertEqual(model["analytics_sort_value"], 12345)
+
+    def test_analytics_unknown_is_not_rendered_as_zero(self):
+        model = build_row_model("TEST_ANALYTICS", {"config": {}, "ui": {}}, {"TEST_ANALYTICS": {"analytics": {"state": "NOT_AVAILABLE"}}})
+        self.assertEqual(model["values"][5], "—")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@
 test_app_ui_contract.py - Unit tests verifying app_ui.build_dashboard contract
 """
 
+import inspect
 import unittest
 import customtkinter as ctk
 
@@ -69,6 +70,7 @@ class TestAppUIContract(unittest.TestCase):
             "copy_folder_path": lambda: None,
             "copy_channel_link": lambda: None,
             "sort_tree": lambda *a: None,
+            "refresh_selected_analytics": lambda: None,
             "youtube_monitor": {},
             "activity": {},
         }
@@ -104,18 +106,35 @@ class TestAppUIContract(unittest.TestCase):
             "guide_view",
             "stats_workspace",
             "stats_view",
+            "selection_action_bar",
         ]
 
         for key in required_keys:
             self.assertIn(key, widgets, f"Missing required widget key: {key}")
 
+        self.assertFalse(widgets["selection_action_bar"].winfo_ismapped())
+        self.assertTrue(widgets["log_drawer"].is_expanded)
+        self.assertTrue(widgets["log_drawer"].content_frame.winfo_manager())
+
+        dashboard_source = inspect.getsource(build_dashboard)
+        self.assertIn('project_list_view.pack(fill="both", expand=True', dashboard_source)
+
+        # Check Context menu commands
+        ctx = widgets["ctx_menu"]
+        ctx_labels = [ctx.entrycget(i, "label") for i in range(ctx.index("end") + 1) if ctx.type(i) == "command"]
+        self.assertIn("📁 Gán vào dự án...", ctx_labels)
+
         # Check Treeview columns
         tree = widgets["tree"]
         expected_columns = (
-            'name', 'tiktok', 'cookie_st', 'activity', 'monetization',
+            'name', 'tiktok', 'cookie_st', 'activity', 'monetization', 'analytics',
             'proxy_region', 'upload', 'folder', 'last_error'
         )
         self.assertEqual(tree["columns"], expected_columns)
+
+        mono_tree = widgets["monetization_tree"]
+        self.assertIn("views_30d", mono_tree["columns"])
+        self.assertIn("follower_count", mono_tree["columns"])
 
         # Test workspace router switching to statistics and aliases
         switch_ws = widgets["switch_workspace"]

@@ -1,3 +1,22 @@
+# Phiên bản 1.2.3
+
+## Điểm mới
+- YouTube Monitor tự động khởi động khi mở ứng dụng.
+- Bổ sung polling reconciliation chạy song song với WebSub để bắt lại video khi callback/ngrok gián đoạn.
+- Lưu bền trạng thái phát hiện, queue và retry để tiếp tục an toàn sau khi khởi động lại.
+
+## Cải thiện
+- WebSub hoạt động như đường phát hiện nhanh; polling tự chuyển chu kỳ phù hợp khi WebSub khỏe hoặc degraded.
+- Polling xử lý feed theo thứ tự cũ đến mới và dùng chung dedup/pending/watermark với WebSub.
+- Khi ngrok chưa sẵn sàng, Monitor vẫn chạy bằng polling fallback và tự khôi phục WebSub trong nền.
+- Giãn chu kỳ polling mặc định và thêm jitter để giảm tải mạng khi nhiều máy khởi động cùng lúc.
+
+## Sửa lỗi
+- Khắc phục video đăng trong lúc ứng dụng tắt bị đánh dấu baseline và bỏ qua sau khi mở lại.
+- Khắc phục nguy cơ tải trùng khi WebSub và polling cùng phát hiện một video.
+- Khắc phục retry/queue tạm thời bị mất khi Monitor restart.
+- Khắc phục auto-start bị vô hiệu ngoài ý muốn khi một dependency nạp `unittest` trong runtime production.
+
 # Phiên bản 1.2.2
 
 ## Điểm mới

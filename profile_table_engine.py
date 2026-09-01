@@ -125,12 +125,32 @@ def build_row_model(
     last_err = str(ui.get("last_error", ""))
     short_err = last_err if len(last_err) <= 80 else last_err[:77] + "..."
 
+    analytics = snap_mono.get("analytics", {}) if isinstance(snap_mono.get("analytics"), dict) else {}
+    analytics_state = analytics.get("state", "NOT_AVAILABLE")
+    views_state = analytics.get("views_state", analytics_state)
+    follower_state = analytics.get("follower_state", analytics_state)
+    views_30d = analytics.get("views_30d")
+    follower_count = analytics.get("follower_count")
+    if views_30d is not None or follower_count is not None:
+        views_display = f"{int(views_30d):,}" if isinstance(views_30d, (int, float)) else "-"
+        follower_display = f"{int(follower_count):,}" if isinstance(follower_count, (int, float)) else "-"
+        if views_30d is not None and views_state != "SUCCESS":
+            views_display += " (cũ)"
+        if follower_count is not None and follower_state != "SUCCESS":
+            follower_display += " (cũ)"
+        analytics_display = f"👁 {views_display} | 👥 {follower_display}"
+    elif analytics_state == "NOT_AVAILABLE":
+        analytics_display = "—"
+    else:
+        analytics_display = "Không lấy được"
+
     values = (
         name,
         tiktok_display,
         cookie_badge,
         activity_badge,
         mono_badge,
+        analytics_display,
         proxy_region_badge,
         ui.get("upload", "Chờ video"),
         cfg.get("folder_path", ""),
@@ -154,7 +174,8 @@ def build_row_model(
         "tags": (row_tag,),
         "filter_keys": filter_keys,
         "project": cfg.get("project_name", "Mặc định"),
-        "search_blob": f"{name} {tiktok_id} {cookie_badge} {activity_badge} {mono_badge} {proxy_str} {region} {cfg.get('folder_path', '')} {last_err}".lower(),
+        "analytics_sort_value": views_30d if isinstance(views_30d, (int, float)) else -1,
+        "search_blob": f"{name} {tiktok_id} {cookie_badge} {activity_badge} {mono_badge} {analytics_display} {proxy_str} {region} {cfg.get('folder_path', '')} {last_err}".lower(),
     }
 
 

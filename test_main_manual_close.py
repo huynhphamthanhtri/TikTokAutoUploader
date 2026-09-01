@@ -8,6 +8,7 @@ class ManualCloseMainFlowTests(unittest.TestCase):
         root = Path(__file__).resolve().parent
         cls.source = (root / "main.py").read_text(encoding="utf-8")
         cls.glue_source = (root / "browser_patchright_glue.py").read_text(encoding="utf-8")
+        cls.youtube_core_source = (root / "youtube_monitor" / "core.py").read_text(encoding="utf-8")
 
     def test_open_browser_always_quits_token_in_finally(self):
         manual_flow = self.source[
@@ -124,6 +125,29 @@ class ManualCloseMainFlowTests(unittest.TestCase):
         ]
         self.assertIn("state == 'verified'", meta_flow)
         self.assertIn("'manual_login_pending'] = False", meta_flow)
+
+    def test_monitor_autostart_is_not_disabled_by_transitive_unittest_import(self):
+        flow = self.source[
+            self.source.index("def _start_youtube_monitor_safe"):
+            self.source.index("def _on_profile_filter_changed")
+        ]
+        self.assertIn("'pytest' in sys.modules", flow)
+        self.assertNotIn("'unittest' in sys.modules", flow)
+        self.assertIn("youtube_monitor.start_monitor()", flow)
+
+    def test_background_monitor_never_imports_application_entry_module(self):
+        self.assertNotIn("import main", self.youtube_core_source)
+        self.assertNotIn("from main import", self.youtube_core_source)
+        self.assertIn("_safe_emit_video_ready(intent)", self.youtube_core_source)
+
+    def test_application_registers_and_clears_video_ready_callback(self):
+        self.assertIn("youtube_monitor.set_video_ready_callback(_on_youtube_video_ready)", self.source)
+        self.assertIn("youtube_monitor.set_video_ready_callback(None)", self.source)
+        bridge = self.source[
+            self.source.index("def _on_youtube_video_ready"):
+            self.source.index("# =========================\n# Upload Logic")
+        ]
+        self.assertIn("return enqueue_video(", bridge)
 
 
 if __name__ == "__main__":

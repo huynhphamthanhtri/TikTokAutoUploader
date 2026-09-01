@@ -16,6 +16,8 @@ from .core import (
     set_channel_profile,
     set_cookies_file,
     set_max_video_minutes,
+    set_video_detected_callback,
+    set_video_ready_callback,
     set_video_quality,
     start_monitor,
     stop_monitor,

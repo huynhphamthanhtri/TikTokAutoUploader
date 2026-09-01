@@ -15,6 +15,7 @@ import shutil
 import sys
 import threading
 import time
+import urllib.parse
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 
@@ -163,6 +164,25 @@ def _resolve_profile(config):
     return Path(legacy)
 
 
+class PatchrightOwnershipConflict(ValueError):
+    """An owned Patchright sibling is bound to another account UUID.
+
+    The low-level layer only describes the conflict. It never rebinds an
+    existing marker or mutates a foreign-owned browser directory.
+    """
+
+    def __init__(self, legacy_path, target_path, marker_owner, config_owner):
+        self.legacy_path = str(legacy_path)
+        self.target_path = str(target_path)
+        self.marker_owner = str(marker_owner or "")
+        self.config_owner = str(config_owner or "")
+        super().__init__(
+            "Browser profile thuộc tài khoản khác; không được tái sử dụng. "
+            "Hãy chọn đúng chrome_profile của tài khoản này, hoặc reset Profile-Patchright "
+            "bằng chức năng bảo trì Browser (không xóa/thay đổi profile tự động)."
+        )
+
+
 def ensure_patchright_profile(config):
     """Create (or resume) the owned Profile-Patchright sibling of the legacy profile."""
     legacy_dir = _resolve_profile(config)
@@ -179,11 +199,7 @@ def ensure_patchright_profile(config):
         except Exception:
             owner = None
         if owner and account_id and owner != account_id:
-            raise ValueError(
-                "Browser profile thuộc tài khoản khác; không được tái sử dụng. "
-                "Hãy chọn đúng chrome_profile của tài khoản này, hoặc reset Profile-Patchright "
-                "bằng chức năng bảo trì Browser (không xóa/thay đổi profile tự động)."
-            )
+            raise PatchrightOwnershipConflict(legacy_dir, target, owner, account_id)
         if owner and account_id is None:
             account_id = owner
             config["account_uuid"] = owner
@@ -504,7 +520,6 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profi
         "--disk-cache-size=33554432",
         "--media-cache-size=67108864",
         "--aggressive-cache-discard",
-        "--js-flags=--max-old-space-size=256",
         "--enable-features=MemoryReducer,PurgeAndSuspend,ResourceLoadScheduler",
         "--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints,InterestFeedContentSuggestions,CalculateNativeWinOcclusion,UnoPhase2FollowUp",
         "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
@@ -837,6 +852,204 @@ def page_evaluate(token, script, timeout=OP_DEFAULT_TIMEOUT):
         return await page.evaluate(script)
 
     return run_operation(token, _evaluate, timeout=timeout)
+
+
+def fetch_tiktok_studio_analytics(token, cutoff_epoch, max_pages=100, timeout=90):
+    """Aggregate read-only Creator Studio content metrics inside an owned session."""
+    cutoff_epoch = int(cutoff_epoch)
+    max_pages = max(1, min(int(max_pages), 100))
+
+    async def _fetch(page):
+        observed_requests = []
+        observed_payloads = []
+        observed_response_shapes = []
+        response_tasks = []
+
+        def _shape(value, depth=2):
+            if isinstance(value, dict):
+                if depth <= 0:
+                    return "object"
+                return {str(key): _shape(item, depth - 1) for key, item in value.items()}
+            if isinstance(value, list):
+                return [_shape(value[0], depth - 1)] if value else "array"
+            if isinstance(value, bool):
+                return "bool"
+            if isinstance(value, (int, float)):
+                return "number"
+            if value is None:
+                return "null"
+            return "string"
+
+        def _observe_request(request):
+            url = str(getattr(request, "url", "") or "")
+            parsed = urllib.parse.urlsplit(url)
+            if parsed.path != "/tiktok/creator/manage/item_list/v1/":
+                return
+            try:
+                body = json.loads(getattr(request, "post_data", "") or "{}")
+            except (TypeError, ValueError):
+                body = None
+            headers = getattr(request, "headers", {}) or {}
+            observed_requests.append({
+                "method": str(getattr(request, "method", "") or "").upper(),
+                "path": parsed.path,
+                "query_keys": sorted(key for key, _value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)),
+                "header_names": sorted(str(key).lower() for key in headers.keys()),
+                "body_shape": _shape(body) if body is not None else "invalid_json",
+            })
+
+        async def _observe_response(response):
+            url = str(getattr(response, "url", "") or "")
+            if urllib.parse.urlsplit(url).path != "/tiktok/creator/manage/item_list/v1/":
+                return
+            try:
+                payload = await response.json()
+            except Exception:
+                observed_response_shapes.append({"status": getattr(response, "status", None), "body": "non_json"})
+                return
+            if isinstance(payload, dict):
+                observed_payloads.append(payload)
+                data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+                items = data.get("item_list") if isinstance(data.get("item_list"), list) else None
+                observed_response_shapes.append({
+                    "status": getattr(response, "status", None),
+                    "code": payload.get("code", payload.get("status_code")),
+                    "data_keys": sorted(data.keys()),
+                    "item_count": len(items) if items is not None else None,
+                    "has_more": data.get("has_more"),
+                })
+
+        def _schedule_response(response):
+            response_tasks.append(asyncio.create_task(_observe_response(response)))
+
+        observing = hasattr(page, "on")
+        if observing:
+            page.on("request", _observe_request)
+            page.on("response", _schedule_response)
+        await page.goto(
+            "https://www.tiktok.com/tiktokstudio/content",
+            wait_until="domcontentloaded",
+            timeout=60_000,
+        )
+        if observing:
+            await asyncio.sleep(3)
+            if response_tasks:
+                await asyncio.gather(*response_tasks, return_exceptions=True)
+            if hasattr(page, "remove_listener"):
+                page.remove_listener("request", _observe_request)
+                page.remove_listener("response", _schedule_response)
+        if _is_login_url(str(getattr(page, "url", ""))):
+            return {"state": "NO_AUTH", "observed_request_shapes": observed_requests, "observed_response_shapes": observed_response_shapes}
+        observed_totals = {"views": 0, "likes": 0, "comments": 0, "shares": 0, "videos": 0}
+        observed_ids = set()
+        observed_complete = False
+        observed_has_old_item = False
+        for body in observed_payloads:
+            code = body.get("code", body.get("status_code"))
+            data = body.get("data") if isinstance(body.get("data"), dict) else {}
+            items = data.get("item_list") if isinstance(data.get("item_list"), list) else []
+            if code != 0:
+                continue
+            if data.get("has_more") is False:
+                observed_complete = True
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item_id = str(item.get("item_id") or "")
+                if not item_id or item_id in observed_ids:
+                    continue
+                observed_ids.add(item_id)
+                created_at = item.get("create_time")
+                try:
+                    created_at = int(created_at)
+                except (TypeError, ValueError):
+                    continue
+                if created_at < cutoff_epoch:
+                    observed_has_old_item = True
+                    continue
+                stats = item.get("statistics") if isinstance(item.get("statistics"), dict) else {}
+                observed_totals["views"] += int(stats.get("play_count", 0) or 0)
+                observed_totals["likes"] += int(stats.get("digg_count", 0) or 0)
+                observed_totals["comments"] += int(stats.get("comment_count", 0) or 0)
+                observed_totals["shares"] += int(stats.get("share_count", 0) or 0)
+                observed_totals["videos"] += 1
+        if observed_complete and (observed_has_old_item or not observed_ids):
+            return {"state": "SUCCESS", "totals": observed_totals, "pages": len(observed_payloads), "source": "NATURAL_STUDIO_REQUEST", "observed_request_shapes": observed_requests, "observed_response_shapes": observed_response_shapes}
+        payload = await page.evaluate(
+            """async ({cutoffEpoch, maxPages}) => {
+                const totals = {views: 0, likes: 0, comments: 0, shares: 0, videos: 0};
+                const seenCursors = new Set([0]);
+                let cursor = 0;
+                const csrfMatch = document.cookie.match(/(?:^|;\\s*)(?:tt_csrf_token|csrf_token)=([^;]+)/);
+                const headers = {'Content-Type': 'application/json', 'Accept': 'application/json'};
+                if (csrfMatch && csrfMatch[1]) {
+                    headers['x-secsdk-csrf-token'] = csrfMatch[1];
+                    headers['x-secsdk-csrf-version'] = '1.2.8';
+                }
+                for (let pageIndex = 0; pageIndex < maxPages; pageIndex += 1) {
+                    let response;
+                    try {
+                        response = await fetch('/tiktok/creator/manage/item_list/v1/?aid=1988&app_name=tiktok_creator_center&device_platform=web_pc', {
+                            method: 'POST',
+                            credentials: 'include',
+                            headers,
+                            body: JSON.stringify({
+                                count: 20,
+                                cursor,
+                                type: 1,
+                                sort_orders: [{field_name: 'post_time', sort_order: 2}],
+                                conditions: {post_status: 1},
+                            }),
+                        });
+                    } catch (_) {
+                        return {state: 'NETWORK_ERROR'};
+                    }
+                    if (response.status === 401 || response.status === 403) return {state: 'NO_AUTH'};
+                    if (response.status === 429) return {state: 'RATE_LIMITED'};
+                    if (!response.ok) return {state: 'STUDIO_API_REJECTED', httpStatus: response.status};
+                    let body;
+                    try {
+                        body = await response.json();
+                    } catch (_) {
+                        return {state: 'STUDIO_INVALID_JSON'};
+                    }
+                    const code = body && (body.code ?? body.status_code);
+                    if (code !== 0) return {state: 'STUDIO_API_REJECTED', apiCode: code};
+                    const data = body && body.data;
+                    const items = data && data.item_list;
+                    if (!Array.isArray(items)) return {state: 'STUDIO_SCHEMA_CHANGED'};
+                    if (!items.length) return {state: 'SUCCESS', totals, pages: pageIndex + 1};
+                    let reachedCutoff = false;
+                    for (const item of items) {
+                        const createdAt = Number(item && item.create_time);
+                        if (!Number.isFinite(createdAt)) return {state: 'STUDIO_SCHEMA_CHANGED'};
+                        if (createdAt < cutoffEpoch) {
+                            reachedCutoff = true;
+                            break;
+                        }
+                        const stats = (item && item.statistics) || {};
+                        totals.views += Number(stats.play_count) || 0;
+                        totals.likes += Number(stats.digg_count) || 0;
+                        totals.comments += Number(stats.comment_count) || 0;
+                        totals.shares += Number(stats.share_count) || 0;
+                        totals.videos += 1;
+                    }
+                    if (reachedCutoff || !data.has_more) return {state: 'SUCCESS', totals, pages: pageIndex + 1};
+                    const nextCursor = Number(data.cursor);
+                    if (!Number.isFinite(nextCursor) || seenCursors.has(nextCursor)) return {state: 'STUDIO_CURSOR_INVALID'};
+                    seenCursors.add(nextCursor);
+                    cursor = nextCursor;
+                }
+                return {state: 'STUDIO_PARTIAL_LIMIT', totals, pages: maxPages};
+            }""",
+            {"cutoffEpoch": cutoff_epoch, "maxPages": max_pages},
+        )
+        if isinstance(payload, dict):
+            payload["observed_request_shapes"] = observed_requests
+            payload["observed_response_shapes"] = observed_response_shapes
+        return payload
+
+    return run_operation(token, _fetch, timeout=timeout)
 
 
 def verify_exit_ip(token, expected_ip, timeout_per_service=6, diagnostics=None):

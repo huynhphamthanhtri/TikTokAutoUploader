@@ -10,6 +10,13 @@ from unittest.mock import MagicMock, patch, call
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
+class TestPublicMonitorApi(unittest.TestCase):
+    def test_detection_callback_is_exported_for_main_autostart(self):
+        import youtube_monitor
+        self.assertTrue(callable(youtube_monitor.set_video_detected_callback))
+        self.assertTrue(callable(youtube_monitor.set_video_ready_callback))
+
+
 class TestPendingState(unittest.TestCase):
     def setUp(self):
         from youtube_monitor.core import _pending_video_ids, _pending_lock
@@ -167,33 +174,6 @@ class TestPollingBackfillPrevention(unittest.TestCase):
         self.assertFalse(_polling_item_is_at_or_before_watermark({"last_pub_utc": None}, 99.0))
         self.assertFalse(_polling_item_is_at_or_before_watermark(meta, None))
 
-    def test_published_before_monitor_start_is_rejected(self):
-        from youtube_monitor.core import _published_before_monitor_start
-        # Base monitor start at 1000.0, grace window 300s -> cutoff is 700.0
-        with patch("youtube_monitor.core._monitor_started_epoch", 1000.0):
-            # 301 seconds before start -> rejected
-            self.assertTrue(_published_before_monitor_start(699.0))
-            # Exactly 300 seconds before start -> accepted
-            self.assertFalse(_published_before_monitor_start(700.0))
-            # 299 seconds before start -> accepted
-            self.assertFalse(_published_before_monitor_start(701.0))
-            # After start -> accepted
-            self.assertFalse(_published_before_monitor_start(1001.0))
-            # Missing publish timestamp -> accepted (False)
-            self.assertFalse(_published_before_monitor_start(None))
-        # Missing monitor start timestamp -> accepted (False)
-        with patch("youtube_monitor.core._monitor_started_epoch", None):
-            self.assertFalse(_published_before_monitor_start(500.0))
-
-    def test_mark_pre_start_seen_updates_state(self):
-        from youtube_monitor.core import _mark_pre_start_seen
-        with patch("youtube_monitor.core.channels_store") as store:
-            with patch("youtube_monitor.core.log") as mock_log:
-                _mark_pre_start_seen("UCtest", "oldvid", 99.0, "Polling")
-        store.mark_seen_only.assert_called_once_with("UCtest", "oldvid")
-        store.update_watermark.assert_called_once_with("UCtest", 99.0)
-        mock_log.assert_called_once()
-
     def test_seed_polling_baseline_marks_existing_items(self):
         from youtube_monitor.core import _seed_polling_baseline, iso_to_epoch
         items = [
@@ -286,6 +266,14 @@ class TestCallbackServerHealth(unittest.TestCase):
 
 
 class TestNgrokVerification(unittest.TestCase):
+    def setUp(self):
+        from youtube_monitor.core import _reset_ngrok_verification_log_state
+        _reset_ngrok_verification_log_state()
+
+    def tearDown(self):
+        from youtube_monitor.core import _reset_ngrok_verification_log_state
+        _reset_ngrok_verification_log_state()
+
     @patch("youtube_monitor.core.requests.get")
     def test_verify_tunnel_ok(self, mock_get):
         from youtube_monitor.core import _verify_ngrok_tunnel
@@ -310,6 +298,36 @@ class TestNgrokVerification(unittest.TestCase):
         from youtube_monitor.core import _verify_ngrok_tunnel
         mock_get.side_effect = Exception("timeout")
         self.assertFalse(_verify_ngrok_tunnel("http://test.ngrok.io"))
+
+    @patch("youtube_monitor.core.log")
+    @patch("youtube_monitor.core.requests.get")
+    def test_repeated_healthy_verification_logs_once(self, mock_get, mock_log):
+        from youtube_monitor.core import _verify_ngrok_tunnel
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.text = "verify_same"
+        with patch("youtube_monitor.core.uuid.uuid4") as mock_uuid:
+            mock_uuid.return_value.hex = "same"
+            self.assertTrue(_verify_ngrok_tunnel("https://test.ngrok.io/"))
+            self.assertTrue(_verify_ngrok_tunnel("https://test.ngrok.io"))
+        self.assertEqual(mock_log.call_args_list, [call("[Ngrok] Tunnel verified")])
+
+    @patch("youtube_monitor.core.log")
+    @patch("youtube_monitor.core.requests.get")
+    def test_recovery_and_url_change_log_verified_again(self, mock_get, mock_log):
+        from youtube_monitor.core import _verify_ngrok_tunnel
+        with patch("youtube_monitor.core.uuid.uuid4") as mock_uuid:
+            mock_uuid.return_value.hex = "ok"
+            mock_get.return_value.status_code = 200
+            mock_get.return_value.text = "verify_ok"
+            self.assertTrue(_verify_ngrok_tunnel("https://one.ngrok.io"))
+            mock_get.return_value.status_code = 502
+            self.assertFalse(_verify_ngrok_tunnel("https://one.ngrok.io"))
+            mock_get.return_value.status_code = 200
+            mock_get.return_value.text = "verify_ok"
+            self.assertTrue(_verify_ngrok_tunnel("https://one.ngrok.io"))
+            self.assertTrue(_verify_ngrok_tunnel("https://two.ngrok.io"))
+        verified_logs = [logged_call for logged_call in mock_log.call_args_list if logged_call == call("[Ngrok] Tunnel verified")]
+        self.assertEqual(len(verified_logs), 3)
 
 
 class TestDownloadOnePermanentTemp(unittest.TestCase):
@@ -412,7 +430,11 @@ class TestGetMonitorHealth(unittest.TestCase):
         core._monitor_started = True
         core._callback_port = 5000
         mock_get.return_value.status_code = 200
-        ok, msg = get_monitor_health()
+        polling = MagicMock()
+        polling.is_alive.return_value = True
+        polling.name = "youtube-polling-reconciliation"
+        with patch("youtube_monitor.core._all_threads", [polling]):
+            ok, msg = get_monitor_health()
         self.assertTrue(ok)
 
     @patch("youtube_monitor.core.requests.get")

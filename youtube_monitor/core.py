@@ -4,6 +4,7 @@ import json
 import math
 import os
 import queue
+import random
 import re
 import shutil
 import subprocess
@@ -30,6 +31,7 @@ from .activity import append_activity, remember_download
 from . import ffmpeg_helper
 from . import ngrok_helper
 from . import ngrok_owner
+from .state_store import VideoStateStore
 
 
 def _app_root():
@@ -56,6 +58,7 @@ CHANNELS_JSON = APP_ROOT / "channels.json"
 CHANNEL_CACHE_JSON = APP_ROOT / "channel_cache.json"
 CONFIG_JSON = APP_ROOT / "youtube_config.json"
 CSV_LOG = APP_ROOT / "downloads_log.csv"
+STATE_DB = APP_ROOT / "youtube_monitor_state.db"
 NGROK_BINARY = APP_ROOT / "ngrok.exe"
 
 NGROK_PORT_DEFAULT = 5000
@@ -116,6 +119,9 @@ CONFIG_DEFAULTS = {
     "concurrent_fragments": 8,
     "youtube_proxy_fallback": False,
     "youtube_cookie_policy": "fallback",
+    "poll_interval_healthy_seconds": 120,
+    "poll_interval_degraded_seconds": 30,
+    "poll_scan_limit": 10,
 }
 
 FAILURE_PERMANENT = "permanent"
@@ -175,6 +181,7 @@ _callback_instance_id = None
 _callback_owner_token = None
 _monitor_started = False
 _monitor_started_epoch = None
+_monitor_session_id = None
 _monitor_gen = 0
 _monitor_gen_lock = threading.Lock()
 _monitor_state = "STOPPED"
@@ -197,6 +204,9 @@ _proxy_rr_index = 0
 _proxy_lock = threading.Lock()
 public_callback_url = None
 public_callback_verified = False
+_last_verified_tunnel_url = None
+_ngrok_tunnel_was_healthy = False
+_ngrok_verify_log_lock = threading.Lock()
 last_callback_post_time = None
 last_error = ""
 downloaded_today = 0
@@ -209,6 +219,8 @@ _finalize_lock = threading.Lock()
 _retry_lock = threading.Lock()
 _video_detected_callback = None
 _video_detected_callback_lock = threading.Lock()
+_video_ready_callback = None
+_video_ready_callback_lock = threading.Lock()
 MAX_RETRIES = 4
 RETRY_DELAYS = [0, 15, 45, 120]
 RETRY_COOLDOWN = 300
@@ -217,6 +229,18 @@ _subscription_status = {}
 _subscription_lock = threading.Lock()
 _websub_secret_lock = threading.Lock()
 _websub_secret_cache = None
+_video_state_store = None
+_video_state_store_lock = threading.Lock()
+_last_poll_ok_at = None
+_last_poll_error = ""
+
+
+def _get_video_state_store():
+    global _video_state_store
+    with _video_state_store_lock:
+        if _video_state_store is None:
+            _video_state_store = VideoStateStore(STATE_DB)
+        return _video_state_store
 
 
 def log(message):
@@ -1181,18 +1205,6 @@ def _polling_item_is_at_or_before_watermark(meta, pub_epoch):
     return pub_epoch is not None and watermark is not None and pub_epoch <= watermark
 
 
-def _published_before_monitor_start(pub_epoch):
-    if pub_epoch is None or _monitor_started_epoch is None:
-        return False
-    return pub_epoch < (_monitor_started_epoch - MONITOR_START_GRACE_SECONDS)
-
-
-def _mark_pre_start_seen(channel_id, video_id, pub_epoch, source):
-    channels_store.mark_seen_only(channel_id, video_id)
-    channels_store.update_watermark(channel_id, pub_epoch)
-    log(f"[{source}] Skip {video_id}: published before monitor start")
-
-
 def _seed_polling_baseline(channel_id, items):
     seeded = 0
     latest_pub_epoch = None
@@ -1222,6 +1234,64 @@ class VideoDetectedIntent:
     monitor_generation: int = 0
 
 
+@dataclass(frozen=True)
+class VideoReadyIntent:
+    profile_name: str
+    final_path: str
+    channel_id: str
+    youtube_video_id: str
+    title: str
+    published_iso: str = ""
+    detected_iso: str = ""
+    source: str = "FAST_PATH"
+
+
+def _register_detected_video(channel_id, video_id, published_iso, detected_iso, source):
+    """Apply the shared WebSub/polling policy and atomically enqueue one video."""
+    pub_epoch = iso_to_epoch(published_iso) if published_iso else None
+    meta = channels_store.get_meta(channel_id)
+    if not meta or not meta.get("active", True):
+        log(f"[{source}] Skip {video_id}: channel {channel_id} inactive or missing")
+        return False
+    if video_id in meta.get("seen", set()):
+        return False
+    if _is_pending(channel_id, video_id):
+        return False
+    if pub_epoch is not None and time.time() - pub_epoch > MAX_ACCEPTABLE_AGE_HOURS * 3600:
+        channels_store.mark_seen_only(channel_id, video_id)
+        log(f"[{source}] Skip {video_id}: older than {MAX_ACCEPTABLE_AGE_HOURS}h")
+        return False
+    if channels_store.should_reject_by_watermark(
+        channel_id, pub_epoch, WATERMARK_SLACK_MINUTES * 60
+    ):
+        channels_store.mark_seen_only(channel_id, video_id)
+        log(f"[{source}] Skip {video_id}: older than watermark")
+        return False
+    try:
+        should_queue, state = _get_video_state_store().register_detection(
+            channel_id,
+            video_id,
+            pub_epoch,
+            _monitor_session_id or "legacy",
+            _monitor_started_epoch or time.time(),
+            source,
+            published_iso=published_iso or "",
+            detected_iso=detected_iso or "",
+        )
+    except Exception as e:
+        log(f"[{source}] State store lỗi {video_id}: {e}")
+        return False
+    if not should_queue:
+        return False
+    if not _try_pending(channel_id, video_id):
+        return False
+    _get_video_state_store().transition(channel_id, video_id, "QUEUED_DOWNLOAD")
+    download_queue.put((channel_id, video_id, published_iso or None, detected_iso))
+    channels_store.update_watermark(channel_id, pub_epoch)
+    log(f"[{source}] Enqueue {video_id}@{channel_id}")
+    return True
+
+
 def set_video_detected_callback(callback):
     """Đăng ký callback nhận sự kiện video mới được phát hiện qua WebSub.
 
@@ -1231,6 +1301,13 @@ def set_video_detected_callback(callback):
     global _video_detected_callback
     with _video_detected_callback_lock:
         _video_detected_callback = callback
+
+
+def set_video_ready_callback(callback):
+    """Register the application-owned delivery callback for finalized videos."""
+    global _video_ready_callback
+    with _video_ready_callback_lock:
+        _video_ready_callback = callback
 
 
 def _safe_emit_detection(intent):
@@ -1246,6 +1323,22 @@ def _safe_emit_detection(intent):
         log(f"[WebSub] Detection callback lỗi: {e}")
 
 
+def _safe_emit_video_ready(intent):
+    """Return ``(ok, reason)`` without importing the application entry module."""
+    with _video_ready_callback_lock:
+        callback = _video_ready_callback
+    if callback is None:
+        return False, "ready_callback_missing"
+    try:
+        result = callback(intent)
+        if isinstance(result, tuple) and len(result) >= 2:
+            return bool(result[0]), str(result[1])
+        return bool(result), "enqueued" if result else "ready_callback_rejected"
+    except Exception as e:
+        log(f"[FastPath] Video-ready callback lỗi: {e}")
+        return False, "ready_callback_failed"
+
+
 def websub_processor_worker(run_gen=None):
     log("[WebSub] Processor started")
     while not stop_event.is_set():
@@ -1257,7 +1350,8 @@ def websub_processor_worker(run_gen=None):
         except queue.Empty:
             continue
         if run_gen is not None and _get_monitor_gen() != run_gen:
-            log("[WebSub] Generation changed after dequeue, stopping processor")
+            log("[WebSub] Generation changed after dequeue, returning event to queue")
+            websub_payload_queue.put((data, detected_utc_iso))
             websub_payload_queue.task_done()
             break
         now_epoch = time.time()
@@ -1274,29 +1368,13 @@ def websub_processor_worker(run_gen=None):
             if not meta or not meta.get("active", True):
                 log(f"[WebSub] Skip {vid}: channel {chan} inactive")
                 continue
-            if pub_epoch is not None and now_epoch - pub_epoch > MAX_ACCEPTABLE_AGE_HOURS * 3600:
-                channels_store.mark_seen_only(chan, vid)
-                channels_store.update_watermark(chan, pub_epoch)
-                log(f"[WebSub] Skip {vid}: too old ({_format_duration(now_epoch - pub_epoch)})")
-                continue
-            if _published_before_monitor_start(pub_epoch):
-                _mark_pre_start_seen(chan, vid, pub_epoch, "WebSub")
-                continue
             seen = meta.get("seen", set())
             if vid in seen:
                 continue
             if _is_pending(chan, vid):
                 continue
-            if not _try_pending(chan, vid):
+            if not _register_detected_video(chan, vid, published or "", detected_utc_iso, "WEBSUB"):
                 continue
-            if channels_store.should_reject_by_watermark(chan, pub_epoch, WATERMARK_SLACK_MINUTES * 60):
-                _remove_pending(chan, vid)
-                channels_store.mark_seen_only(chan, vid)
-                log(f"[WebSub] Skip {vid}: watermark")
-                continue
-            download_queue.put((chan, vid, published or None, detected_utc_iso))
-            channels_store.update_watermark(chan, pub_epoch)
-            log(f"[WebSub] Enqueue {vid}@{chan}")
             intent = VideoDetectedIntent(
                 channel_id=chan,
                 video_id=vid,
@@ -1971,7 +2049,9 @@ def _release_download(video_id):
 
 
 def _staging_dir(target_folder):
-    p = Path(target_folder).parent / ".youtube_tmp"
+    # Keep staging inside the configured destination. Using its parent can escape
+    # the writable profile folder (for example C:\\Users\\...\\AppData\\Local).
+    p = Path(target_folder) / ".youtube_tmp"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -2213,30 +2293,42 @@ def _download_one_result(channel_id, video_id, published_iso=None, detected_iso=
             downloaded_today = 0
         downloaded_today += 1
         log(f"[DL] Đã lưu: {final_path}")
-        # Direct Fast Path: hand the finalized video to the unified delivery coordinator.
-        # The coordinator claims atomically, re-checks lifecycle generation, enqueues a
-        # generation-tagged item, and marks WAITING_PROFILE when the profile is not running
-        # (the file then stays on disk for startup reconciliation).
+        delivery_state = "DOWNLOADED"
+        delivery_reason = "download_only"
+        # Dependency inversion: the monitor must never import the application entry
+        # module. Under `python main.py`, doing so executes main.py again as module
+        # `main` and creates a second Tk root in the same process.
         if profile_name:
-            try:
-                import main
-                ok, reason = main.enqueue_video(
-                    profile_name,
-                    final_path,
-                    source="FAST_PATH",
-                    channel_id=channel_id,
-                    youtube_video_id=video_id,
-                    title=info.get("title") or video_id,
-                )
-                if not ok and reason not in ("waiting_profile", "profile_missing"):
-                    log(f"[FastPath] Không đưa được {video_id} vào hàng chờ: {reason}")
-            except Exception as e:
-                log(f"[FastPath] Lỗi enqueue {video_id}: {e}")
+            intent = VideoReadyIntent(
+                profile_name=profile_name,
+                final_path=str(final_path),
+                channel_id=channel_id,
+                youtube_video_id=video_id,
+                title=title,
+                published_iso=published_iso or "",
+                detected_iso=detected_iso or "",
+            )
+            enqueued, delivery_reason = _safe_emit_video_ready(intent)
+            delivery_state = "ENQUEUED_UPLOAD" if enqueued else "DELIVERY_WAITING"
+            if not enqueued:
+                log(f"[FastPath] {video_id} chờ delivery reconciliation: {delivery_reason}")
                 try:
-                    append_activity("youtube_download", video_name=info.get("title") or video_id, video_url=url, profile=activity_profile, status="warn", detail=f"fastpath_enqueue_failed: {str(e)[:300]}")
+                    append_activity(
+                        "youtube_download", video_name=title, video_url=url,
+                        profile=activity_profile, status="warn",
+                        detail=f"fastpath_delivery_waiting: {delivery_reason}",
+                    )
                 except Exception:
                     pass
         channels_store.mark_seen_only(channel_id, video_id)
+        try:
+            _get_video_state_store().transition(
+                channel_id, video_id, delivery_state, final_path=str(final_path),
+                last_error_class=None if delivery_state != "DELIVERY_WAITING" else delivery_reason,
+                last_error_detail=None if delivery_state != "DELIVERY_WAITING" else delivery_reason,
+            )
+        except Exception as e:
+            log(f"[DL] Không lưu được trạng thái hoàn tất {video_id}: {e}")
         _remove_pending(channel_id, video_id)
         _clear_retry(channel_id, video_id)
         return DownloadOutcome(ok=True, retryable=False, permanent=False, failure_class="", attempts_used=attempts_used, final_path=final_path)
@@ -2244,6 +2336,10 @@ def _download_one_result(channel_id, video_id, published_iso=None, detected_iso=
         _release_download(video_id)
         if _permanent:
             channels_store.mark_seen_only(channel_id, video_id)
+            try:
+                _get_video_state_store().transition(channel_id, video_id, "SKIPPED_PERMANENT")
+            except Exception:
+                pass
             _remove_pending(channel_id, video_id)
             _clear_retry(channel_id, video_id)
         try:
@@ -2273,6 +2369,10 @@ def worker_main(worker_id, run_gen=None):
             download_queue.task_done()
             break
         try:
+            try:
+                _get_video_state_store().transition(ch_id, vid_id, "DOWNLOADING")
+            except Exception as e:
+                log(f"[Worker-{worker_id}] State transition lỗi {vid_id}: {e}")
             outcome = _download_one_result(ch_id, vid_id, published_iso, detected_iso)
             meta_seen = (channels_store.get_meta(ch_id) or {}).get("seen", set())
             if not outcome.ok and outcome.retryable and not outcome.permanent and _is_pending(ch_id, vid_id) and vid_id not in meta_seen:
@@ -2283,14 +2383,30 @@ def worker_main(worker_id, run_gen=None):
                         _retry_after[attempt_key] = attempt + 1
                         delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
                         _retry_after[f"{ch_id}:{vid_id}:due"] = time.time() + delay
+                        _get_video_state_store().transition(
+                            ch_id, vid_id, "RETRY_WAIT", attempts=attempt + 1,
+                            next_retry_at=time.time() + delay,
+                            last_error_class=outcome.failure_class,
+                            last_error_detail=outcome.detail,
+                        )
                         log(f"[Worker-{worker_id}] {vid_id}: retry {attempt+1}/{MAX_RETRIES} sau {delay}s")
                     else:
-                        log(f"[Worker-{worker_id}] {vid_id}: exhausted retries ({MAX_RETRIES}/{MAX_RETRIES}), giving up")
-                        _retry_after.pop(attempt_key, None)
-                        _remove_pending(ch_id, vid_id)
-                        cooldown_key = f"{ch_id}:{vid_id}:cooldown"
-                        _retry_after[cooldown_key] = time.time() + RETRY_COOLDOWN
+                        due = time.time() + RETRY_COOLDOWN
+                        log(f"[Worker-{worker_id}] {vid_id}: exhausted retries; cooldown {RETRY_COOLDOWN}s rồi thử lại")
+                        _retry_after[attempt_key] = 0
+                        _retry_after[f"{ch_id}:{vid_id}:due"] = due
+                        _get_video_state_store().transition(
+                            ch_id, vid_id, "RETRY_WAIT", attempts=0, next_retry_at=due,
+                            last_error_class=outcome.failure_class,
+                            last_error_detail=outcome.detail,
+                        )
             elif not outcome.ok:
+                state = "SKIPPED_PERMANENT" if outcome.permanent else "RETRY_WAIT"
+                _get_video_state_store().transition(
+                    ch_id, vid_id, state,
+                    last_error_class=outcome.failure_class,
+                    last_error_detail=outcome.detail,
+                )
                 log(f"[Worker-{worker_id}] {vid_id}: không retry (class={outcome.failure_class})")
         except Exception as e:
             log(f"[Worker-{worker_id}] lỗi {e}\n{traceback.format_exc()}")
@@ -2320,11 +2436,8 @@ def _retry_maintainer(run_gen=None):
                             to_requeue.append((ch_id, vid_id, attempt))
                             _retry_after.pop(key, None)
                         else:
-                            _retry_after.pop(attempt_key, None)
-                            _retry_after.pop(key, None)
-                            _remove_pending(ch_id, vid_id)
-                            cooldown_key = f"{ch_id}:{vid_id}:cooldown"
-                            _retry_after[cooldown_key] = time.time() + RETRY_COOLDOWN
+                            _retry_after[attempt_key] = 0
+                            _retry_after[key] = now + RETRY_COOLDOWN
                     continue
                 if key.endswith(":cooldown") and due <= now:
                     now_expired.append(key)
@@ -2334,10 +2447,39 @@ def _retry_maintainer(run_gen=None):
 
         for ch_id, vid_id, attempt in to_requeue:
             if _is_pending(ch_id, vid_id) and not stop_event.is_set():
+                _get_video_state_store().transition(ch_id, vid_id, "QUEUED_DOWNLOAD", next_retry_at=None)
                 download_queue.put((ch_id, vid_id, None, datetime.now(timezone.utc).isoformat()))
                 log(f"[Retry] Re-enqueue {vid_id} (attempt {attempt+1}/{MAX_RETRIES})")
         stop_event.wait(2)
     log("[Retry] Maintainer stopped")
+
+
+def _recover_durable_downloads():
+    recovered = 0
+    try:
+        now = time.time()
+        for row in _get_video_state_store().recoverable(include_future=True):
+            cid = row.get("channel_id")
+            vid = row.get("video_id")
+            if not cid or not vid or not channels_store.get_meta(cid):
+                continue
+            if _try_pending(cid, vid):
+                next_retry_at = row.get("next_retry_at")
+                if next_retry_at is not None and float(next_retry_at) > now:
+                    with _retry_lock:
+                        _retry_after[f"{cid}:{vid}:attempt"] = int(row.get("attempts") or 0)
+                        _retry_after[f"{cid}:{vid}:due"] = float(next_retry_at)
+                    recovered += 1
+                    continue
+                _get_video_state_store().transition(cid, vid, "QUEUED_DOWNLOAD")
+                download_queue.put((cid, vid, row.get("published_iso") or None,
+                                    row.get("detected_iso") or datetime.now(timezone.utc).isoformat()))
+                recovered += 1
+        if recovered:
+            log(f"[Recovery] Khôi phục {recovered} video chưa hoàn tất")
+    except Exception as e:
+        log(f"[Recovery] Không khôi phục được durable queue: {e}")
+    return recovered
 
 
 def subscribe_websub(channel_id, callback_url):
@@ -2440,6 +2582,8 @@ def _stop_callback_server():
 
 
 def _verify_ngrok_tunnel(ngrok_url):
+    global _last_verified_tunnel_url, _ngrok_tunnel_was_healthy
+    normalized_url = str(ngrok_url or "").rstrip("/")
     challenge = f"verify_{uuid.uuid4().hex[:12]}"
     try:
         resp = requests.get(
@@ -2447,14 +2591,30 @@ def _verify_ngrok_tunnel(ngrok_url):
             timeout=10
         )
         if resp.status_code == 200 and resp.text.strip() == challenge:
-            log("[Ngrok] Tunnel verified")
+            with _ngrok_verify_log_lock:
+                should_log = not _ngrok_tunnel_was_healthy or _last_verified_tunnel_url != normalized_url
+                _ngrok_tunnel_was_healthy = True
+                _last_verified_tunnel_url = normalized_url
+            if should_log:
+                log("[Ngrok] Tunnel verified")
             return True
         else:
+            with _ngrok_verify_log_lock:
+                _ngrok_tunnel_was_healthy = False
             log(f"[Ngrok] Tunnel verification failed: status={resp.status_code}")
             return False
     except Exception as e:
+        with _ngrok_verify_log_lock:
+            _ngrok_tunnel_was_healthy = False
         log(f"[Ngrok] Tunnel verification error: {e}")
         return False
+
+
+def _reset_ngrok_verification_log_state():
+    global _last_verified_tunnel_url, _ngrok_tunnel_was_healthy
+    with _ngrok_verify_log_lock:
+        _last_verified_tunnel_url = None
+        _ngrok_tunnel_was_healthy = False
 
 
 def _ngrok_public_url():
@@ -2654,6 +2814,75 @@ def _resubscribe_worker(run_gen=None):
         stop_event.wait(RESUBSCRIBE_CHECK_SECONDS)
 
 
+def _poll_interval_seconds():
+    cfg = get_config()
+    healthy = max(60, int(cfg.get("poll_interval_healthy_seconds", 120) or 120))
+    degraded = max(15, int(cfg.get("poll_interval_degraded_seconds", 30) or 30))
+    with _subscription_lock:
+        active_count = sum(1 for meta in channels_store.all_items().values() if meta.get("active", True))
+        verified_count = sum(1 for s in _subscription_status.values() if s.get("verified_at"))
+    if not public_callback_verified or verified_count < active_count:
+        base = degraded
+    else:
+        base = healthy
+    # Avoid synchronized request bursts when many installed clients start together.
+    return max(15, base + random.uniform(-min(15, base * 0.15), min(15, base * 0.15)))
+
+
+def _polling_worker(run_gen=None):
+    global _last_poll_ok_at, _last_poll_error
+    log("[Polling] Reconciliation worker started")
+    while not stop_event.is_set():
+        if run_gen is not None and _get_monitor_gen() != run_gen:
+            break
+        try:
+            scan_limit = min(50, max(5, int(get_config().get("poll_scan_limit", 10) or 10)))
+            youtube = None
+            for cid, meta in channels_store.all_items().items():
+                if stop_event.is_set() or (run_gen is not None and _get_monitor_gen() != run_gen):
+                    break
+                if not meta.get("active", True):
+                    continue
+                entries = []
+                try:
+                    feed = requests.get(
+                        f"https://www.youtube.com/feeds/videos.xml?channel_id={urllib.parse.quote(cid)}",
+                        timeout=10,
+                    )
+                    feed.raise_for_status()
+                    entries = _parse_websub_xml(feed.text)[:scan_limit]
+                except Exception as feed_error:
+                    log(f"[Polling] Feed lỗi {cid}, fallback Data API: {feed_error}")
+                    if youtube is None:
+                        youtube = get_youtube_client()
+                    playlist_id = _get_uploads_playlist_id(cid, youtube)
+                    if playlist_id:
+                        response = youtube.playlistItems().list(
+                            part="snippet,contentDetails", playlistId=playlist_id, maxResults=scan_limit
+                        ).execute()
+                        entries = [
+                            (_playlist_item_video_id(item), cid, _playlist_item_published(item))
+                            for item in response.get("items", [])
+                        ]
+                # Feeds are newest-first. Process oldest-first so watermark advances
+                # monotonically and a burst of uploads cannot hide an earlier item.
+                for vid, _entry_cid, published in reversed(entries):
+                    if not vid:
+                        continue
+                    _register_detected_video(
+                        cid, vid, published,
+                        datetime.now(timezone.utc).isoformat(), "POLLING",
+                    )
+                stop_event.wait(0.15)
+            _last_poll_ok_at = datetime.now(timezone.utc).isoformat()
+            _last_poll_error = ""
+        except Exception as e:
+            _last_poll_error = str(e)[:500]
+            log(f"[Polling] Lỗi reconciliation: {_last_poll_error}")
+        stop_event.wait(_poll_interval_seconds())
+    log("[Polling] Reconciliation worker stopped")
+
+
 def _ensure_channel_metadata(channel_id, youtube):
     """Fetch and persist channel title/thumbnail/url when missing (one-time enrichment)."""
     meta = channels_store.get_meta(channel_id) or {}
@@ -2771,7 +3000,7 @@ def _add_thread(t):
 
 
 def start_monitor():
-    global _monitor_started, _monitor_started_epoch, _monitor_gen, last_error, _proxy_pool, _proxy_by_profile, _proxy_rr_index, _download_sem, public_callback_url, public_callback_verified
+    global _monitor_started, _monitor_started_epoch, _monitor_session_id, _monitor_gen, last_error, _proxy_pool, _proxy_by_profile, _proxy_rr_index, _download_sem, public_callback_url, public_callback_verified
     with _state_lock:
         _set_monitor_state("STARTING")
         if _monitor_started:
@@ -2786,7 +3015,7 @@ def start_monitor():
         with _monitor_gen_lock:
             _monitor_gen += 1
             run_gen = _monitor_gen
-        _monitor_started_epoch = time.time()
+        _monitor_session_id, _monitor_started_epoch = _get_video_state_store().begin_session()
         stop_event.clear()
         _all_threads[:] = [t for t in _all_threads if t.is_alive()]
         channels_store.load()
@@ -2809,6 +3038,8 @@ def start_monitor():
             last_error = f"Callback server: {port_or_err}"
             log(f"[Monitor] {last_error}")
             channels_store.stop_autosave()
+            _get_video_state_store().end_session(_monitor_session_id)
+            _monitor_session_id = None
             _monitor_started_epoch = None
             _set_monitor_state("STOPPED")
             return False, last_error
@@ -2817,33 +3048,27 @@ def start_monitor():
             channels_store.stop_autosave()
             last_error = "Không tạo được WebSub secret"
             log(f"[Monitor] {last_error}")
+            _get_video_state_store().end_session(_monitor_session_id)
+            _monitor_session_id = None
             _monitor_started_epoch = None
             _set_monitor_state("STOPPED")
             return False, last_error
         auth_ok, auth_msg = ngrok_owner.validate_auth_ready()
         _refresh_ngrok_auth_status()
         if not auth_ok:
-            _stop_callback_server()
-            channels_store.stop_autosave()
             last_error = auth_msg
             log(f"[Monitor] {last_error}")
-            _monitor_started_epoch = None
-            _set_monitor_state("STOPPED")
-            return False, last_error
         ngrok_ok = False
-        try:
-            ngrok_ok = _start_ngrok(_callback_port)
-        except Exception as e:
-            last_error = f"Ngrok: {e}"
-            log(f"[Ngrok] Start lỗi: {e}")
+        if auth_ok:
+            try:
+                ngrok_ok = _start_ngrok(_callback_port)
+            except Exception as e:
+                last_error = f"Ngrok: {e}"
+                log(f"[Ngrok] Start lỗi: {e}")
         if not ngrok_ok:
-            _stop_callback_server()
-            channels_store.stop_autosave()
             last_error = last_error or "Ngrok tunnel không hoạt động"
-            log(f"[Monitor] {last_error}")
-            _monitor_started_epoch = None
-            _set_monitor_state("STOPPED")
-            return False, last_error
+            log(f"[Monitor] {last_error}; tiếp tục bằng polling reconciliation")
+            _set_monitor_state("DEGRADED")
         t = threading.Thread(target=websub_processor_worker, args=(run_gen,), daemon=True)
         _add_thread(t)
         t.start()
@@ -2860,19 +3085,31 @@ def start_monitor():
         t = threading.Thread(target=_recovery_worker, args=(run_gen,), daemon=True)
         _add_thread(t)
         t.start()
-        channels_store.subscribe_all(public_callback_url)
+        t = threading.Thread(target=_polling_worker, args=(run_gen,), daemon=True, name="youtube-polling-reconciliation")
+        _add_thread(t)
+        t.start()
+        _recover_durable_downloads()
+        if public_callback_url:
+            channels_store.subscribe_all(public_callback_url)
         _monitor_started = True
-        _set_monitor_state("RUNNING")
-        return True, "YouTube Monitor đã start."
+        if ngrok_ok:
+            _set_monitor_state("RUNNING")
+            return True, "YouTube Monitor đã start (WebSub + polling)."
+        return True, "YouTube Monitor đang chạy bằng polling; WebSub/ngrok đang tự khôi phục."
 
 
 def get_monitor_health():
     if not _monitor_started:
         return False, "Monitor chưa chạy"
+    polling_alive = any(
+        t.is_alive() and t.name == "youtube-polling-reconciliation" for t in _all_threads
+    )
+    if not polling_alive:
+        return False, "Polling reconciliation không hoạt động"
     if _monitor_state == "DEGRADED":
-        return False, "Ngrok tunnel không hoạt động; cần Retry thủ công."
+        return True, "Polling fallback đang chạy; WebSub/ngrok chưa sẵn sàng."
     if _monitor_state == "RECOVERING":
-        return False, "Đang khôi phục ngrok tunnel..."
+        return True, "Polling fallback đang chạy; đang khôi phục WebSub/ngrok."
     if _callback_port:
         try:
             resp = requests.get(f"http://127.0.0.1:{_callback_port}/youtube_health", timeout=2)
@@ -2908,7 +3145,7 @@ def set_websub_health(ok, error_msg=""):
 
 
 def _force_stop():
-    global _monitor_started, _monitor_started_epoch, _callback_server, _callback_server_thread, _callback_port, _callback_instance_id, public_callback_url, public_callback_verified
+    global _monitor_started, _monitor_started_epoch, _monitor_session_id, _callback_server, _callback_server_thread, _callback_port, _callback_instance_id, public_callback_url, public_callback_verified
     stop_event.set()
     _stop_callback_server()
     try:
@@ -2921,15 +3158,18 @@ def _force_stop():
         return
     public_callback_url = None
     public_callback_verified = False
+    _reset_ngrok_verification_log_state()
     _active_downloads.clear()
     _pending_video_ids.clear()
     _retry_after.clear()
     _monitor_started = False
+    _get_video_state_store().end_session(_monitor_session_id)
+    _monitor_session_id = None
     _monitor_started_epoch = None
 
 
 def stop_monitor():
-    global _monitor_started, _monitor_started_epoch, public_callback_url, public_callback_verified
+    global _monitor_started, _monitor_started_epoch, _monitor_session_id, public_callback_url, public_callback_verified
     with _state_lock:
         if not _monitor_started:
             return True, "YouTube Monitor chưa chạy."
@@ -2946,11 +3186,14 @@ def stop_monitor():
             return False, f"YouTube Monitor chưa dừng hết ({len(_live_monitor_threads())} thread còn sống)."
         public_callback_url = None
         public_callback_verified = False
+        _reset_ngrok_verification_log_state()
         _active_downloads.clear()
         _pending_video_ids.clear()
         _retry_after.clear()
         _all_threads.clear()
         _monitor_started = False
+        _get_video_state_store().end_session(_monitor_session_id)
+        _monitor_session_id = None
         _monitor_started_epoch = None
         _set_monitor_state("STOPPED")
         log("[Monitor] Stopped")
@@ -3084,9 +3327,11 @@ def get_status():
         "health_msg": health_msg,
         "monitor_state": _monitor_state,
         "recovery_attempt": _recovery_attempt,
-        "detection_source": "WEBSUB",
+        "detection_source": "WEBSUB+POLLING",
         "last_websub_ok_at": _last_websub_ok_at,
         "last_websub_error": _last_websub_error,
+        "last_poll_ok_at": _last_poll_ok_at,
+        "last_poll_error": _last_poll_error,
         "callback_url": public_callback_url or "",
         "callback_port": _callback_port,
         "callback_verified": public_callback_verified,
@@ -3108,4 +3353,5 @@ def get_status():
         "subscriptions_ok": subs_ok,
         "subscriptions_degraded": total_subs - subs_ok,
         "pending": len([v for v in _pending_video_ids if not stop_event.is_set()]),
+        "video_states": _get_video_state_store().counts(),
     }

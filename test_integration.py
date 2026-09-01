@@ -174,13 +174,13 @@ class TestMonitorLifecycle(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("chưa chạy", msg.lower())
 
-    def test_start_fails_before_workers_when_auth_missing(self):
+    def test_start_degrades_to_polling_when_auth_missing(self):
         with patch("youtube_monitor.core.make_server") as mock_ms, \
              patch("youtube_monitor.core.ngrok_owner.validate_auth_ready", return_value=(False, "Ngrok chưa được xác thực. add-authtoken")), \
              patch("youtube_monitor.core.requests.get") as mock_get, \
              patch("youtube_monitor.core._load_tiktok_proxies", return_value=({}, [])):
 
-            from youtube_monitor.core import start_monitor, get_status, _all_threads
+            from youtube_monitor.core import start_monitor, stop_monitor, get_status, _all_threads
 
             mock_server = MagicMock()
             mock_server.server_address = ("0.0.0.0", 5000)
@@ -188,25 +188,26 @@ class TestMonitorLifecycle(unittest.TestCase):
             mock_get.return_value.status_code = 200
 
             ok, msg = start_monitor()
-            self.assertFalse(ok, f"Start should fail when ngrok auth missing: {msg}")
-            self.assertIn("authtoken", msg.lower())
+            self.assertTrue(ok, f"Polling fallback should start when ngrok auth is missing: {msg}")
+            self.assertIn("polling", msg.lower())
 
             status = get_status()
-            self.assertFalse(status["running"])
-            self.assertEqual(status["monitor_state"], "STOPPED")
+            self.assertTrue(status["running"])
+            self.assertEqual(status["monitor_state"], "DEGRADED")
             self.assertIn("authtoken", status["last_error"].lower())
 
             alive = [t for t in list(_all_threads) if t.is_alive()]
-            self.assertEqual(len(alive), 0, f"No worker should be running after auth failure: {alive}")
+            self.assertTrue(any(t.name == "youtube-polling-reconciliation" for t in alive))
+            stop_monitor()
 
-    def test_start_fails_before_workers_when_ngrok_connect_fails(self):
+    def test_start_degrades_to_polling_when_ngrok_connect_fails(self):
         with patch("youtube_monitor.core.make_server") as mock_ms, \
              patch("youtube_monitor.core.ngrok_owner.validate_auth_ready", return_value=(True, "ready (environment)")), \
              patch("youtube_monitor.core.ngrok_owner.start_owned_agent", return_value=(False, "Ngrok authtoken bị từ chối (ERR_NGROK_4018).")), \
              patch("youtube_monitor.core.requests.get") as mock_get, \
              patch("youtube_monitor.core._load_tiktok_proxies", return_value=({}, [])):
 
-            from youtube_monitor.core import start_monitor, get_status, _all_threads
+            from youtube_monitor.core import start_monitor, stop_monitor, get_status, _all_threads
 
             mock_server = MagicMock()
             mock_server.server_address = ("0.0.0.0", 5000)
@@ -214,18 +215,19 @@ class TestMonitorLifecycle(unittest.TestCase):
             mock_get.return_value.status_code = 200
 
             ok, msg = start_monitor()
-            self.assertFalse(ok, f"Start should fail when ngrok connect fails: {msg}")
-            self.assertIn("4018", msg)
+            self.assertTrue(ok, f"Polling fallback should start when ngrok connect fails: {msg}")
+            self.assertIn("polling", msg.lower())
 
             status = get_status()
-            self.assertFalse(status["running"])
-            self.assertEqual(status["monitor_state"], "STOPPED")
+            self.assertTrue(status["running"])
+            self.assertEqual(status["monitor_state"], "DEGRADED")
             self.assertIn("4018", status["last_error"])
 
             alive = [t for t in list(_all_threads) if t.is_alive()]
-            self.assertEqual(len(alive), 0, f"No worker should be running after ngrok failure: {alive}")
+            self.assertTrue(any(t.name == "youtube-polling-reconciliation" for t in alive))
+            stop_monitor()
 
-    def test_start_fails_before_workers_when_tunnel_verify_fails(self):
+    def test_start_degrades_to_polling_when_tunnel_verify_fails(self):
         with patch("youtube_monitor.core.make_server") as mock_ms, \
              patch("youtube_monitor.core.ngrok_owner.validate_auth_ready", return_value=(True, "ready (environment)")), \
              patch("youtube_monitor.core.ngrok_owner.start_owned_agent", return_value=(True, {"public_url": "http://abc.ngrok-free.app"})), \
@@ -234,7 +236,7 @@ class TestMonitorLifecycle(unittest.TestCase):
              patch("youtube_monitor.core._verify_ngrok_tunnel", return_value=False), \
              patch("youtube_monitor.core._load_tiktok_proxies", return_value=({}, [])):
 
-            from youtube_monitor.core import start_monitor, get_status, _all_threads
+            from youtube_monitor.core import start_monitor, stop_monitor, get_status, _all_threads
 
             mock_server = MagicMock()
             mock_server.server_address = ("0.0.0.0", 5000)
@@ -242,15 +244,16 @@ class TestMonitorLifecycle(unittest.TestCase):
             mock_get.return_value.status_code = 200
 
             ok, msg = start_monitor()
-            self.assertFalse(ok, f"Start should fail when tunnel verify fails: {msg}")
-            self.assertIn("tunnel", msg.lower())
+            self.assertTrue(ok, f"Polling fallback should start when tunnel verify fails: {msg}")
+            self.assertIn("polling", msg.lower())
 
             status = get_status()
-            self.assertFalse(status["running"])
-            self.assertEqual(status["monitor_state"], "STOPPED")
+            self.assertTrue(status["running"])
+            self.assertEqual(status["monitor_state"], "DEGRADED")
 
             alive = [t for t in list(_all_threads) if t.is_alive()]
-            self.assertEqual(len(alive), 0, f"No worker should be running after verify failure: {alive}")
+            self.assertTrue(any(t.name == "youtube-polling-reconciliation" for t in alive))
+            stop_monitor()
 
 
 if __name__ == "__main__":

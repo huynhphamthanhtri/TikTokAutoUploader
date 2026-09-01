@@ -9,6 +9,7 @@ from dataclasses import replace
 from urllib.parse import urlsplit
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from typing import Any, List, Sequence, Tuple
 
 def app_base_dir():
     if getattr(sys, "frozen", False):
@@ -77,7 +78,12 @@ from browser_maintenance import (
     maintain_browser,
 )
 import browser_patchright_glue as browser_glue
-from browser_patchright_glue import ProfileBusyError, SessionSetupError, SessionToken
+from browser_patchright_glue import (
+    PatchrightOwnershipConflict,
+    ProfileBusyError,
+    SessionSetupError,
+    SessionToken,
+)
 from upload_preparation import UploadPreparationCoordinator
 from profile_runtime_status import (
     RuntimeSignals,
@@ -877,7 +883,7 @@ def _capture_tiktok_cookies_worker(profile_name, source_label='profile_session',
                 raise RuntimeError("Không xác minh được proxy endpoint khi lấy cookie")
             proxy_expected_ip = preflight['proxy_exit_ip']
             direct_ip = preflight['direct_ip']
-        browser_glue.ensure_patchright_profile(cfg)
+        _ensure_patchright_profile_with_recovery(profile_name, cfg)
         _sync_patchright_migration(cfg)
         save_configs()
         token = browser_glue.open_session(cfg, profile_name)
@@ -1040,7 +1046,7 @@ def _check_profile_cookie_live(name, claim_id=None, cancel_event=None, mode="BRO
 
         try:
             proxy_data, preflight = session_runner.resolve_proxy(cfg)
-            browser_glue.ensure_patchright_profile(cfg)
+            _ensure_patchright_profile_with_recovery(name, cfg)
             _sync_patchright_migration(cfg)
             token = browser_glue.open_session(cfg, name)
             owned = True
@@ -2727,6 +2733,22 @@ def _treeview_sort_column(tv, col, reverse):
                 if 'tktbm' in val: return 1
                 return 0
             data.sort(key=sort_key_mono, reverse=reverse)
+        elif col in ('analytics', 'stats'):
+            def sort_key_analytics(t):
+                val = str(t[0])
+                m = re.search(r'👁[️\ufe0f]*\s*([\d\.]+)\s*([KMBkmb]?)', val)
+                if not m:
+                    return -1.0
+                try:
+                    num = float(m.group(1))
+                    unit = m.group(2).upper()
+                    if unit == 'K': num *= 1_000
+                    elif unit == 'M': num *= 1_000_000
+                    elif unit == 'B': num *= 1_000_000_000
+                    return num
+                except Exception:
+                    return -1.0
+            data.sort(key=sort_key_analytics, reverse=reverse)
         elif col == 'status':
             def sort_key_status(t):
                 val = str(t[0]).lower()
@@ -2809,21 +2831,135 @@ def _cleanup_expired_quarantines():
             continue
 
 
+def _can_rebind_patchright_owner(profile_name, config, conflict):
+    """Return True only for an unverified config with no competing owner/path."""
+    marker_owner = str(conflict.marker_owner or "").strip()
+    if not marker_owner or str(config.get("profile_owner_state") or "").lower() == "verified":
+        return False
+    target = os.path.normcase(os.path.abspath(str(conflict.target_path)))
+    for other_name, other in profiles.items():
+        if other_name == profile_name:
+            continue
+        other_cfg = other.get("config", {}) or {}
+        if str(other_cfg.get("account_uuid") or "").strip() == marker_owner:
+            return False
+        other_target = browser_glue.active_profile_path(other_cfg)
+        if other_target and os.path.normcase(os.path.abspath(str(other_target))) == target:
+            return False
+    return True
+
+
+def _new_recovery_legacy_path(profile_name, account_uuid):
+    """Allocate a unique tool-owned legacy Profile root without touching old data."""
+    safe_name = "".join(ch for ch in str(profile_name) if ch.isalnum() or ch in ("-", "_", " ")).strip()
+    safe_name = safe_name or "Profile"
+    base = app_base_dir() / "Auto_Data"
+    suffix = str(account_uuid or "")[:8] or "recovery"
+    index = 0
+    while True:
+        label = f"{safe_name}-{suffix}" if index == 0 else f"{safe_name}-{suffix}-{index}"
+        root = base / label
+        legacy = root / "Profile"
+        if not root.exists():
+            return root, legacy
+        index += 1
+
+
+def _provision_recovery_patchright_profile(profile_name, config, conflict):
+    """Create a fresh isolated environment while preserving the foreign profile."""
+    if _profile_browser_process_count(profile_name):
+        raise RuntimeError("Browser profile đang được sử dụng; không thể tự tạo môi trường mới.")
+
+    account_uuid = ensure_account_uuid(config)
+    root, legacy = _new_recovery_legacy_path(profile_name, account_uuid)
+    created = False
+    trial = dict(config)
+    try:
+        created = create_owned_root(legacy)
+        if not created:
+            raise RuntimeError("Không thể cấp phát thư mục browser mới an toàn.")
+        trial["chrome_profile"] = str(legacy)
+        trial["browser_profile_path"] = ""
+        trial["account_uuid"] = account_uuid
+        browser_glue.ensure_patchright_profile(trial)
+    except Exception:
+        if created:
+            shutil.rmtree(root, ignore_errors=True)
+        raise
+
+    config.update({
+        "chrome_profile": trial["chrome_profile"],
+        "browser_profile_path": trial["browser_profile_path"],
+        "account_uuid": trial["account_uuid"],
+        "profile_owner_state": "verified",
+        "ownership_recovery_at": datetime.now(timezone.utc).isoformat(),
+        "ownership_recovery_reason": "foreign_patchright_owner",
+        "ownership_recovery_previous_chrome_profile": str(conflict.legacy_path),
+        "ownership_recovery_previous_patchright_path": str(conflict.target_path),
+    })
+    _sync_patchright_migration(config)
+    invalidate_session_auth(config, "Tự tạo browser environment mới do ownership conflict")
+    config["manual_login_pending"] = True
+    return config["browser_profile_path"]
+
+
+def _ensure_patchright_profile_with_recovery(profile_name, config):
+    """Ensure a profile without ever mutating foreign-owned browser data."""
+    try:
+        path = browser_glue.ensure_patchright_profile(config)
+        return path, "resumed"
+    except PatchrightOwnershipConflict as conflict:
+        if _can_rebind_patchright_owner(profile_name, config, conflict):
+            config["account_uuid"] = conflict.marker_owner
+            config["profile_owner_state"] = "verified"
+            path = browser_glue.ensure_patchright_profile(config)
+            return path, "rebound"
+        path = _provision_recovery_patchright_profile(profile_name, config, conflict)
+        return path, "provisioned"
+
+
 def _migrate_profile_drivers():
     changed = False
+    recovered = {"rebound": 0, "provisioned": 0}
     for profile_name, profile in profiles.items():
         config = profile['config']
-        before = (config.get('browser_profile_path'), config.get('migration_state'))
+        before = (
+            config.get('chrome_profile'),
+            config.get('browser_profile_path'),
+            config.get('migration_state'),
+            config.get('account_uuid'),
+            config.get('profile_owner_state'),
+        )
         try:
-            browser_glue.ensure_patchright_profile(config)
+            _path, recovery = _ensure_patchright_profile_with_recovery(profile_name, config)
             _sync_patchright_migration(config)
-            after = (config.get('browser_profile_path'), config.get('migration_state'))
+            if recovery in recovered:
+                recovered[recovery] += 1
+                _set_profile_ui(
+                    profile_name,
+                    login='Cần xác minh' if recovery == 'provisioned' else None,
+                    browser='Môi trường mới' if recovery == 'provisioned' else None,
+                    last_error='',
+                    refresh=False,
+                )
+            after = (
+                config.get('chrome_profile'),
+                config.get('browser_profile_path'),
+                config.get('migration_state'),
+                config.get('account_uuid'),
+                config.get('profile_owner_state'),
+            )
             if after != before:
                 changed = True
         except Exception as e:
             update_status(f"[{profile_name}] [WARN] Không thể tạo/resume Profile-Patchright: {e}")
     if changed:
         save_configs()
+    if recovered['rebound'] or recovered['provisioned']:
+        update_status(
+            "[Profile Recovery] Đã khôi phục ownership: "
+            f"{recovered['rebound']} UUID config, {recovered['provisioned']} môi trường browser mới."
+        )
 
 # --- BẢNG THỐNG KÊ MỚI ---
 def show_statistics_board():
@@ -3064,7 +3200,7 @@ def ensure_driver(profile_name, lifecycle_gen=None):
                 proxy_expected_ip = preflight['proxy_exit_ip']
                 direct_ip = preflight['direct_ip']
 
-            profile_path = browser_glue.ensure_patchright_profile(config)
+            profile_path, _recovery = _ensure_patchright_profile_with_recovery(profile_name, config)
             _sync_patchright_migration(config)
             save_configs()
             token = browser_glue.open_session(config, profile_name)
@@ -3171,7 +3307,7 @@ def _prewarm_browser(profile_name, lifecycle_gen, cancel_event):
         if not proxy_data:
             raise SessionSetupError("Proxy sai định dạng; từ chối mở browser trực tiếp")
 
-    profile_path = browser_glue.ensure_patchright_profile(config)
+    profile_path, _recovery = _ensure_patchright_profile_with_recovery(profile_name, config)
     _sync_patchright_migration(config)
     save_configs()
     token = browser_glue.open_session(config, profile_name)
@@ -3219,6 +3355,18 @@ def _on_video_detected(intent):
     if lc.is_cancelled:
         return
     _preparation_coordinator.submit(profile_name, lc.generation, _prewarm_browser)
+
+
+def _on_youtube_video_ready(intent):
+    """Bridge a finalized YouTube video into the application delivery coordinator."""
+    return enqueue_video(
+        getattr(intent, 'profile_name', '') or '',
+        getattr(intent, 'final_path', '') or '',
+        source=getattr(intent, 'source', 'FAST_PATH') or 'FAST_PATH',
+        channel_id=getattr(intent, 'channel_id', None),
+        youtube_video_id=getattr(intent, 'youtube_video_id', None),
+        title=getattr(intent, 'title', None),
+    )
 
 # =========================
 # Upload Logic
@@ -3713,21 +3861,21 @@ def cleanup_failed_videos():
             pending_total_size += os.path.getsize(fpath)
             pending_count += 1
             pending_to_delete.append(fpath)
-    
+
     if failed_count == 0 and pending_count == 0:
         messagebox.showinfo("Thông báo", "Không tìm thấy video nào để dọn dẹp.")
         return
-    
+
     if failed_count > 0:
         size_mb = failed_total_size / (1024 * 1024)
         if not messagebox.askyesno("Xác nhận", f"Tìm thấy {failed_count} video lỗi ({size_mb:.1f} MB).\nXóa để giải phóng bộ nhớ?"):
             failed_to_delete = []
-    
+
     if pending_count > 0:
         pending_mb = pending_total_size / (1024 * 1024)
         if not messagebox.askyesno("Xác nhận", f"Còn {pending_count} video đang chờ upload ({pending_mb:.1f} MB).\nXóa luôn?"):
             pending_to_delete = []
-    
+
     all_to_delete = failed_to_delete + pending_to_delete
     if not all_to_delete:
         return
@@ -3819,9 +3967,26 @@ def _flush_profile_refresh():
 
 
 def _update_action_buttons(*_):
-    """Enable/disable Start/Stop/Check Cookie for the current selection."""
+    """Enable/disable Start/Stop/Check Cookie and update SelectionActionBar for the current selection."""
     try:
-        sel = tree.selection()
+        sel = tree.selection() if 'tree' in globals() else ()
+        cnt = len(sel)
+
+        # Update Selection Action Bar
+        bar = ui_widgets.get('selection_action_bar') if 'ui_widgets' in globals() else None
+        if bar:
+            bar.set_selection_count(cnt)
+            if cnt > 0:
+                if not bar.winfo_ismapped():
+                    pag = ui_widgets.get('pagination_bar')
+                    try:
+                        bar.pack(fill="x", padx=10, pady=(0, 6), before=pag)
+                    except Exception:
+                        bar.pack(fill="x", padx=10, pady=(0, 6))
+            else:
+                if bar.winfo_ismapped():
+                    bar.pack_forget()
+
         if not sel:
             _set_buttons_state(("btn_start_selected", "btn_stop_selected", "btn_check_cookie"), "disabled")
             return
@@ -3939,7 +4104,7 @@ def _refresh_status_bar():
             for p_name in projects:
                 proj_counts[p_name] = sum(
                     1 for p in profiles.values()
-                    if p.get('config', {}).get('project_name', 'Mặc định') == p_name
+                    if _profile_project(p) == p_name
                 )
             ui_widgets['project_list_view'].update_projects(
                 proj_counts,
@@ -4614,7 +4779,7 @@ def update_profile_list(*args):
     else:
         proj_members = set(projects.get(sp, []))
         for p_k, p_v in profiles.items():
-            if (p_v.get('config', {}) or {}).get('project_name') == sp:
+            if _profile_project(p_v) == sp:
                 proj_members.add(p_k)
         iter_names = sorted(proj_members)
     iter_names = [n for n in iter_names if n in profiles]
@@ -4728,9 +4893,15 @@ def update_profile_list(*args):
         proxy_str = ui.get('proxy', '')
         proxy_region_badge = f"[{region}] {proxy_str}" if (region and proxy_str) else (proxy_str or region or "Tắt")
 
+        snap_analytics = snap_mono.get('analytics', {}) if isinstance(snap_mono.get('analytics'), dict) else {}
+        views_30d = snap_mono.get('views_30d') if snap_mono.get('views_30d') is not None else snap_analytics.get('views_30d')
+        followers = snap_mono.get('follower_count') or snap_mono.get('crp_followers') or snap_analytics.get('follower_count') or cfg.get('follower_count')
+        from tiktok_analytics import format_views_follow_badge
+        analytics_badge = format_views_follow_badge(views_30d, followers)
+
         # Khớp từ khóa tìm kiếm (Search filter)
         row_blob = (
-            f"{name} {tiktok_id} {cookie_badge} {activity_badge} {mono_badge} "
+            f"{name} {tiktok_id} {cookie_badge} {activity_badge} {mono_badge} {analytics_badge} "
             f"{proxy_str} {region} {upload_label(snapshot.upload)} "
             f"{ui.get('last_error','')} {cfg.get('folder_path','')}"
         ).lower()
@@ -4760,6 +4931,7 @@ def update_profile_list(*args):
             cookie_badge,
             activity_badge,
             mono_badge,
+            analytics_badge,
             proxy_region_badge,
             snapshot,
             ui,
@@ -4802,7 +4974,7 @@ def update_profile_list(*args):
     row_map = {}
     order = []
     for item in paged_items:
-        name, cfg, tiktok_display, cookie_badge, activity_badge, mono_badge, proxy_region_badge, snapshot, ui = item
+        name, cfg, tiktok_display, cookie_badge, activity_badge, mono_badge, analytics_badge, proxy_region_badge, snapshot, ui = item
         uuid = ensure_account_uuid(cfg)
         row_map[uuid] = (
             name,
@@ -4812,6 +4984,7 @@ def update_profile_list(*args):
                 cookie_badge,
                 activity_badge,
                 mono_badge,
+                analytics_badge,
                 proxy_region_badge,
                 upload_label(snapshot.upload),
                 cfg.get('folder_path', ''),
@@ -5073,7 +5246,7 @@ def start_profile(name=None):
             update_status(f"[{name}] Không thể tạo folder video: {e}")
 
     try:
-        browser_glue.ensure_patchright_profile(config)
+        _ensure_patchright_profile_with_recovery(name, config)
         _sync_patchright_migration(config)
         save_configs()
     except Exception as error:
@@ -5258,25 +5431,156 @@ def stop_profile(selected_name=None):
     root.after(0, request_profile_refresh)
 
 # =========================
-# CRUD Actions
+# CRUD Actions & Project Management
 # =========================
+
+def _selected_profile_names() -> List[str]:
+    """Resolve Treeview selection to live profile names, ignoring stale rows."""
+    if 'tree' not in globals():
+        return []
+    sel = tree.selection()
+    names = []
+    for iid in sel:
+        try:
+            item = tree.item(iid)
+            vals = item.get('values', [])
+            if vals:
+                p_name = str(vals[0]).strip()
+                if p_name and p_name in profiles:
+                    if p_name not in names:
+                        names.append(p_name)
+        except Exception:
+            pass
+    return names
+
+
+def _profile_project(profile: Any) -> str:
+    """Safe synchronized project reader with backward compatible fallbacks."""
+    if not isinstance(profile, dict):
+        return 'Mặc định'
+    p = profile.get('project')
+    if p and str(p).strip():
+        return str(p).strip()
+    cfg = profile.get('config')
+    if isinstance(cfg, dict):
+        cp = cfg.get('project_name')
+        if cp and str(cp).strip():
+            return str(cp).strip()
+    return 'Mặc định'
+
+
+def _assign_profiles_to_project(profile_names: Sequence[str], target_project: str) -> Tuple[List[str], List[str], str]:
+    """
+    Synchronously assigns 1..N profiles to target_project maintaining the 3-field invariant:
+    1. profiles[name]['project'] == target_project
+    2. profiles[name]['config']['project_name'] == target_project
+    3. name in projects[target_project] and name absent from every other projects[...] set
+    """
+    if not target_project or target_project not in projects:
+        return [], list(profile_names), f"Dự án đích '{target_project}' không hợp lệ hoặc không tồn tại."
+
+    changed_names: List[str] = []
+    skipped_names: List[str] = []
+
+    for raw_name in profile_names:
+        name = str(raw_name).strip()
+        if not name or name not in profiles:
+            skipped_names.append(name)
+            continue
+
+        prof = profiles[name]
+        cfg = prof.get('config')
+        if not isinstance(cfg, dict):
+            cfg = {}
+            prof['config'] = cfg
+
+        old_root_p = prof.get('project')
+        old_cfg_p = cfg.get('project_name')
+        is_already_in_set = name in projects.get(target_project, set())
+        membership_repaired = False
+
+        # Clean from all other project sets
+        for p_key, p_set in list(projects.items()):
+            if p_key != target_project:
+                if name in p_set:
+                    membership_repaired = True
+                p_set.discard(name)
+
+        # Add to target project set
+        projects[target_project].add(name)
+
+        # Update root and config fields
+        prof['project'] = target_project
+        cfg['project_name'] = target_project
+
+        if (
+            old_root_p != target_project
+            or old_cfg_p != target_project
+            or not is_already_in_set
+            or membership_repaired
+        ):
+            changed_names.append(name)
+
+    if changed_names:
+        save_configs()
+        # Reset pagination to page 1 if project filter might hide/show rows
+        if selected_project_var.get() != ALL_OPTION:
+            current_page_var.set(1)
+        update_profile_list()
+        update_project_dropdown()
+        _refresh_status_bar()
+        update_status(f"[UI] Đã gán {len(changed_names)} hồ sơ vào dự án '{target_project}'.")
+        try:
+            toast_manager.enqueue(f"Đã gán {len(changed_names)} hồ sơ vào dự án '{target_project}'", level="success")
+        except Exception:
+            pass
+        msg = f"Đã gán thành công {len(changed_names)} hồ sơ vào dự án '{target_project}'."
+    else:
+        msg = f"Tất cả hồ sơ đã thuộc dự án '{target_project}'."
+
+    return changed_names, skipped_names, msg
+
+
 def create_project():
     if not _license_guard(): return
     dlg = ctk.CTkToplevel(root)
     dlg.title("Tạo dự án")
-    fit_and_center_dialog(dlg, 340, 180, parent=root, min_w=280, min_h=140)
-    ctk.CTkLabel(dlg, text="Tên dự án:").pack(pady=5)
-    e = ctk.CTkEntry(dlg, width=200)
-    e.pack(pady=5)
+    fit_and_center_dialog(dlg, 360, 200, parent=root, min_w=300, min_h=160)
+    dlg.transient(root)
+    dlg.grab_set()
+
+    ctk.CTkLabel(dlg, text="📁 TẠO DỰ ÁN MỚI", font=UIThemeTokens.FONT_TITLE, text_color=UIThemeTokens.TEXT_PRIMARY).pack(pady=(12, 4))
+    ctk.CTkLabel(dlg, text="Nhập tên dự án / nhóm hồ sơ mới:", font=UIThemeTokens.FONT_SUBTITLE, text_color=UIThemeTokens.TEXT_MUTED).pack(pady=(0, 8))
+
+    e = ctk.CTkEntry(dlg, width=240, height=32, font=UIThemeTokens.FONT_BODY, placeholder_text="Tên dự án...")
+    e.pack(pady=4)
+    e.focus_set()
+
+    lbl_err = ctk.CTkLabel(dlg, text="", font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.STATUS_ERROR)
+    lbl_err.pack(pady=2)
+
     def save():
         v = e.get().strip()
         if not v or v in projects or v == ALL_OPTION:
-            messagebox.showerror("Lỗi", "Tên không hợp lệ")
+            lbl_err.configure(text=f"Tên '{v}' không hợp lệ hoặc đã tồn tại.")
             return
         projects[v] = set()
         save_configs()
+        update_project_dropdown()
+        _refresh_status_bar()
         dlg.destroy()
-    ctk.CTkButton(dlg, text="Lưu", command=save).pack(pady=10)
+        try:
+            toast_manager.enqueue(f"Đã tạo dự án '{v}'", level="success")
+        except Exception:
+            pass
+
+    e.bind("<Return>", lambda _e: save())
+
+    btn_row = ctk.CTkFrame(dlg, fg_color="transparent")
+    btn_row.pack(pady=8)
+    ctk.CTkButton(btn_row, text="Hủy", width=80, height=30, font=UIThemeTokens.FONT_BUTTON, fg_color="#64748b", hover_color="#475569", command=dlg.destroy).pack(side="left", padx=4)
+    ctk.CTkButton(btn_row, text="Lưu", width=90, height=30, font=UIThemeTokens.FONT_BUTTON, fg_color=UIThemeTokens.ACCENT_PRIMARY, hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER, command=save).pack(side="left", padx=4)
+
 
 def delete_project():
     if not _license_guard(): return
@@ -5284,51 +5588,89 @@ def delete_project():
     if not p or p == 'Mặc định' or p == ALL_OPTION or p not in projects:
         messagebox.showerror("Lỗi", "Không thể xoá dự án này")
         return
-    
-    to_stop = [n for n in projects[p] if n in profiles and profiles[n]['running']]
+
+    # The persisted membership set may be stale, so include profiles whose
+    # canonical project fields still point to the project being deleted.
+    affected_profiles = {
+        *projects[p],
+        *(name for name, profile in profiles.items() if _profile_project(profile) == p),
+    }
+    to_stop = [n for n in affected_profiles if n in profiles and profiles[n]['running']]
     if to_stop:
         threading.Thread(target=_thread_sequential_stop, args=(to_stop, p), daemon=True).start()
         messagebox.showinfo("Info", "Đang dừng hồ sơ. Vui lòng thử lại sau khi dừng xong.")
         return
 
-    profile_count = len(projects[p])
+    profile_count = len(affected_profiles)
     ok = messagebox.askyesno("Xác nhận xoá dự án",
         f"Bạn có chắc muốn xoá dự án '{p}'?\n\n"
         f"{profile_count} hồ sơ trong dự án này sẽ được chuyển về 'Mặc định'.\n"
         "Không xoá hồ sơ, thư mục video hoặc Chrome profile.")
     if not ok: return
 
-    for n in list(projects[p]):
+    del projects[p]
+    if 'Mặc định' not in projects:
+        projects['Mặc định'] = set()
+
+    for n in affected_profiles:
         if n in profiles:
             profiles[n]['project'] = 'Mặc định'
+            cfg = profiles[n].get('config')
+            if isinstance(cfg, dict):
+                cfg['project_name'] = 'Mặc định'
             projects['Mặc định'].add(n)
-    del projects[p]
+
     save_configs()
     selected_project_var.set(ALL_OPTION)
+    update_profile_list()
+    update_project_dropdown()
+    _refresh_status_bar()
     update_status(f"[UI] Đã xoá dự án '{p}'.")
+    try:
+        toast_manager.enqueue(f"Đã xoá dự án '{p}', chuyển {len(affected_profiles)} hồ sơ về 'Mặc định'", level="info")
+    except Exception:
+        pass
+
 
 def assign_to_project():
     if not _license_guard(): return
-    sel = tree.selection()
-    if not sel: return
-    name = tree.item(sel[0])['values'][0]
-    dlg = ctk.CTkToplevel(root)
-    dlg.title("Gán dự án")
-    fit_and_center_dialog(dlg, 340, 180, parent=root, min_w=280, min_h=140)
-    ctk.CTkLabel(dlg, text="Dự án:").pack(pady=5)
-    var = StringVar(dlg, value=profiles[name].get('project', 'Mặc định'))
-    cb = ctk.CTkComboBox(dlg, values=list(projects.keys()), variable=var)
-    cb.pack(pady=5)
-    def save():
-        np = var.get()
-        if np not in projects: return
-        op = profiles[name].get('project')
-        if op and op in projects: projects[op].discard(name)
-        projects[np].add(name)
-        profiles[name]['project'] = np
+    selected_names = _selected_profile_names()
+    if not selected_names:
+        messagebox.showinfo("Thông báo", "Vui lòng chọn ít nhất một hồ sơ từ danh sách để gán dự án.")
+        return
+
+    from ui_dialogs import AssignProjectModal
+
+    profile_projects = {name: _profile_project(profiles[name]) for name in selected_names if name in profiles}
+    project_counts = {p: len(projs) for p, projs in projects.items()}
+
+    def _on_create_proj(new_name: str) -> Tuple[bool, str]:
+        v = str(new_name).strip()
+        if not v or v in projects or v == ALL_OPTION:
+            return False, f"Tên dự án '{v}' không hợp lệ hoặc đã tồn tại."
+        projects[v] = set()
         save_configs()
-        dlg.destroy()
-    ctk.CTkButton(dlg, text="Lưu", command=save).pack(pady=10)
+        update_project_dropdown()
+        _refresh_status_bar()
+        return True, ""
+
+    def _on_assign(names: List[str], target_p: str) -> Tuple[bool, str]:
+        changed, skipped, msg = _assign_profiles_to_project(names, target_p)
+        if not changed and skipped:
+            return False, "Không còn hồ sơ hợp lệ để gán; vui lòng chọn lại từ danh sách."
+        if skipped:
+            msg = f"{msg} Bỏ qua {len(skipped)} hồ sơ không còn tồn tại."
+        return True, msg
+
+    AssignProjectModal(
+        parent=root,
+        selected_profiles=selected_names,
+        profile_projects=profile_projects,
+        project_counts=project_counts,
+        on_create_project=_on_create_proj,
+        on_assign=_on_assign,
+        return_focus_to=tree if 'tree' in globals() else None,
+    )
 
 def add_profile():
     if not _license_guard(): return
@@ -5624,6 +5966,7 @@ def add_profile():
                 "headless": v_head.get(),
                 "open_only_when_video": v_open_only.get(),
                 "max_uploads_per_day": lm,
+                "project_name": pj,
                 "fingerprint": fingerprint,
                 "stats_today": 0,
                 "stats_yesterday": 0,
@@ -6192,13 +6535,24 @@ def _evaluate_proxy_environment_change(profile_name, cfg, proxy_data, proxy_stri
     return dict(comparison, resolved=True)
 
 
+def _resolve_profile_name(selected_name):
+    """Normalize Tk values and reject selections removed from the profile store."""
+    if selected_name is None:
+        return None
+    name = str(selected_name)
+    return name if name in profiles else None
+
+
 def edit_profile(selected_name=None):
     if not _license_guard(): return
     if selected_name is None:
         sel = tree.selection()
         if not sel: return
         selected_name = tree.item(sel[0])['values'][0]
-    nm = selected_name
+    nm = _resolve_profile_name(selected_name)
+    if nm is None:
+        messagebox.showwarning('Sửa tài khoản', 'Profile đã không còn tồn tại. Vui lòng làm mới danh sách rồi chọn lại.')
+        return
     if profiles[nm].get('running') or profiles[nm].get('session_busy') or _browser_session_valid(profiles[nm].get('manual_driver')):
         messagebox.showwarning('Sửa tài khoản', 'Hãy Stop profile và đóng browser trước khi sửa.')
         return
@@ -6806,7 +7160,10 @@ def open_browser():
     if not _license_guard(): return
     sel = tree.selection()
     if not sel: return
-    nm = tree.item(sel[0])['values'][0]
+    nm = _resolve_profile_name(tree.item(sel[0])['values'][0])
+    if nm is None:
+        messagebox.showwarning('Mở Chrome', 'Profile đã không còn tồn tại. Vui lòng làm mới danh sách rồi chọn lại.')
+        return
     cfg = profiles[nm]['config']
     if profiles[nm].get('running') or profiles[nm].get('uploading') or profiles[nm].get('session_busy'):
         messagebox.showwarning('Mở Chrome', 'Hãy Stop profile trước khi mở browser thủ công.')
@@ -6844,7 +7201,7 @@ def open_browser():
                 proxy_expected_ip = preflight['proxy_exit_ip']
                 direct_ip = preflight['direct_ip']
 
-            browser_glue.ensure_patchright_profile(cfg)
+            _ensure_patchright_profile_with_recovery(nm, cfg)
             _sync_patchright_migration(cfg)
             save_configs()
             session_config = browser_glue.build_session_config(
@@ -7046,6 +7403,7 @@ def on_closing():
     try:
         youtube_monitor.stop_monitor()
         youtube_monitor.set_video_detected_callback(None)
+        youtube_monitor.set_video_ready_callback(None)
     except Exception as e:
         update_status(f"[YouTube] Lỗi dừng monitor khi đóng app: {e}")
 
@@ -7414,6 +7772,7 @@ root = ctk.CTk()
 root.title("DONGLAO-TIKTOK — Automation & Studio Suite")
 root.geometry("1380x920")
 root.minsize(1180, 760)
+root.state("zoomed")
 root.configure(fg_color="#f3f4f6")
 apply_app_icon(root)
 
@@ -7445,11 +7804,13 @@ from ui_components import ToastManager
 toast_manager = ToastManager(root)
 
 from tiktok_monetization_client import fetch_monetization_snapshot, apply_creative_rewards_for_profile
+from tiktok_analytics_client import fetch_profile_analytics
 from ui_dialogs import MonetizationDetailModal
 from concurrent.futures import ThreadPoolExecutor
 
 MONETIZATION_CACHE_FILE = app_base_dir() / "monetization_cache.json"
 monetization_cache = {}
+monetization_cache_lock = threading.Lock()
 
 def _load_monetization_cache():
     global monetization_cache
@@ -7464,8 +7825,11 @@ def _load_monetization_cache():
 
 def _save_monetization_cache():
     try:
-        with open(MONETIZATION_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(monetization_cache, f, ensure_ascii=False, indent=2)
+        with monetization_cache_lock:
+            temporary_file = MONETIZATION_CACHE_FILE.with_suffix(".json.tmp")
+            with open(temporary_file, "w", encoding="utf-8") as f:
+                json.dump(monetization_cache, f, ensure_ascii=False, indent=2)
+            os.replace(temporary_file, MONETIZATION_CACHE_FILE)
     except Exception:
         pass
 
@@ -7525,6 +7889,18 @@ def _update_monetization_table(*_args):
         reg = snap.get('region', config.get('region', 'US'))
         crp_display = snap.get('crp_display', 'Chưa check')
         crp_status = snap.get('crp_status', '')
+        analytics = snap.get('analytics', {}) if isinstance(snap.get('analytics'), dict) else {}
+        analytics_state = analytics.get('state', 'NOT_AVAILABLE')
+        views_state = analytics.get('views_state', analytics_state)
+        follower_state = analytics.get('follower_state', analytics_state)
+        views_30d = analytics.get('views_30d')
+        follower_count = snap.get('follower_count') or snap.get('crp_followers') or analytics.get('follower_count') or config.get('follower_count')
+        views_display = f"{int(views_30d):,}" if isinstance(views_30d, (int, float)) else "—"
+        follower_display = f"{int(follower_count):,}" if isinstance(follower_count, (int, float)) else "—"
+        if views_30d is not None and views_state not in ('SUCCESS', 'LIVE', 'OK') and 'views_30d' not in snap:
+            views_display += " (cũ)"
+        if follower_count is not None and follower_state not in ('SUCCESS', 'LIVE', 'OK') and 'follower_count' not in snap:
+            follower_display += " (cũ)"
 
         # Global stats calculation
         total_balance += bal_val
@@ -7540,7 +7916,7 @@ def _update_monetization_table(*_args):
             tktbm_count += 1
 
         # Project and keyword filters
-        if current_proj != ALL_OPTION and config.get('project_name') != current_proj:
+        if current_proj != ALL_OPTION and _profile_project(prof) != current_proj:
             continue
         uid_val = str(snap.get('tiktok_user_id') or snap.get('unique_id') or config.get('tiktok_account') or '')
         if kw and kw not in name.lower() and kw not in uid_val.lower() and kw not in p_method.lower():
@@ -7625,6 +8001,8 @@ def _update_monetization_table(*_args):
                 uid_display,
                 reg_display,
                 crp_display,
+                views_display,
+                follower_display,
                 f"${bal_val:,.2f}",
                 p_display,
                 tax_display,
@@ -7650,7 +8028,7 @@ def _do_fetch_monetization_worker(targets):
     success_count = 0
     processed_count = 0
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=1) as executor:
         futures = {
             executor.submit(fetch_monetization_snapshot, name, profiles[name].get('config', {})): name
             for name in targets if name in profiles
@@ -7729,6 +8107,99 @@ def refresh_selected_monetization():
         toast_manager.enqueue("Vui lòng chọn ít nhất 1 profile để quét thu nhập.", level="warning")
         return
     threading.Thread(target=_do_fetch_monetization_worker, args=(selected,), daemon=True).start()
+
+
+def _selected_analytics_profiles():
+    mono_tree = ui_widgets.get('monetization_tree') if 'ui_widgets' in globals() else None
+    selected = list(mono_tree.selection()) if mono_tree else []
+    if not selected and 'tree' in globals():
+        selected = list(tree.selection())
+    return selected
+
+
+def _merge_analytics_result(profile_name, result):
+    with monetization_cache_lock:
+        snapshot = dict(monetization_cache.get(profile_name, {}))
+        previous = snapshot.get('analytics', {}) if isinstance(snapshot.get('analytics'), dict) else {}
+        previous = dict(previous)
+        # Older snapshots stored public/CRP fallback zeroes as raw Views 30D.
+        if previous.get('calculation_source') in ('EMPTY', 'PUBLIC_PROFILE', 'CRP_DASHBOARD_OVERVIEW', 'CRP_QUALIFIED_VIEWS'):
+            for field in ('views_30d', 'likes_30d', 'comments_30d', 'shares_30d', 'videos_30d', 'avg_daily_views', 'engagement_rate', 'fyp_views', 'fyp_percent'):
+                previous.pop(field, None)
+        # Keep last verified values when a later request fails or Views are unavailable.
+        merged = dict(previous)
+        merged.update({key: value for key, value in result.items() if value is not None})
+        for field in ('views_30d', 'likes_30d', 'videos_30d', 'follower_count'):
+            if result.get(field) is None and previous.get(field) is not None:
+                merged[field] = previous[field]
+        snapshot['analytics'] = merged
+        monetization_cache[profile_name] = snapshot
+
+
+def _analytics_cache_is_fresh(profile_name):
+    snapshot = monetization_cache.get(profile_name, {})
+    analytics = snapshot.get('analytics', {}) if isinstance(snapshot.get('analytics'), dict) else {}
+    if analytics.get('views_state') != 'SUCCESS':
+        return False
+    try:
+        return float(analytics.get('fresh_until', 0)) > time.time()
+    except (TypeError, ValueError):
+        return False
+
+
+def _do_fetch_analytics_worker(targets):
+    total = len(targets)
+    success_count = 0
+    toast_manager.enqueue(f"Bắt đầu cập nhật analytics {total} tài khoản...", level="info")
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {
+            executor.submit(fetch_profile_analytics, name, profiles[name].get('config', {})): name
+            for name in targets if name in profiles
+        }
+        for processed_count, future in enumerate(futures, start=1):
+            name = futures[future]
+            try:
+                # The client owns bounded HTTP timeouts. A shorter future timeout
+                # discarded the real per-tier result while its task kept running.
+                result = future.result()
+            except Exception as exc:
+                result = {
+                    'state': 'NETWORK_ERROR',
+                    'checked_at': datetime.now(timezone.utc).isoformat(),
+                    'source': {'followers': 'public_profile', 'views': 'not_available'},
+                    'error_code': 'WORKER_ERROR',
+                    'error_message': str(exc),
+                }
+            _merge_analytics_result(name, result)
+            if result.get('state') == 'SUCCESS':
+                success_count += 1
+            status_desc = result.get('state', 'ERROR')
+            error_code = result.get('error_code')
+            if error_code and result.get('primary_state') != 'LOGIN_REQUIRED':
+                status_desc = f"{status_desc} / {error_code}"
+            progress = f"[{processed_count}/{total}] Analytics: {name} ({status_desc})"
+            root.after(0, mono_status_var.set, progress)
+            root.after(0, update_status, f"[Analytics] {progress}")
+            _save_monetization_cache()
+            root.after(0, _update_monetization_table)
+            root.after(0, update_profile_list)
+    root.after(0, mono_status_var.set, f"Analytics hoàn tất: {success_count}/{total} follower cập nhật")
+    toast_manager.enqueue(f"Analytics hoàn tất: {success_count}/{total} follower cập nhật", level="success" if success_count else "warning")
+
+
+def refresh_selected_analytics():
+    selected = _selected_analytics_profiles()
+    if not selected:
+        toast_manager.enqueue("Vui lòng chọn ít nhất 1 profile để cập nhật analytics.", level="warning")
+        return
+    targets = [name for name in selected if not _analytics_cache_is_fresh(name)]
+    cached_count = len(selected) - len(targets)
+    if not targets:
+        toast_manager.enqueue("Analytics đã có cache mới hơn 15 phút.", level="info")
+        return
+    if cached_count:
+        toast_manager.enqueue(f"Dùng cache mới cho {cached_count} profile; quét {len(targets)} profile còn lại.", level="info")
+    threading.Thread(target=_do_fetch_analytics_worker, args=(targets,), daemon=True).start()
 
 
 def apply_crp_selected():
@@ -8014,6 +8485,7 @@ ui_handlers = {
     'inspect_tiktok_account': inspect_selected_tiktok_account,
     'refresh_all_monetization': refresh_all_monetization,
     'refresh_selected_monetization': refresh_selected_monetization,
+    'refresh_selected_analytics': refresh_selected_analytics,
     'view_monetization_details': view_monetization_details,
     'apply_crp_selected': apply_crp_selected,
     'clean_browser': clean_browser,
@@ -8093,30 +8565,31 @@ def _start_youtube_monitor_safe():
     if os.environ.get('FROZEN_SMOKE_TEST', '').strip().lower() in ('1', 'true'):
         update_status("[YouTube] Smoke mode: bỏ qua monitor auto-start")
         return
-    if 'pytest' in sys.modules or 'unittest' in sys.modules:
+    # Some production dependencies import ``unittest`` transitively. Treating
+    # its presence as test mode disables the real auto-start under `python main.py`.
+    if 'pytest' in sys.modules:
         update_status("[YouTube] Test mode: bỏ qua monitor auto-start")
         return
-    cfg = youtube_monitor.get_config()
-    if not cfg.get('auto_start', True):
-        update_status("[YouTube] auto_start=false, bỏ qua.")
-        return
     def _run():
-        try:
+        delay = 15
+        while not _shutting_down:
             if _shutting_down:
                 return
-            ok, msg = youtube_monitor.start_monitor()
-            if _shutting_down:
-                if ok:
-                    try:
-                        youtube_monitor.stop_monitor()
-                    except Exception:
-                        pass
-                return
-            if ok:
+            try:
                 youtube_monitor.set_video_detected_callback(_on_video_detected)
-            update_status(f"[YouTube] {msg}")
-        except Exception as e:
-            update_status(f"[YouTube] Auto-start lỗi: {e}")
+                youtube_monitor.set_video_ready_callback(_on_youtube_video_ready)
+                ok, msg = youtube_monitor.start_monitor()
+                update_status(f"[YouTube] {msg}")
+                if ok:
+                    return
+            except Exception as e:
+                update_status(f"[YouTube] Auto-start lỗi: {e}")
+            update_status(f"[YouTube] Sẽ tự thử lại sau {delay} giây.")
+            for _ in range(delay):
+                if _shutting_down:
+                    return
+                time.sleep(1)
+            delay = min(300, delay * 2)
     threading.Thread(target=_run, daemon=True).start()
 
 def _on_profile_filter_changed(*_args):

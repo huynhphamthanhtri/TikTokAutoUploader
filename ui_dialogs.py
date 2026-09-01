@@ -327,6 +327,36 @@ class MonetizationDetailModal(ctk.CTkToplevel):
             ctk.CTkLabel(r, text=label, font=UIThemeTokens.FONT_BUTTON, text_color=UIThemeTokens.TEXT_MUTED, width=195, anchor="w").pack(side="left")
             ctk.CTkLabel(r, text=str(val), font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_PRIMARY, anchor="w").pack(side="left", fill="x", expand=True)
 
+        analytics = self.data.get("analytics", {}) if isinstance(self.data.get("analytics"), dict) else {}
+        if analytics:
+            analytics_card = ctk.CTkFrame(scroll, corner_radius=10, fg_color=UIThemeTokens.BG_CARD, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+            analytics_card.pack(fill="x", pady=(0, 8))
+            analytics_inner = ctk.CTkFrame(analytics_card, fg_color="transparent")
+            analytics_inner.pack(fill="x", padx=14, pady=10)
+            ctk.CTkLabel(analytics_inner, text="📊 Hiệu Suất Kênh 30 Ngày", font=UIThemeTokens.FONT_BUTTON, text_color=UIThemeTokens.TEXT_PRIMARY).pack(anchor="w", pady=(0, 4))
+            state = str(analytics.get("state", "NOT_AVAILABLE"))
+            rows = [
+                ("Views 30 ngày:", f"{int(analytics['views_30d']):,}" if isinstance(analytics.get("views_30d"), (int, float)) else "—"),
+                ("CRP qualified views:", f"{int(analytics['crp_qualified_views_30d']):,}" if isinstance(analytics.get("crp_qualified_views_30d"), (int, float)) else "—"),
+                ("Follower:", f"{int(analytics['follower_count']):,}" if isinstance(analytics.get("follower_count"), (int, float)) else "—"),
+                ("Nguồn tính:", str(analytics.get("calculation_source", "EMPTY"))),
+                ("TB views/ngày:", f"{int(analytics['avg_daily_views']):,}" if isinstance(analytics.get("avg_daily_views"), (int, float)) else "—"),
+                ("Views FYP:", f"{int(analytics['fyp_views']):,}" if isinstance(analytics.get("fyp_views"), (int, float)) else "—"),
+                ("Tỷ lệ FYP:", f"{float(analytics['fyp_percent']):.2f}%" if isinstance(analytics.get("fyp_percent"), (int, float)) else "—"),
+                ("Engagement rate:", f"{float(analytics['engagement_rate']):.2f}%" if isinstance(analytics.get("engagement_rate"), (int, float)) else "—"),
+                ("Video 30 ngày:", str(analytics.get("videos_30d", "—"))),
+                ("Views status:", str(analytics.get("views_state", state))),
+                ("Follower status:", str(analytics.get("follower_state", state))),
+                ("Cập nhật:", str(analytics.get("checked_at", "Chưa kiểm tra"))),
+            ]
+            for label, value in rows:
+                row = ctk.CTkFrame(analytics_inner, fg_color="transparent")
+                row.pack(fill="x", pady=1)
+                ctk.CTkLabel(row, text=label, font=UIThemeTokens.FONT_BUTTON, text_color=UIThemeTokens.TEXT_MUTED, width=150, anchor="w").pack(side="left")
+                ctk.CTkLabel(row, text=value, font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_PRIMARY, anchor="w").pack(side="left", fill="x", expand=True)
+            if analytics.get("error_message"):
+                ctk.CTkLabel(analytics_inner, text=str(analytics["error_message"]), font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_MUTED, wraplength=560, justify="left").pack(anchor="w", pady=(4, 0))
+
         # Punishment description alert box
         p_desc = self.data.get("crp_punishment_desc")
         if p_desc:
@@ -1194,3 +1224,354 @@ class SearchableProfilePickerModal(ctk.CTkToplevel):
 
     def _handle_cancel(self):
         self._close_modal()
+
+
+# ==============================================================================
+# 6. ASSIGN PROJECT MODAL
+# ==============================================================================
+
+class AssignProjectModal(ctk.CTkToplevel):
+    """Hộp thoại gán 1..N profile vào dự án với hỗ trợ tạo dự án mới trực tiếp."""
+
+    def __init__(
+        self,
+        parent: Any,
+        selected_profiles: Sequence[str],
+        profile_projects: Dict[str, str],
+        project_counts: Dict[str, int],
+        on_create_project: Callable[[str], Tuple[bool, str]],
+        on_assign: Callable[[List[str], str], Tuple[bool, str]],
+        return_focus_to: Optional[Any] = None,
+    ):
+        super().__init__(parent)
+        self.title("Gán Vào Dự Án")
+        fit_and_center_dialog(self, 490, 480, parent=parent, min_w=420, min_h=380)
+        self.transient(parent)
+        self.grab_set()
+
+        self.selected_profiles = [str(p) for p in selected_profiles if str(p).strip()]
+        self.profile_projects = dict(profile_projects or {})
+        self.project_counts = dict(project_counts or {})
+        self.on_create_project = on_create_project
+        self.on_assign = on_assign
+        self.return_focus_to = return_focus_to
+        self._closing = False
+        self._is_submitting = False
+        self._display_to_raw: Dict[str, str] = {}
+
+        # State vars
+        self.status_var = ctk.StringVar(value="")
+        self.new_proj_name_var = ctk.StringVar(value="")
+        self.selected_target_proj = ctk.StringVar(value="")
+        self.combo_display_var = ctk.StringVar(value="")
+
+        # Determine initial selection
+        if len(self.selected_profiles) == 1:
+            curr_proj = self.profile_projects.get(self.selected_profiles[0], "Mặc định")
+            self.selected_target_proj.set(curr_proj)
+        elif self.selected_profiles:
+            distinct_projects = {self.profile_projects.get(p, "Mặc định") for p in self.selected_profiles}
+            if len(distinct_projects) == 1:
+                self.selected_target_proj.set(next(iter(distinct_projects)))
+            else:
+                self.selected_target_proj.set("")
+
+        self.protocol("WM_DELETE_WINDOW", self._close_modal)
+        self._build_ui()
+
+    def _build_ui(self):
+        container = ctk.CTkFrame(self, fg_color="transparent")
+        container.pack(fill="both", expand=True, padx=18, pady=16)
+
+        # Header
+        count = len(self.selected_profiles)
+        ctk.CTkLabel(
+            container,
+            text="📁 GÁN VÀO DỰ ÁN",
+            font=UIThemeTokens.FONT_TITLE,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+            anchor="w",
+        ).pack(fill="x", pady=(0, 2))
+
+        ctk.CTkLabel(
+            container,
+            text=f"Đang gán {count} hồ sơ được chọn vào nhóm dự án",
+            font=UIThemeTokens.FONT_SUBTITLE,
+            text_color=UIThemeTokens.TEXT_MUTED,
+            anchor="w",
+        ).pack(fill="x", pady=(0, 10))
+
+        # Preview card
+        preview_card = ctk.CTkFrame(
+            container,
+            corner_radius=8,
+            fg_color=UIThemeTokens.BG_HOVER,
+            border_width=1,
+            border_color=UIThemeTokens.BORDER_LIGHT,
+        )
+        preview_card.pack(fill="x", pady=(0, 12), padx=1)
+
+        preview_header = ctk.CTkFrame(preview_card, fg_color="transparent")
+        preview_header.pack(fill="x", padx=10, pady=(8, 4))
+        ctk.CTkLabel(
+            preview_header,
+            text=f"📋 Danh sách hồ sơ ({count}):",
+            font=UIThemeTokens.FONT_BADGE,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+            anchor="w",
+        ).pack(side="left")
+
+        preview_body = ctk.CTkFrame(preview_card, fg_color="transparent")
+        preview_body.pack(fill="x", padx=12, pady=(0, 8))
+
+        preview_limit = 5
+        for i, name in enumerate(self.selected_profiles[:preview_limit]):
+            old_p = self.profile_projects.get(name, "Mặc định")
+            row = ctk.CTkFrame(preview_body, fg_color="transparent")
+            row.pack(fill="x", pady=1)
+            ctk.CTkLabel(
+                row,
+                text=f"• {name}",
+                font=UIThemeTokens.FONT_BODY,
+                text_color=UIThemeTokens.TEXT_PRIMARY,
+                anchor="w",
+            ).pack(side="left")
+            ctk.CTkLabel(
+                row,
+                text=f"[{old_p}]",
+                font=UIThemeTokens.FONT_BADGE,
+                text_color=UIThemeTokens.TEXT_MUTED,
+                anchor="e",
+            ).pack(side="right")
+
+        if count > preview_limit:
+            remaining = count - preview_limit
+            ctk.CTkLabel(
+                preview_body,
+                text=f"… và {remaining} hồ sơ khác",
+                font=UIThemeTokens.FONT_BADGE,
+                text_color=UIThemeTokens.TEXT_MUTED,
+                anchor="w",
+            ).pack(fill="x", pady=(2, 0))
+
+        # Project Selector Section
+        sel_frame = ctk.CTkFrame(container, fg_color="transparent")
+        sel_frame.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(
+            sel_frame,
+            text="Dự án đích (*):",
+            font=UIThemeTokens.FONT_BODY,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+            anchor="w",
+        ).pack(fill="x", pady=(0, 4))
+
+        self.project_menu = ctk.CTkOptionMenu(
+            sel_frame,
+            values=["Mặc định (0)"],
+            variable=self.combo_display_var,
+            height=32,
+            font=UIThemeTokens.FONT_BODY,
+            command=self._on_project_menu_selected,
+        )
+        self.project_menu.pack(fill="x")
+        self._refresh_project_menu_options()
+
+        # Inline New Project Section
+        new_proj_card = ctk.CTkFrame(
+            container,
+            corner_radius=8,
+            fg_color=UIThemeTokens.BG_CARD,
+            border_width=1,
+            border_color=UIThemeTokens.BORDER_LIGHT,
+        )
+        new_proj_card.pack(fill="x", pady=(0, 10), padx=1)
+
+        np_row = ctk.CTkFrame(new_proj_card, fg_color="transparent")
+        np_row.pack(fill="x", padx=8, pady=8)
+
+        self.entry_new_proj = ctk.CTkEntry(
+            np_row,
+            textvariable=self.new_proj_name_var,
+            placeholder_text="Tạo nhanh dự án mới...",
+            height=30,
+            font=UIThemeTokens.FONT_BODY,
+        )
+        self.entry_new_proj.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self.entry_new_proj.bind("<Return>", lambda _e: self._handle_create_new_project())
+
+        self.btn_create_proj = ctk.CTkButton(
+            np_row,
+            text="+ Tạo DA",
+            width=76,
+            height=30,
+            font=UIThemeTokens.FONT_BUTTON,
+            fg_color=UIThemeTokens.BG_SIDEBAR_ACTIVE,
+            hover_color=UIThemeTokens.BG_SIDEBAR_HOVER,
+            command=self._handle_create_new_project,
+        )
+        self.btn_create_proj.pack(side="right")
+
+        # Status / Error Label
+        self.status_label = ctk.CTkLabel(
+            container,
+            textvariable=self.status_var,
+            font=UIThemeTokens.FONT_BADGE,
+            text_color=UIThemeTokens.STATUS_ERROR,
+            anchor="w",
+        )
+        self.status_label.pack(fill="x", pady=(0, 8))
+
+        # Action Buttons Footer
+        btn_row = ctk.CTkFrame(container, fg_color="transparent")
+        btn_row.pack(fill="x", side="bottom")
+
+        self.btn_cancel = ctk.CTkButton(
+            btn_row,
+            text="Hủy",
+            width=90,
+            height=32,
+            font=UIThemeTokens.FONT_BUTTON,
+            fg_color="#64748b",
+            hover_color="#475569",
+            command=self._close_modal,
+        )
+        self.btn_cancel.pack(side="left")
+
+        self.btn_save = ctk.CTkButton(
+            btn_row,
+            text="Lưu Thay Đổi",
+            width=130,
+            height=32,
+            font=UIThemeTokens.FONT_BUTTON,
+            fg_color=UIThemeTokens.ACCENT_PRIMARY,
+            hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
+            command=self._handle_save_assignment,
+        )
+        self.btn_save.pack(side="right")
+
+        self._update_save_button_state()
+
+    def _refresh_project_menu_options(self, select_raw: Optional[str] = None):
+        self._display_to_raw.clear()
+        options = []
+        raw_list = sorted(self.project_counts.keys())
+        if "Mặc định" not in raw_list:
+            raw_list.insert(0, "Mặc định")
+
+        # Prepend placeholder if mixed selection and nothing selected yet
+        target = select_raw if select_raw is not None else self.selected_target_proj.get()
+        if not target:
+            options.append("-- Chọn dự án --")
+            self._display_to_raw["-- Chọn dự án --"] = ""
+
+        for raw_name in raw_list:
+            cnt = self.project_counts.get(raw_name, 0)
+            disp = f"{raw_name} ({cnt})"
+            options.append(disp)
+            self._display_to_raw[disp] = raw_name
+
+        self.project_menu.configure(values=options)
+
+        if target and target in self.project_counts:
+            cnt = self.project_counts.get(target, 0)
+            target_disp = f"{target} ({cnt})"
+            self.combo_display_var.set(target_disp)
+            self.selected_target_proj.set(target)
+        elif not target and "-- Chọn dự án --" in options:
+            self.combo_display_var.set("-- Chọn dự án --")
+            self.selected_target_proj.set("")
+        elif options:
+            self.combo_display_var.set(options[0])
+            self.selected_target_proj.set(self._display_to_raw.get(options[0], ""))
+
+        self._update_save_button_state()
+
+    def _on_project_menu_selected(self, choice: str):
+        raw = self._display_to_raw.get(choice, "")
+        self.selected_target_proj.set(raw)
+        self.status_var.set("")
+        self._update_save_button_state()
+
+    def _update_save_button_state(self):
+        target = self.selected_target_proj.get().strip()
+        is_valid = bool(target and target in self.project_counts and not self._is_submitting)
+        if hasattr(self, "btn_save"):
+            self.btn_save.configure(state="normal" if is_valid else "disabled")
+
+    def _handle_create_new_project(self):
+        name = self.new_proj_name_var.get().strip()
+        if not name:
+            self.status_label.configure(text_color=UIThemeTokens.STATUS_ERROR)
+            self.status_var.set("⚠️ Tên dự án không được để trống.")
+            return
+        if name in self.project_counts or name == "Tất cả":
+            self.status_label.configure(text_color=UIThemeTokens.STATUS_ERROR)
+            self.status_var.set(f"⚠️ Dự án '{name}' đã tồn tại hoặc không hợp lệ.")
+            return
+
+        if not self.on_create_project:
+            self.status_var.set("⚠️ Không có hàm tạo dự án.")
+            return
+
+        ok, msg = self.on_create_project(name)
+        if ok:
+            self.project_counts[name] = 0
+            self.new_proj_name_var.set("")
+            self._refresh_project_menu_options(select_raw=name)
+            self.status_label.configure(text_color=UIThemeTokens.STATUS_LIVE)
+            self.status_var.set(f"✅ Đã tạo dự án '{name}'.")
+        else:
+            self.status_label.configure(text_color=UIThemeTokens.STATUS_ERROR)
+            self.status_var.set(f"❌ {msg or 'Không thể tạo dự án.'}")
+
+    def _handle_save_assignment(self):
+        if self._is_submitting or self._closing:
+            return
+
+        target = self.selected_target_proj.get().strip()
+        if not target or target not in self.project_counts:
+            self.status_label.configure(text_color=UIThemeTokens.STATUS_ERROR)
+            self.status_var.set("⚠️ Vui lòng chọn một dự án hợp lệ.")
+            return
+
+        if not self.on_assign:
+            self._close_modal()
+            return
+
+        self._is_submitting = True
+        self._update_save_button_state()
+        self.status_var.set("")
+
+        try:
+            ok, msg = self.on_assign(self.selected_profiles, target)
+            if ok:
+                self._close_modal()
+            else:
+                self._is_submitting = False
+                self.status_label.configure(text_color=UIThemeTokens.STATUS_ERROR)
+                self.status_var.set(f"❌ {msg or 'Gán dự án thất bại.'}")
+                self._update_save_button_state()
+        except Exception as e:
+            self._is_submitting = False
+            self.status_label.configure(text_color=UIThemeTokens.STATUS_ERROR)
+            self.status_var.set(f"❌ Lỗi: {e}")
+            self._update_save_button_state()
+
+    def _close_modal(self):
+        if self._closing:
+            return
+        self._closing = True
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        try:
+            self.destroy()
+        except Exception:
+            pass
+        if self.return_focus_to:
+            try:
+                self.return_focus_to.focus_set()
+            except Exception:
+                pass
