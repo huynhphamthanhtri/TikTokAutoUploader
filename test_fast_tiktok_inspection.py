@@ -11,19 +11,17 @@ import main
 class TestFastTikTokInspection(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.root = ctk.CTk()
-        cls.root.withdraw()
+        cls.root = getattr(main, "root", None)
 
     @classmethod
     def tearDownClass(cls):
         try:
-            for after_id in cls.root.tk.eval('after info').split():
-                try:
-                    cls.root.after_cancel(after_id)
-                except Exception:
-                    pass
-            cls.root.update_idletasks()
-            cls.root.destroy()
+            if hasattr(main, "root") and main.root:
+                for after_id in main.root.tk.eval('after info').split():
+                    try:
+                        main.root.after_cancel(after_id)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -90,6 +88,14 @@ class TestFastTikTokInspection(unittest.TestCase):
                 del main.monetization_cache["Test Profile"]
 
     def test_inspection_dialog_creation(self):
+        if not hasattr(main, "root") or main.root is None:
+            self.skipTest("Tkinter root not available")
+        try:
+            if not main.root.winfo_exists():
+                self.skipTest("Tkinter display not available")
+        except Exception:
+            self.skipTest("Tkinter display not available")
+
         targets = ["AUTO 6", "AUTO 18"]
         dlg = main.InspectionDialog(targets)
         try:

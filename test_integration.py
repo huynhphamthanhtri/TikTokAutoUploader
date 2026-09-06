@@ -51,7 +51,8 @@ class TestMonitorLifecycle(unittest.TestCase):
              patch("youtube_monitor.core.worker_main", side_effect=self._wait_for_stop), \
              patch("youtube_monitor.core._retry_maintainer", side_effect=self._wait_for_stop), \
              patch("youtube_monitor.core._resubscribe_worker", side_effect=self._wait_for_stop), \
-             patch("youtube_monitor.core._recovery_worker", side_effect=self._wait_for_stop):
+             patch("youtube_monitor.core._recovery_worker", side_effect=self._wait_for_stop), \
+             patch("youtube_monitor.core.PredictiveScheduler.run_loop", side_effect=self._wait_for_stop):
 
             from youtube_monitor.core import (
                 start_monitor, stop_monitor, get_status, get_monitor_health,
@@ -133,7 +134,8 @@ class TestMonitorLifecycle(unittest.TestCase):
              patch("youtube_monitor.core.worker_main", side_effect=self._wait_for_stop), \
              patch("youtube_monitor.core._retry_maintainer", side_effect=self._wait_for_stop), \
              patch("youtube_monitor.core._resubscribe_worker", side_effect=self._wait_for_stop), \
-             patch("youtube_monitor.core._recovery_worker", side_effect=self._wait_for_stop):
+             patch("youtube_monitor.core._recovery_worker", side_effect=self._wait_for_stop), \
+             patch("youtube_monitor.core.PredictiveScheduler.run_loop", side_effect=self._wait_for_stop):
 
             from youtube_monitor.core import start_monitor, stop_monitor
 
@@ -178,7 +180,8 @@ class TestMonitorLifecycle(unittest.TestCase):
         with patch("youtube_monitor.core.make_server") as mock_ms, \
              patch("youtube_monitor.core.ngrok_owner.validate_auth_ready", return_value=(False, "Ngrok chưa được xác thực. add-authtoken")), \
              patch("youtube_monitor.core.requests.get") as mock_get, \
-             patch("youtube_monitor.core._load_tiktok_proxies", return_value=({}, [])):
+             patch("youtube_monitor.core._load_tiktok_proxies", return_value=({}, [])), \
+             patch("youtube_monitor.core.PredictiveScheduler.run_loop", side_effect=self._wait_for_stop):
 
             from youtube_monitor.core import start_monitor, stop_monitor, get_status, _all_threads
 
@@ -205,7 +208,8 @@ class TestMonitorLifecycle(unittest.TestCase):
              patch("youtube_monitor.core.ngrok_owner.validate_auth_ready", return_value=(True, "ready (environment)")), \
              patch("youtube_monitor.core.ngrok_owner.start_owned_agent", return_value=(False, "Ngrok authtoken bị từ chối (ERR_NGROK_4018).")), \
              patch("youtube_monitor.core.requests.get") as mock_get, \
-             patch("youtube_monitor.core._load_tiktok_proxies", return_value=({}, [])):
+             patch("youtube_monitor.core._load_tiktok_proxies", return_value=({}, [])), \
+             patch("youtube_monitor.core.PredictiveScheduler.run_loop", side_effect=self._wait_for_stop):
 
             from youtube_monitor.core import start_monitor, stop_monitor, get_status, _all_threads
 
@@ -234,7 +238,8 @@ class TestMonitorLifecycle(unittest.TestCase):
              patch("youtube_monitor.core.ngrok_owner.stop_owned_agent"), \
              patch("youtube_monitor.core.requests.get") as mock_get, \
              patch("youtube_monitor.core._verify_ngrok_tunnel", return_value=False), \
-             patch("youtube_monitor.core._load_tiktok_proxies", return_value=({}, [])):
+             patch("youtube_monitor.core._load_tiktok_proxies", return_value=({}, [])), \
+             patch("youtube_monitor.core.PredictiveScheduler.run_loop", side_effect=self._wait_for_stop):
 
             from youtube_monitor.core import start_monitor, stop_monitor, get_status, _all_threads
 

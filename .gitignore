@@ -33,6 +33,7 @@ upload_benchmarks.jsonl
 monetization_cache.json
 patchright_diagnostics/
 youtube_monitor_ngrok/
+*.db
 
 # Test artifacts
 test_results*.xml

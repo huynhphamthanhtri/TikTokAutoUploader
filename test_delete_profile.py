@@ -24,9 +24,18 @@ class TestDeleteProfileLogic(unittest.TestCase):
         main.projects["Mặc định"] = set()
         main.monetization_cache.clear()
 
+        self.orig_tree_selection = getattr(main.tree, "selection", None)
+        self.orig_tree_item = getattr(main.tree, "item", None)
+
         self.tmp_dir = tempfile.mkdtemp(prefix="test_del_prof_")
 
     def tearDown(self):
+        # Restore tree methods
+        if self.orig_tree_selection is not None:
+            main.tree.selection = self.orig_tree_selection
+        if self.orig_tree_item is not None:
+            main.tree.item = self.orig_tree_item
+
         # Restore global states
         main.profiles.clear()
         main.profiles.update(self.orig_profiles)

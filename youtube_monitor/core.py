@@ -204,6 +204,7 @@ _recovery_kick = threading.Event()
 _recovery_lock = threading.Lock()
 _ngrok_auth_status = "unknown"
 _ngrok_auth_source = ""
+_ngrok_auth_detail = ""
 _ngrok_auth_lock = threading.Lock()
 MAX_RECOVERY_ATTEMPTS = 3
 RECOVERY_BACKOFF_BASE = 15
@@ -2885,6 +2886,9 @@ def retry_ngrok_recovery():
         _recovery_attempt = 0
     if not _monitor_started:
         return False, "YouTube Monitor chưa chạy."
+    _refresh_ngrok_auth_status()
+    if _ngrok_auth_status != "ready":
+        return False, "Ngrok authtoken chưa cấu hình; cấu hình NGROK_AUTHTOKEN rồi Retry."
     _set_monitor_state("RECOVERING")
     _recovery_kick.set()
     set_websub_health(False, "Đang thử khôi phục tunnel...")
@@ -2909,7 +2913,7 @@ def _recovery_worker(run_gen=None):
             last_public_check = now
             url = _tunnel_public_url()
             if url:
-                tunnel_ok = _verify_public_tunnel(url, active_tunnel_provider.title())
+                tunnel_ok = _verify_ngrok_tunnel(url)
             else:
                 tunnel_ok = False
         else:
@@ -2926,6 +2930,13 @@ def _recovery_worker(run_gen=None):
         with _recovery_lock:
             _recovery_attempt += 1
             attempt = _recovery_attempt
+        _refresh_ngrok_auth_status()
+        if _ngrok_auth_status != "ready":
+            _set_monitor_state("DEGRADED")
+            set_websub_health(False, "Ngrok authtoken chưa cấu hình; cấu hình rồi bấm Retry.")
+            log("[Ngrok] Không có authtoken hợp lệ, chuyển DEGRADED. Cấu hình token rồi Retry.")
+            _wait_recovery(300)
+            continue
         if attempt > MAX_RECOVERY_ATTEMPTS:
             _set_monitor_state("DEGRADED")
             set_websub_health(False, "Tunnel không khôi phục được; polling vẫn hoạt động.")
@@ -2948,9 +2959,10 @@ def _recovery_worker(run_gen=None):
 
 
 def _refresh_ngrok_auth_status():
-    global _ngrok_auth_status, _ngrok_auth_source
+    global _ngrok_auth_status, _ngrok_auth_source, _ngrok_auth_detail
     ok, msg = ngrok_owner.validate_auth_ready()
     with _ngrok_auth_lock:
+        _ngrok_auth_detail = msg or ""
         if ok:
             _ngrok_auth_status = "ready"
             _ngrok_auth_source = "environment" if "environment" in msg else "user_config"
@@ -3288,7 +3300,8 @@ def start_monitor():
             if _ngrok_auth_status == "ready":
                 tunnel_ok = _start_ngrok(_callback_port)
             else:
-                log("[Ngrok] Không có authtoken; tiếp tục bằng polling")
+                last_error = _ngrok_auth_detail or "Ngrok không có authtoken"
+                log(f"[Ngrok] {last_error}; tiếp tục bằng polling")
         except Exception as e:
             last_error = f"Tunnel: {e}"
             log(f"[Tunnel] Start lỗi: {e}")

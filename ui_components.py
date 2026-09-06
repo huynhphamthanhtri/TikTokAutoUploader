@@ -21,6 +21,42 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 
+# CustomTkinter upstream bugfix: CTkToplevel schedules an async 200ms after-callback
+# (_windows_set_titlebar_icon) to set the window icon on Windows. In headless CI and fast
+# unit tests, toplevels are destroyed in <50ms, causing Tcl "invalid command name <id>_windows_set_titlebar_icon"
+# and crash 0xC0000005 when the timer fires on the deleted widget.
+if not getattr(ctk.CTkToplevel, "_safe_titlebar_icon_patched", False):
+    _orig_toplevel_init = ctk.CTkToplevel.__init__
+    def _safe_toplevel_init(self, *args, **kwargs):
+        self._tracked_after_ids = []
+        _real_after = self.after
+        def _intercept_after(ms, func=None, *a, **kw):
+            if func == getattr(self, "_windows_set_titlebar_icon", None) or getattr(func, "__name__", "") == "_windows_set_titlebar_icon":
+                return "after#skipped_titlebar_icon"
+            aid = _real_after(ms, func, *a, **kw)
+            self._tracked_after_ids.append(aid)
+            return aid
+        self.after = _intercept_after
+        try:
+            _orig_toplevel_init(self, *args, **kwargs)
+        finally:
+            self.after = _intercept_after
+
+        _orig_destroy = self.destroy
+        def _safe_destroy():
+            for aid in getattr(self, "_tracked_after_ids", []):
+                try:
+                    self.after_cancel(aid)
+                except Exception:
+                    pass
+            getattr(self, "_tracked_after_ids", []).clear()
+            _orig_destroy()
+        self.destroy = _safe_destroy
+
+    ctk.CTkToplevel.__init__ = _safe_toplevel_init
+    ctk.CTkToplevel._safe_titlebar_icon_patched = True
+
+
 # ==============================================================================
 # 1. DESIGN SYSTEM TOKENS (LIGHT THEME STANDARD)
 # ==============================================================================
@@ -690,6 +726,8 @@ def fit_and_center_dialog(
     try:
         dlg.geometry(geom_str)
         dlg.minsize(min_w, min_h)
+        if hasattr(dlg, "update_idletasks"):
+            dlg.update_idletasks()
     except Exception:
         pass
 
@@ -746,6 +784,8 @@ def apply_app_icon(window: Any, app_base: Optional[Any] = None) -> bool:
 
     def _set_icon():
         try:
+            if not hasattr(window, "winfo_exists") or not window.winfo_exists():
+                return
             if hasattr(window, "iconbitmap"):
                 window.iconbitmap(str(icon_path))
             elif hasattr(window, "wm_iconbitmap"):

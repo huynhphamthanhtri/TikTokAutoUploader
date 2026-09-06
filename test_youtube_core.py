@@ -62,22 +62,14 @@ class TestDownloadDedup(unittest.TestCase):
 
 
 class TestStagingDir(unittest.TestCase):
-    def test_staging_is_sibling(self):
+    def test_staging_is_inside_target_folder(self):
         from youtube_monitor.core import _staging_dir
         with tempfile.TemporaryDirectory() as tmp:
             video_folder = Path(tmp) / "Auto_Data" / "Profile01" / "Video"
             video_folder.mkdir(parents=True)
             staging = _staging_dir(str(video_folder))
-            self.assertEqual(staging.parent, video_folder.parent)
+            self.assertEqual(staging.parent, video_folder)
             self.assertEqual(staging.name, ".youtube_tmp")
-
-    def test_staging_not_inside_video(self):
-        from youtube_monitor.core import _staging_dir
-        with tempfile.TemporaryDirectory() as tmp:
-            video_folder = Path(tmp) / "Video"
-            video_folder.mkdir()
-            staging = _staging_dir(str(video_folder))
-            self.assertNotIn("Video", staging.parent.name)
 
     def test_staging_cleanup_removes_video_dir(self):
         import shutil

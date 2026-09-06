@@ -18,11 +18,41 @@ from core_helpers import parse_proxy_string
 from ui_components import UIThemeTokens, redact_proxy_string, fit_and_center_dialog
 
 
+class SafeCTkToplevel(ctk.CTkToplevel):
+    """CTkToplevel subclass that tracks all scheduled after callbacks and cancels them on destruction.
+    Prevents Tcl invalid command errors and access violations on Windows titlebar timers."""
+    def __init__(self, *args, **kwargs):
+        self._tracked_after_ids = []
+        orig_after = self.after
+        def _capturing_after(*a, **kw):
+            aid = orig_after(*a, **kw)
+            self._tracked_after_ids.append(aid)
+            return aid
+        self.after = _capturing_after
+        try:
+            super().__init__(*args, **kwargs)
+        finally:
+            self.after = _capturing_after
+
+    def destroy(self):
+        for aid in getattr(self, "_tracked_after_ids", []):
+            try:
+                self.after_cancel(aid)
+            except Exception:
+                pass
+        if hasattr(self, "_tracked_after_ids"):
+            self._tracked_after_ids.clear()
+        try:
+            super().destroy()
+        except Exception:
+            pass
+
+
 # ==============================================================================
 # 1. BATCH SET PROXY MODAL
 # ==============================================================================
 
-class BatchSetProxyModal(ctk.CTkToplevel):
+class BatchSetProxyModal(SafeCTkToplevel):
     """Hộp thoại gán proxy hàng loạt cho các profile được chọn."""
 
     def __init__(
@@ -205,7 +235,7 @@ class BatchSetProxyModal(ctk.CTkToplevel):
 # 2. MONETIZATION DETAIL MODAL
 # ==============================================================================
 
-class MonetizationDetailModal(ctk.CTkToplevel):
+class MonetizationDetailModal(SafeCTkToplevel):
     """Xem thông tin chi tiết snapshot tài chính của 1 profile (học hỏi từ PayoutDialog)."""
 
     def __init__(self, parent: Any, profile_name: str, snapshot_data: Dict[str, Any]):
@@ -527,7 +557,7 @@ class MonetizationDetailModal(ctk.CTkToplevel):
 # 3. CREATE / EDIT PROFILE MODAL
 # ==============================================================================
 
-class CreateEditProfileModal(ctk.CTkToplevel):
+class CreateEditProfileModal(SafeCTkToplevel):
     """Hộp thoại tạo mới hoặc chỉnh sửa hồ sơ với form chia 3 tabs khoa học."""
 
     def __init__(
@@ -697,7 +727,7 @@ class CreateEditProfileModal(ctk.CTkToplevel):
 # 4. LICENSE MODAL
 # ==============================================================================
 
-class LicenseModal(ctk.CTkToplevel):
+class LicenseModal(SafeCTkToplevel):
     """Hộp thoại kích hoạt & quản lý License bản quyền chuẩn Design System."""
 
     def __init__(
@@ -852,7 +882,7 @@ class LicenseModal(ctk.CTkToplevel):
 # 5. SEARCHABLE PROFILE PICKER MODAL
 # ==============================================================================
 
-class SearchableProfilePickerModal(ctk.CTkToplevel):
+class SearchableProfilePickerModal(SafeCTkToplevel):
     """
     SearchableProfilePickerModal - Hộp thoại tìm kiếm và gán Profile TikTok cho Kênh YouTube.
     Thiết kế thuần Presentation, lọc O(N) case-insensitive, hỗ trợ điều hướng bàn phím đầy đủ.
@@ -878,6 +908,10 @@ class SearchableProfilePickerModal(ctk.CTkToplevel):
         fit_and_center_dialog(self, 480, 540, parent=toplevel_parent, min_w=400, min_h=440)
         self.transient(toplevel_parent)
         self.grab_set()
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
 
         # Immutable snapshot per modal lifecycle
         self._all_profiles: List[str] = list(dict.fromkeys(
@@ -924,6 +958,11 @@ class SearchableProfilePickerModal(ctk.CTkToplevel):
             pass
 
         try:
+            self.transient("")
+        except Exception:
+            pass
+
+        try:
             self.destroy()
         except Exception:
             pass
@@ -940,6 +979,7 @@ class SearchableProfilePickerModal(ctk.CTkToplevel):
                     owner.after_idle(_restore_focus)
             except (tk.TclError, RuntimeError, Exception):
                 pass
+
 
     def _build_ui(self):
         container = ctk.CTkFrame(self, fg_color="transparent")
@@ -1230,7 +1270,7 @@ class SearchableProfilePickerModal(ctk.CTkToplevel):
 # 6. ASSIGN PROJECT MODAL
 # ==============================================================================
 
-class AssignProjectModal(ctk.CTkToplevel):
+class AssignProjectModal(SafeCTkToplevel):
     """Hộp thoại gán 1..N profile vào dự án với hỗ trợ tạo dự án mới trực tiếp."""
 
     def __init__(

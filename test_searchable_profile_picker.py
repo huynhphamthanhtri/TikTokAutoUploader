@@ -169,6 +169,24 @@ class TestSearchableProfilePickerModalHardened(unittest.TestCase):
         if not self.root:
             self.skipTest("Tkinter display not available")
 
+    def tearDown(self):
+        if self.root and hasattr(self.root, "tk"):
+            try:
+                for after_id in self.root.tk.eval('after info').split():
+                    try:
+                        cmd = self.root.tk.eval(f'after info {after_id}')
+                        if any(kw in cmd for kw in (
+                            "_windows_set_titlebar_icon",
+                            "_windows_set_titlebar_color",
+                            "_revert_withdraw_after_windows_set_titlebar_color",
+                            "_set_icon",
+                        )):
+                            self.root.after_cancel(after_id)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
     def test_modal_synthetic_iids_and_unicode_names(self):
         """Modal uses synthetic IIDs (prof_0, prof_1) and correctly maps Unicode / special characters."""
         profiles = ["Tiếng Việt 🇻🇳", "Prof @#$ 1", "Prof_With_Newline\n", "Emoji 🎉 Account"]

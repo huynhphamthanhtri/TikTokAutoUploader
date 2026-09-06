@@ -35,8 +35,8 @@ class TestAntiDetectSuite(unittest.TestCase):
             session_cfg = build_session_config(dummy_config)
         args_str = " ".join(session_cfg.args)
         self.assertNotIn("--expose-gc", args_str, "--expose-gc must NOT be present in launch args (triggers bot detection)")
-        # Make sure --max-old-space-size=256 is still retained for RAM management
-        self.assertIn("--js-flags=--max-old-space-size=256", session_cfg.args)
+        # Make sure --js-flags is not passed (avoids bot detection/fingerprinting)
+        self.assertNotIn("--js-flags=--max-old-space-size=256", session_cfg.args)
 
     def test_webrtc_protection_flags_in_launch_args(self):
         """Verify WebRTC anti-leak flags are present in Chromium args."""
