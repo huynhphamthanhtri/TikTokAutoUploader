@@ -51,18 +51,20 @@ class NgrokRecoveryTests(unittest.TestCase):
         core._callback_port = 5001
         self.assertFalse(core._callback_health_ok())
 
+    @patch("youtube_monitor.core.ngrok_owner.validate_auth_ready", return_value=(True, "configured in environment"))
     @patch("youtube_monitor.core._start_ngrok", return_value=True)
     @patch("youtube_monitor.core.ngrok_owner.stop_owned_agent")
-    def test_recover_ngrok_success_resubscribes(self, mock_stop, mock_start):
+    def test_recover_ngrok_success_resubscribes(self, mock_stop, mock_start, mock_auth):
         core.stop_event = threading.Event()
         core.public_callback_url = "https://new.ngrok-free.app/youtube_callback?owner=t"
         ok = core._recover_ngrok(run_gen=None)
         self.assertTrue(ok)
         mock_stop.assert_called_once()
 
+    @patch("youtube_monitor.core.ngrok_owner.validate_auth_ready", return_value=(True, "configured in environment"))
     @patch("youtube_monitor.core._start_ngrok", return_value=False)
     @patch("youtube_monitor.core.ngrok_owner.stop_owned_agent")
-    def test_recover_ngrok_failure(self, mock_stop, mock_start):
+    def test_recover_ngrok_failure(self, mock_stop, mock_start, mock_auth):
         core.stop_event = threading.Event()
         core.public_callback_url = "https://old.ngrok-free.app/youtube_callback?owner=t"
         ok = core._recover_ngrok(run_gen=None)

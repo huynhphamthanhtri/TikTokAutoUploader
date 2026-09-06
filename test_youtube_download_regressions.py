@@ -501,7 +501,7 @@ class TestDownloadOneChain(unittest.TestCase):
             with self._patches(folder) as patched:
                 with patch("youtube_monitor.core._run_ytdlp_download", side_effect=Exception("ERROR: unable to download video data: HTTP Error 403: Forbidden")):
                     outcome = _download_one_result("c", "v")
-            tmp_root = Path(folder).parent / ".youtube_tmp"
+            tmp_root = Path(folder) / ".youtube_tmp"
             self.assertTrue(tmp_root.exists())
             self.assertEqual([p.name for p in tmp_root.iterdir()], [".ydl_cache"])
 

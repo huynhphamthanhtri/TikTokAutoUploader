@@ -316,6 +316,14 @@ class TestSubscriptionStatus(unittest.TestCase):
 
 
 class TestCallbackServerHealth(unittest.TestCase):
+    def setUp(self):
+        from youtube_monitor.core import _stop_callback_server
+        _stop_callback_server()
+
+    def tearDown(self):
+        from youtube_monitor.core import _stop_callback_server
+        _stop_callback_server()
+
     @patch("youtube_monitor.core.make_server")
     @patch("youtube_monitor.core.requests.get")
     def test_start_server_ok(self, mock_get, mock_make):
@@ -504,6 +512,7 @@ class TestGetMonitorHealth(unittest.TestCase):
         import youtube_monitor.core as core
         core._monitor_started = False
         core._callback_port = None
+        core._monitor_state = "RUNNING"
 
     def test_not_running(self):
         from youtube_monitor.core import get_monitor_health
@@ -516,6 +525,7 @@ class TestGetMonitorHealth(unittest.TestCase):
         import youtube_monitor.core as core
         core._monitor_started = True
         core._callback_port = 5000
+        core._monitor_state = "RUNNING"
         mock_get.return_value.status_code = 200
         polling = MagicMock()
         polling.is_alive.return_value = True
@@ -530,8 +540,13 @@ class TestGetMonitorHealth(unittest.TestCase):
         import youtube_monitor.core as core
         core._monitor_started = True
         core._callback_port = 5000
+        core._monitor_state = "RUNNING"
         mock_get.side_effect = Exception("timeout")
-        ok, msg = get_monitor_health()
+        polling = MagicMock()
+        polling.is_alive.return_value = True
+        polling.name = "youtube-polling-reconciliation"
+        with patch("youtube_monitor.core._all_threads", [polling]):
+            ok, msg = get_monitor_health()
         self.assertFalse(ok)
 
 

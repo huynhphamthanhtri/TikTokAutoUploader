@@ -39,7 +39,7 @@ class PatchrightOwnershipRecoveryTests(unittest.TestCase):
         path, action = self.main._ensure_patchright_profile_with_recovery("Recovered", config)
 
         self.assertEqual(action, "rebound")
-        self.assertEqual(Path(path), target)
+        self.assertEqual(Path(path).resolve(), target.resolve())
         self.assertEqual(config["account_uuid"], "marker-owner")
         self.assertEqual(config["profile_owner_state"], "verified")
         self.assertEqual(profile_owner_id(target), "marker-owner")
@@ -77,7 +77,7 @@ class PatchrightOwnershipRecoveryTests(unittest.TestCase):
         self.assertEqual(profile_owner_id(new_target), "recovering-owner")
         self.assertEqual(recovering_config["cookie_str"], "preserved-cookie")
         self.assertTrue(recovering_config["manual_login_pending"])
-        self.assertEqual(recovering_config["ownership_recovery_previous_patchright_path"], str(foreign_target))
+        self.assertEqual(Path(recovering_config["ownership_recovery_previous_patchright_path"]).resolve(), foreign_target.resolve())
 
     def test_active_browser_blocks_provision_without_mutating_config(self):
         legacy = self._legacy()

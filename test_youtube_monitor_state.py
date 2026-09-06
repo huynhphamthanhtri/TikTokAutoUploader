@@ -79,9 +79,9 @@ class TestVideoStateStore(unittest.TestCase):
 
 class TestDetectionCoordinator(unittest.TestCase):
     def test_polling_can_enqueue_post_start_video_missed_by_websub(self):
-        from youtube_monitor.core import _register_detected_video, download_queue
-        while not download_queue.empty():
-            download_queue.get_nowait()
+        import queue
+        from youtube_monitor.core import _register_detected_video
+        test_queue = queue.Queue()
         durable = MagicMock()
         durable.register_detection.return_value = (True, "DISCOVERED")
         with patch("youtube_monitor.core._monitor_started_epoch", 1000), \
@@ -89,6 +89,7 @@ class TestDetectionCoordinator(unittest.TestCase):
              patch("youtube_monitor.core.time.time", return_value=1002), \
              patch("youtube_monitor.core._get_video_state_store", return_value=durable), \
              patch("youtube_monitor.core._try_pending", return_value=True), \
+             patch("youtube_monitor.core.download_queue", test_queue), \
              patch("youtube_monitor.core.channels_store") as channels:
             channels.get_meta.return_value = {
                 "active": True, "seen": set(), "last_pub_utc": None,
@@ -98,14 +99,14 @@ class TestDetectionCoordinator(unittest.TestCase):
                 "UC1", "missed", "1970-01-01T00:16:41Z", "detected", "POLLING"
             )
         self.assertTrue(queued)
-        self.assertEqual(download_queue.get_nowait()[1], "missed")
+        self.assertEqual(test_queue.get_nowait()[1], "missed")
         durable.transition.assert_called_once_with("UC1", "missed", "QUEUED_DOWNLOAD")
         channels.update_watermark.assert_called_once()
 
     def test_polling_does_not_enqueue_video_published_while_app_was_off(self):
-        from youtube_monitor.core import _register_detected_video, download_queue
-        while not download_queue.empty():
-            download_queue.get_nowait()
+        import queue
+        from youtube_monitor.core import _register_detected_video
+        test_queue = queue.Queue()
         durable = MagicMock()
         durable.register_detection.return_value = (False, "BASELINE_IGNORED")
         with patch("youtube_monitor.core._monitor_started_epoch", 1000), \
@@ -113,6 +114,7 @@ class TestDetectionCoordinator(unittest.TestCase):
              patch("youtube_monitor.core.time.time", return_value=1001), \
              patch("youtube_monitor.core._get_video_state_store", return_value=durable), \
              patch("youtube_monitor.core._try_pending", return_value=True), \
+             patch("youtube_monitor.core.download_queue", test_queue), \
              patch("youtube_monitor.core.channels_store") as channels:
             channels.get_meta.return_value = {
                 "active": True, "seen": set(), "last_pub_utc": None,
@@ -122,7 +124,7 @@ class TestDetectionCoordinator(unittest.TestCase):
                 "UC1", "old", "1970-01-01T00:16:39Z", "detected", "POLLING"
             )
         self.assertFalse(queued)
-        self.assertTrue(download_queue.empty())
+        self.assertTrue(test_queue.empty())
 
 
 class TestVideoReadyCallback(unittest.TestCase):
