@@ -1,10 +1,13 @@
 from .core import (
+    add_api_key_to_pool,
     add_channel_for_profile,
+    analyze_channel_schedule,
     batch_download_latest,
     check_and_save_api_key,
     check_youtube_cookie_live,
     download_test_video,
     find_latest_video,
+    get_api_keys_pool_status,
     get_channels,
     get_config,
     get_cookies_file,
@@ -12,6 +15,8 @@ from .core import (
     get_monitor_health,
     get_status,
     get_video_quality,
+    open_youtube_login_browser,
+    remove_api_key_from_pool,
     remove_channel,
     set_channel_profile,
     set_cookies_file,
@@ -23,6 +28,7 @@ from .core import (
     stop_monitor,
     toggle_channel_active,
     toggle_channel_short,
+    update_channel_manual_windows,
     validate_youtube_cookie_file,
 )
 from .activity import (

@@ -8302,9 +8302,11 @@ def _youtube_stop_monitor():
 def _youtube_retry_ngrok():
     return youtube_monitor.retry_ngrok_recovery()
 
+
 youtube_monitor_handlers = {
     'get_profiles': _youtube_profile_names,
     'get_status': youtube_monitor.get_status,
+    'open_youtube_login_browser': youtube_monitor.open_youtube_login_browser,
     'get_channels': youtube_monitor.get_channels,
     'get_cookies_file': youtube_monitor.get_cookies_file,
     'get_max_video_minutes': _youtube_get_max_video_minutes,
@@ -8326,6 +8328,11 @@ youtube_monitor_handlers = {
     'toggle_active': youtube_monitor.toggle_channel_active,
     'toggle_short': youtube_monitor.toggle_channel_short,
     'remove_channel': youtube_monitor.remove_channel,
+    'add_api_key': youtube_monitor.add_api_key_to_pool,
+    'remove_api_key': youtube_monitor.remove_api_key_from_pool,
+    'get_api_keys_pool': youtube_monitor.get_api_keys_pool_status,
+    'analyze_schedule': youtube_monitor.analyze_channel_schedule,
+    'update_manual_windows': youtube_monitor.update_channel_manual_windows,
 }
 
 def open_profile_folder(selected_name=None):

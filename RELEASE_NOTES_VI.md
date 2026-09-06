@@ -1,3 +1,23 @@
+# Phiên bản 1.2.4
+
+## Điểm mới
+- **Hệ thống Quét Video Thông Minh Dự Đoán (Predictive API Polling)**: Phát hiện video YouTube mới gần như tức thì mà không phụ thuộc vào WebSub hay tunnel ngrok.
+- **Tự động học lịch đăng video (Schedule Learner)**: Phân tích 30-50 video gần nhất của kênh để phát hiện giờ vàng đăng video, tự động phân cụm thời gian và sinh khung giờ quét dày (Micro-Polling) ±10 phút quanh giờ đăng dự kiến.
+- **Quản lý nhóm Multi-API Key (ApiKeyManager)**: Hỗ trợ nạp nhiều YouTube Data API v3 key, tự động xoay vòng Round-Robin, tự chuyển key khi chạm hạn mức ngày (quotaExceeded) hoặc giới hạn tần suất (rateLimitExceeded), tự hồi phục sau 00:00 UTC.
+- **Tab giao diện chuyên biệt `⚡ API & Quét Video`**: Theo dõi danh sách key, trạng thái hoạt động, thời gian thử lại, ước tính số lượt gọi API cho từng khung giờ và trạng thái quét thực tế của từng kênh.
+- **Tự động dừng quét sớm khi có video mới**: Khi bắt được video trong khung giờ, hệ thống lập tức ngừng gửi request API cho kênh đó trong phần thời gian còn lại của khung quét để bảo toàn hạn mức.
+
+## Cải thiện
+- **Bộ nhớ đệm YouTube Client**: Tái sử dụng client Google API theo từng key trong bộ nhớ đệm, đưa thao tác xây dựng client ra khỏi thread lock để loại bỏ hoàn toàn độ trễ discovery qua mạng.
+- **Bộ nhớ đệm cấu hình RAM**: Tích hợp cache kiểm tra mtime tệp cấu hình cho toàn bộ tiến trình, giảm hàng trăm lượt đọc ổ đĩa lặp lại mỗi giây trên Main Thread.
+- **Kéo dài timeout xác nhận WebSub**: Tăng timeout đăng ký WebSub lên 60 giây và thời gian ân hạn bắt tay async lên 600 giây để tăng tỷ lệ đăng ký thành công trên các kết nối quốc tế.
+- **Cơ chế giãn cách WebSub**: Khi WebSub hub không phản hồi, hệ thống tự động đặt lịch thử lại sau 5 giờ, không dồn dập request và nhường quyền phát hiện video cho Quét API dự đoán.
+
+## Sửa lỗi
+- **Khắc phục lỗi đơ lag giao diện (Not Responding)**: Loại bỏ triệt để hiện tượng luồng chính Tkinter bị chặn do tranh chấp lock trong quá trình quét API tần suất cao.
+- **Khắc phục hiện tượng giật màn hình khi quét**: Sửa lỗi so sánh snapshot khiến giao diện liên tục phá hủy và khởi tạo lại toàn bộ widget danh sách key mỗi giây trên Main Loop.
+- **Triệt tiêu nhật ký nhiễu**: Loại bỏ thông báo cảnh báo XML trống không cần thiết trong quá trình cào feed định kỳ, giúp console sạch sẽ và dễ theo dõi.
+
 # Phiên bản 1.2.3
 
 ## Điểm mới

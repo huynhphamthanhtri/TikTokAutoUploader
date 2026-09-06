@@ -195,8 +195,10 @@ class TestPollingBackfillPrevention(unittest.TestCase):
 
 class TestSubscriptionStatus(unittest.TestCase):
     def setUp(self):
-        from youtube_monitor.core import _subscription_status, _subscription_lock
-        _subscription_status.clear()
+        from youtube_monitor.core import _subscription_status, _subscription_inflight, _subscription_lock
+        with _subscription_lock:
+            _subscription_status.clear()
+            _subscription_inflight.clear()
 
     def test_subscribe_tracks_request(self):
         from youtube_monitor.core import subscribe_websub
@@ -207,15 +209,100 @@ class TestSubscriptionStatus(unittest.TestCase):
         self.assertIn("UCtest", _subscription_status)
         self.assertIn("requested_at", _subscription_status["UCtest"])
         self.assertEqual(_subscription_status["UCtest"]["last_status"], 202)
+        self.assertTrue(_subscription_status["UCtest"]["verification_pending"])
+        self.assertGreater(_subscription_status["UCtest"]["next_retry_at"], 0)
+
+    def test_subscribe_and_polling_share_official_xml_feed_path(self):
+        from youtube_monitor.core import YOUTUBE_FEED_URL_TEMPLATE
+        self.assertEqual(
+            YOUTUBE_FEED_URL_TEMPLATE.format("UCtest"),
+            "https://www.youtube.com/xml/feeds/videos.xml?channel_id=UCtest",
+        )
+
+    def test_accepted_subscribe_waits_for_async_verification(self):
+        from youtube_monitor.core import subscribe_websub
+        with patch("youtube_monitor.core.requests.post") as mock_post:
+            mock_post.return_value.status_code = 202
+            self.assertTrue(subscribe_websub("UCtest", "http://example.com/callback"))
+            self.assertFalse(subscribe_websub("UCtest", "http://example.com/callback"))
+        self.assertEqual(mock_post.call_count, 1)
 
     def test_subscribe_request_error(self):
+        import time
         from youtube_monitor.core import subscribe_websub
+        t0 = time.time()
         with patch("youtube_monitor.core.requests.post") as mock_post:
             mock_post.side_effect = Exception("Connection refused")
             subscribe_websub("UCtest", "http://example.com/callback")
         from youtube_monitor.core import _subscription_status
         self.assertIn("UCtest", _subscription_status)
         self.assertIn("last_error", _subscription_status["UCtest"])
+        self.assertEqual(_subscription_status["UCtest"]["retry_attempts"], 1)
+        # Next retry must be 5 hours later (18,000s)
+        self.assertGreaterEqual(_subscription_status["UCtest"]["next_retry_at"], t0 + 17900)
+        # Extended timeout must be used (10, 60)
+        self.assertEqual(mock_post.call_args.kwargs["timeout"], (10, 60))
+
+    def test_verified_callback_wins_when_subscribe_post_times_out(self):
+        from youtube_monitor import core
+
+        def verified_then_timeout(*_args, **_kwargs):
+            with core._subscription_lock:
+                core._subscription_status["UCtest"].update({
+                    "verified_at": "2026-09-06T15:00:00+00:00",
+                    "verification_pending": False,
+                    "lease_seconds": 432000,
+                })
+            raise core.requests.ReadTimeout("late response")
+
+        with patch.object(core, "_proxy_pool", []), \
+                patch("youtube_monitor.core.requests.post", side_effect=verified_then_timeout):
+            self.assertTrue(core.subscribe_websub("UCtest", "http://example.com/callback"))
+        self.assertEqual(core._subscription_status["UCtest"]["last_error"], "")
+        self.assertEqual(core._subscription_status["UCtest"]["next_retry_at"], 0)
+
+    def test_duplicate_subscribe_is_suppressed_while_request_inflight(self):
+        from youtube_monitor.core import subscribe_websub
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_post(*args, **kwargs):
+            entered.set()
+            release.wait(2)
+            response = MagicMock()
+            response.status_code = 202
+            return response
+
+        with patch("youtube_monitor.core.requests.post", side_effect=slow_post) as mock_post:
+            first = threading.Thread(
+                target=subscribe_websub,
+                args=("UCtest", "http://example.com/callback"),
+            )
+            first.start()
+            self.assertTrue(entered.wait(1))
+            self.assertFalse(subscribe_websub("UCtest", "http://example.com/callback"))
+            release.set()
+            first.join(2)
+        self.assertFalse(first.is_alive())
+        self.assertEqual(mock_post.call_count, 1)
+
+    def test_subscribe_backoff_suppresses_immediate_retry(self):
+        from youtube_monitor.core import subscribe_websub
+        with patch("youtube_monitor.core.requests.post", side_effect=Exception("timeout")) as mock_post:
+            self.assertFalse(subscribe_websub("UCtest", "http://example.com/callback"))
+            self.assertFalse(subscribe_websub("UCtest", "http://example.com/callback"))
+        self.assertEqual(mock_post.call_count, 1)
+
+    def test_subscribe_never_uses_profile_proxy(self):
+        from youtube_monitor import core
+        with patch.object(core, "_proxy_pool", ["http://user:pass@proxy.test:8080"]), \
+                patch.object(core, "_proxy_rr_index", 0), \
+                patch("youtube_monitor.core.requests.post",
+                      side_effect=core.requests.ReadTimeout("direct timeout")) as mock_post:
+            self.assertFalse(core.subscribe_websub("UCtest", "http://example.com/callback"))
+        self.assertEqual(mock_post.call_count, 1)
+        self.assertNotIn("proxies", mock_post.call_args.kwargs)
+        self.assertNotIn("prefer_proxy", core._subscription_status["UCtest"])
 
     def test_verification_via_health_route(self):
         from youtube_monitor.core import _subscription_status, _subscription_lock

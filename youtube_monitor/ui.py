@@ -238,6 +238,9 @@ class YouTubeMonitorView(ctk.CTkFrame):
         self.ctx_menu.add_command(label="⚡ Bật/Tắt theo dõi kênh", command=lambda: self._toggle_active())
         self.ctx_menu.add_command(label="✂️ Bật/Tắt điều chỉnh 40-60s", command=lambda: self._toggle_short())
         self.ctx_menu.add_separator()
+        self.ctx_menu.add_command(label="📊 Xem / Sửa lịch đăng & Khung giờ...", command=lambda: self._open_schedule_dialog())
+        self.ctx_menu.add_command(label="🔄 Phân tích lại lịch đăng qua API", command=lambda: self._reanalyze_schedule())
+        self.ctx_menu.add_separator()
         self.ctx_menu.add_command(label="🗑️ Xóa kênh khỏi danh sách", command=lambda: self._remove_with_confirm())
 
         # 2B. RIGHT COLUMN: Control Panel Cards
@@ -289,6 +292,7 @@ class YouTubeMonitorView(ctk.CTkFrame):
             hover_color="#b91c1c",
             command=self._stop,
         ).pack(side="right", padx=(4, 0))
+
 
         # CARD 2: Thêm Kênh Nhanh (Add Channel)
         card_add = ctk.CTkFrame(
@@ -388,9 +392,21 @@ class YouTubeMonitorView(ctk.CTkFrame):
             api_row,
             text="Lưu/Kiểm",
             font=UIThemeTokens.FONT_BUTTON,
-            width=80,
+            width=70,
             height=28,
             command=self._save_api_key,
+        ).pack(side="left", padx=(0, 4))
+
+        ctk.CTkButton(
+            api_row,
+            text="🔑 Nhóm API Key",
+            font=UIThemeTokens.FONT_BUTTON,
+            width=80,
+            height=28,
+            fg_color=UIThemeTokens.BG_HOVER,
+            hover_color=UIThemeTokens.BORDER_LIGHT,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+            command=self._open_keys_dialog,
         ).pack(side="right")
 
         # Cookie File Row (Hiển thị filename, giữ full path)
@@ -456,6 +472,16 @@ class YouTubeMonitorView(ctk.CTkFrame):
             hover_color="#b91c1c",
             command=self._clear_cookie_file,
         ).pack(side="right")
+
+        ctk.CTkButton(
+            card_cfg,
+            text="🌐 Mở Browser Login YouTube",
+            font=UIThemeTokens.FONT_BUTTON,
+            height=30,
+            fg_color=UIThemeTokens.ACCENT_PRIMARY,
+            hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
+            command=self._open_youtube_login_browser,
+        ).pack(fill="x", padx=10, pady=(0, 8))
 
         # Duration Limit Row
         dur_row = ctk.CTkFrame(card_cfg, fg_color="transparent")
@@ -811,19 +837,19 @@ class YouTubeMonitorView(ctk.CTkFrame):
         if status.get("running"):
             mon_state = status.get("monitor_state", "RUNNING")
             if mon_state == "DEGRADED":
-                health_text = "DEGRADED - cần Retry ngrok"
+                health_text = "DEGRADED - polling đang bảo vệ"
             elif mon_state == "RECOVERING":
                 attempt = status.get("recovery_attempt", 0)
-                health_text = f"Đang khôi phục ngrok (lần {attempt})"
+                health_text = f"Đang khôi phục tunnel (lần {attempt})"
             elif healthy:
-                ngrok_ok = status.get("callback_verified", False)
+                tunnel_ok = status.get("callback_verified", False)
                 subs_total = status.get("subscriptions_total", 0)
                 subs_ok = status.get("subscriptions_ok", 0)
                 degraded = subs_total - subs_ok
                 if degraded > 0:
                     health_text = f"Suy giảm ({subs_ok}/{subs_total} WebSub)"
-                elif not ngrok_ok:
-                    health_text = "Chưa có Ngrok"
+                elif not tunnel_ok:
+                    health_text = "Chưa có tunnel"
                 else:
                     health_text = "OK (WebSub Live)"
             else:
@@ -852,7 +878,8 @@ class YouTubeMonitorView(ctk.CTkFrame):
         last_post = status.get("last_callback_post", "")
         cb_parts = [f"Port: {port}" if port else ""]
         if cb_url:
-            cb_parts.append(f"Ngrok: {'OK' if status.get('callback_verified') else '?'}")
+            provider = str(status.get("tunnel_provider", "tunnel") or "tunnel").title()
+            cb_parts.append(f"{provider}: {'OK' if status.get('callback_verified') else '?'}")
         else:
             auth_status = status.get("ngrok_auth_status", "unknown")
             if auth_status != "ready":
@@ -1314,6 +1341,20 @@ class YouTubeMonitorView(ctk.CTkFrame):
             self.cookie_var.set(path)
             self.cookie_display_var.set(Path(path).name)
 
+    def _open_youtube_login_browser(self):
+        self.append_log("[YouTube Login] Đang mở browser riêng...")
+
+        def run():
+            ok, message = self._run_handler("open_youtube_login_browser")
+            self._append_threadsafe(f"[YouTube Login] {message}")
+            if not ok:
+                try:
+                    self.after(0, lambda: messagebox.showerror("YouTube Login", message))
+                except Exception:
+                    pass
+
+        threading.Thread(target=run, daemon=True).start()
+
     def _save_cookie_file(self):
         path = self.cookie_var.get().strip()
         threading.Thread(
@@ -1491,3 +1532,186 @@ class YouTubeMonitorView(ctk.CTkFrame):
             self._refresh_channels_after_action(preferred_cid=None)
         else:
             self.append_log(f"Lỗi xóa kênh {cid}: {msg}", error=True)
+
+    def _open_keys_dialog(self):
+        """Mở modal quản lý danh sách nhiều API Key (Pool)."""
+        shortcut = self.handlers.get("open_api_polling")
+        if shortcut:
+            shortcut()
+            return
+        from .polling_ui import ApiPollingView
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("⚡ API & Quét Video")
+        dialog.geometry("920x760")
+        ApiPollingView(dialog).pack(fill="both", expand=True)
+
+    def _open_schedule_dialog(self):
+        """Mở modal xem lịch học đăng video & quản lý khung giờ thủ công."""
+        cid = self._context_channel_id or self.selected_channel_id
+        if not cid:
+            self.append_log("Vui lòng chọn một kênh để xem lịch.", error=True)
+            return
+
+        channel_item = next((c for c in self._channels_data if c.get("channel_id") == cid), {})
+        title = channel_item.get("title") or cid
+
+        top = ctk.CTkToplevel(self)
+        top.title(f"📊 Lịch Đăng Video - {title}")
+        top.geometry("680x540")
+        top.grab_set()
+
+        ctk.CTkLabel(
+            top,
+            text=f"LỊCH ĐĂNG VIDEO & CỬA SỔ POLLING: {title}",
+            font=UIThemeTokens.FONT_TITLE,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+        ).pack(anchor="w", padx=16, pady=(12, 2))
+
+        ctk.CTkLabel(
+            top,
+            text=f"Channel ID: {cid} | Múi giờ: {channel_item.get('timezone', 'Asia/Ho_Chi_Minh')}",
+            font=UIThemeTokens.FONT_BADGE,
+            text_color=UIThemeTokens.TEXT_MUTED,
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        content_scroll = ctk.CTkScrollableFrame(top)
+        content_scroll.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+
+        learned = channel_item.get("schedule_learned") or {}
+        pred_wins = learned.get("predicted_windows") or []
+        conf = learned.get("confidence_score", 0.0)
+
+        ctk.CTkLabel(
+            content_scroll,
+            text=f"🤖 KHUNG GIỜ DỰ ĐOÁN (Tự học: {len(pred_wins)} khung, Độ tin cậy: {int(conf*100)}%)",
+            font=UIThemeTokens.FONT_SUBTITLE,
+            text_color=UIThemeTokens.ACCENT_PRIMARY,
+        ).pack(anchor="w", pady=(6, 4))
+
+        if not pred_wins:
+            ctk.CTkLabel(
+                content_scroll,
+                text="Chưa có dữ liệu lịch học (bấm nút 'Phân tích lại lịch' bên dưới).",
+                font=UIThemeTokens.FONT_BODY,
+                text_color=UIThemeTokens.TEXT_MUTED,
+            ).pack(anchor="w", pady=(0, 8))
+        else:
+            for pw in pred_wins:
+                p_row = ctk.CTkFrame(content_scroll, fg_color=UIThemeTokens.BG_CARD, corner_radius=6)
+                p_row.pack(fill="x", pady=2)
+                exp = pw.get("expected_time", "")
+                st = pw.get("start_time", "")
+                et = pw.get("end_time", "")
+                sm = pw.get("sample_count", 0)
+                cf = int(float(pw.get("confidence", 0)) * 100)
+                ctk.CTkLabel(p_row, text=f"⏰ Giờ dự kiến: {exp}  ➔  Quét 1s từ {st} đến {et}", font=("Segoe UI Semibold", 10)).pack(side="left", padx=8, pady=4)
+                ctk.CTkLabel(p_row, text=f"Mẫu: {sm} video | Tin cậy: {cf}%", font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_MUTED).pack(side="right", padx=8)
+
+        def _do_reanalyze():
+            from .core import analyze_channel_schedule
+            ok, res = analyze_channel_schedule(cid)
+            if ok:
+                self.append_log(f"Đã phân tích lại lịch kênh {cid}: {len(res.get('predicted_windows', []))} khung giờ")
+                top.destroy()
+                self._open_schedule_dialog()
+            else:
+                self.append_log(f"Phân tích lịch lỗi: {res}", error=True)
+
+        ctk.CTkButton(
+            content_scroll,
+            text="🔄 Phân Tích Lại Lịch Qua 30 Video Mới",
+            font=UIThemeTokens.FONT_BUTTON,
+            height=28,
+            command=_do_reanalyze,
+        ).pack(anchor="w", pady=(6, 12))
+
+        ctk.CTkLabel(
+            content_scroll,
+            text="✍️ KHUNG GIỜ THỦ CÔNG (Người dùng tự thêm / khóa)",
+            font=UIThemeTokens.FONT_SUBTITLE,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(6, 4))
+
+        manual_wins = list(channel_item.get("manual_windows") or [])
+        manual_container = ctk.CTkFrame(content_scroll, fg_color="transparent")
+        manual_container.pack(fill="x", pady=(0, 8))
+
+        def _render_manual():
+            for w in manual_container.winfo_children():
+                w.destroy()
+            if not manual_wins:
+                ctk.CTkLabel(manual_container, text="Chưa có khung giờ thủ công nào.", font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_MUTED).pack(anchor="w")
+                return
+            for idx, mw in enumerate(manual_wins):
+                m_row = ctk.CTkFrame(manual_container, fg_color=UIThemeTokens.BG_CARD, corner_radius=6)
+                m_row.pack(fill="x", pady=2)
+                st = mw.get("start_time", "00:00")
+                et = mw.get("end_time", "00:00")
+                lk = "🔒 Khóa" if mw.get("locked") else "Mở"
+                ctk.CTkLabel(m_row, text=f"Quét 1s từ {st} đến {et} ({lk})", font=("Segoe UI Semibold", 10)).pack(side="left", padx=8, pady=4)
+
+                def _del_mw(i=idx):
+                    manual_wins.pop(i)
+                    from .core import update_channel_manual_windows
+                    update_channel_manual_windows(cid, manual_wins)
+                    _render_manual()
+
+                ctk.CTkButton(m_row, text="Xóa", width=50, height=22, fg_color=UIThemeTokens.STATUS_ERROR, command=_del_mw).pack(side="right", padx=6)
+
+        _render_manual()
+
+        form_frame = ctk.CTkFrame(content_scroll, fg_color=UIThemeTokens.BG_CARD, corner_radius=6)
+        form_frame.pack(fill="x", pady=(6, 12), padx=2)
+
+        ctk.CTkLabel(form_frame, text="Thêm khung giờ mới:", font=UIThemeTokens.FONT_BADGE).pack(anchor="w", padx=8, pady=(6, 2))
+        inputs_row = ctk.CTkFrame(form_frame, fg_color="transparent")
+        inputs_row.pack(fill="x", padx=8, pady=(0, 8))
+
+        ctk.CTkLabel(inputs_row, text="Từ:", font=UIThemeTokens.FONT_BODY).pack(side="left", padx=(0, 4))
+        start_entry = ctk.CTkEntry(inputs_row, width=65, height=26, placeholder_text="17:50")
+        start_entry.pack(side="left", padx=(0, 8))
+
+        ctk.CTkLabel(inputs_row, text="Đến:", font=UIThemeTokens.FONT_BODY).pack(side="left", padx=(0, 4))
+        end_entry = ctk.CTkEntry(inputs_row, width=65, height=26, placeholder_text="18:10")
+        end_entry.pack(side="left", padx=(0, 8))
+
+        locked_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(inputs_row, text="Khóa (Locked)", variable=locked_var, font=UIThemeTokens.FONT_BADGE).pack(side="left", padx=(0, 8))
+
+        def _add_manual():
+            st_val = start_entry.get().strip()
+            et_val = end_entry.get().strip()
+            if not st_val or not et_val:
+                return
+            new_mw = {
+                "id": f"man_{st_val.replace(':', '')}_{int(time.time())}",
+                "start_time": st_val,
+                "end_time": et_val,
+                "days": [0, 1, 2, 3, 4, 5, 6],
+                "enabled": True,
+                "locked": locked_var.get(),
+                "source": "MANUAL",
+            }
+            manual_wins.append(new_mw)
+            from .core import update_channel_manual_windows
+            update_channel_manual_windows(cid, manual_wins)
+            start_entry.delete(0, "end")
+            end_entry.delete(0, "end")
+            _render_manual()
+
+        ctk.CTkButton(inputs_row, text="+ Thêm", width=70, height=26, command=_add_manual).pack(side="right")
+        ctk.CTkButton(top, text="Đóng", width=100, height=30, command=top.destroy).pack(pady=(0, 12))
+
+    def _reanalyze_schedule(self):
+        cid = self._context_channel_id or self.selected_channel_id
+        if not cid:
+            self.append_log("Vui lòng chọn một kênh để phân tích lịch.", error=True)
+            return
+        def _run():
+            from .core import analyze_channel_schedule
+            ok, res = analyze_channel_schedule(cid)
+            if ok:
+                self.append_log(f"Đã phân tích lại lịch kênh {cid}: {len(res.get('predicted_windows', []))} khung giờ dự đoán")
+            else:
+                self.append_log(f"Lỗi phân tích lịch kênh {cid}: {res}", error=True)
+        threading.Thread(target=_run, daemon=True).start()

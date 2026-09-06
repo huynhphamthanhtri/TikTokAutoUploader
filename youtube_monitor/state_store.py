@@ -65,6 +65,26 @@ class VideoStateStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_video_states_recovery
                 ON video_states(state, next_retry_at);
+                CREATE TABLE IF NOT EXISTS websub_subscriptions (
+                    channel_id TEXT PRIMARY KEY,
+                    callback_url TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    generation INTEGER NOT NULL DEFAULT 0,
+                    state TEXT NOT NULL,
+                    requested_at REAL,
+                    accepted_at REAL,
+                    verified_at REAL,
+                    lease_seconds INTEGER NOT NULL DEFAULT 0,
+                    expires_at REAL,
+                    retry_attempts INTEGER NOT NULL DEFAULT 0,
+                    next_retry_at REAL,
+                    last_http_status INTEGER,
+                    last_route TEXT,
+                    last_error TEXT,
+                    updated_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_websub_subscriptions_due
+                ON websub_subscriptions(state, next_retry_at, expires_at);
                 """
             )
 
@@ -91,10 +111,10 @@ class VideoStateStore:
                            session_started_at, source, published_iso="", detected_iso="",
                            baseline=False):
         now = time.time()
-        # Session start time is diagnostic data, not a freshness boundary. A video
-        # published while the app was closed must remain recoverable after restart.
-        # Only the explicit first-time channel seed is allowed to create a baseline.
-        state = "BASELINE_IGNORED" if baseline else "DISCOVERED"
+        # The monitor owns a strict runtime window: uploads made while the app was
+        # stopped are baseline data, not work to catch up after the next launch.
+        before_session = published_at is not None and float(published_at) < float(session_started_at)
+        state = "BASELINE_IGNORED" if baseline or before_session else "DISCOVERED"
         with self._lock, self._connection() as conn:
             row = conn.execute(
                 "SELECT state, detection_source FROM video_states WHERE channel_id=? AND video_id=?",
@@ -147,6 +167,82 @@ class VideoStateStore:
                 params,
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def discard_before_session(self, session_started_at):
+        """Atomically retire unfinished videos from earlier runtime windows."""
+        now = time.time()
+        placeholders = ",".join("?" for _ in RECOVERABLE_STATES)
+        with self._lock, self._connection() as conn:
+            cur = conn.execute(
+                f"""UPDATE video_states
+                    SET state='BASELINE_IGNORED', next_retry_at=NULL, updated_at=?
+                    WHERE state IN ({placeholders})
+                      AND published_at IS NOT NULL AND published_at < ?""",
+                (now, *sorted(RECOVERABLE_STATES), float(session_started_at)),
+            )
+            return int(cur.rowcount or 0)
+
+    def subscription_requesting(self, channel_id, callback_url, provider, generation=0):
+        now = time.time()
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """INSERT INTO websub_subscriptions(
+                       channel_id, callback_url, provider, generation, state,
+                       requested_at, updated_at
+                   ) VALUES(?,?,?,?, 'REQUESTING', ?, ?)
+                   ON CONFLICT(channel_id) DO UPDATE SET
+                       callback_url=excluded.callback_url, provider=excluded.provider,
+                       generation=excluded.generation, state='REQUESTING',
+                       requested_at=excluded.requested_at, last_error=NULL,
+                       updated_at=excluded.updated_at""",
+                (channel_id, callback_url, provider or "unknown", int(generation or 0), now, now),
+            )
+
+    def subscription_accepted(self, channel_id, http_status, route, next_retry_at):
+        now = time.time()
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """UPDATE websub_subscriptions SET
+                   state=CASE WHEN state='VERIFIED' THEN state ELSE 'ACCEPTED' END,
+                   accepted_at=?,
+                   last_http_status=?, last_route=?, retry_attempts=0, next_retry_at=?,
+                   last_error=NULL, updated_at=? WHERE channel_id=?""",
+                (now, int(http_status), route, float(next_retry_at), now, channel_id),
+            )
+
+    def subscription_verified(self, channel_id, lease_seconds):
+        now = time.time()
+        lease = max(0, int(lease_seconds or 0))
+        expires = now + lease if lease else None
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """INSERT INTO websub_subscriptions(
+                       channel_id, callback_url, provider, state, verified_at,
+                       lease_seconds, expires_at, updated_at
+                   ) VALUES(?, '', 'unknown', 'VERIFIED', ?, ?, ?, ?)
+                   ON CONFLICT(channel_id) DO UPDATE SET state='VERIFIED',
+                       verified_at=excluded.verified_at,
+                       lease_seconds=excluded.lease_seconds,
+                       expires_at=excluded.expires_at, next_retry_at=NULL,
+                       last_error=NULL, updated_at=excluded.updated_at""",
+                (channel_id, now, lease, expires, now),
+            )
+
+    def subscription_failed(self, channel_id, error, attempts, next_retry_at):
+        now = time.time()
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """UPDATE websub_subscriptions SET state='RETRY_WAIT', retry_attempts=?,
+                   next_retry_at=?, last_error=?, updated_at=?
+                   WHERE channel_id=? AND state!='VERIFIED'""",
+                (int(attempts), float(next_retry_at), str(error), now, channel_id),
+            )
+
+    def subscription_rows(self):
+        with self._lock, self._connection() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM websub_subscriptions ORDER BY channel_id"
+            )]
 
     def counts(self):
         with self._lock, self._connection() as conn:

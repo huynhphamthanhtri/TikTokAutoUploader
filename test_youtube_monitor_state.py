@@ -14,11 +14,11 @@ class TestVideoStateStore(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_pre_session_video_is_caught_up_after_restart(self):
+    def test_pre_session_video_is_ignored_after_restart(self):
         sid, started = self.store.begin_session(1000)
         should_queue, state = self.store.register_detection("UC1", "old", 999, sid, started, "POLLING")
-        self.assertTrue(should_queue)
-        self.assertEqual(state, "DISCOVERED")
+        self.assertFalse(should_queue)
+        self.assertEqual(state, "BASELINE_IGNORED")
 
     def test_explicit_first_channel_seed_is_baseline_only(self):
         sid, started = self.store.begin_session(1000)
@@ -51,6 +51,31 @@ class TestVideoStateStore(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["attempts"], 2)
 
+    def test_new_session_retires_unfinished_video_from_previous_session(self):
+        sid, started = self.store.begin_session(1000)
+        self.store.register_detection("UC1", "previous", 1001, sid, started, "WEBSUB")
+        self.store.transition("UC1", "previous", "RETRY_WAIT", attempts=1, next_retry_at=0)
+        retired = self.store.discard_before_session(2000)
+        self.assertEqual(retired, 1)
+        self.assertEqual(self.store.recoverable(), [])
+
+    def test_websub_verification_cannot_be_regressed_by_late_post_response(self):
+        self.store.subscription_requesting("UC1", "https://callback", "ngrok", 3)
+        self.store.subscription_verified("UC1", 432000)
+        self.store.subscription_accepted("UC1", 202, "direct", 1234)
+        row = self.store.subscription_rows()[0]
+        self.assertEqual(row["state"], "VERIFIED")
+        self.assertEqual(row["lease_seconds"], 432000)
+        self.assertEqual(row["last_http_status"], 202)
+
+    def test_websub_verification_cannot_be_regressed_by_late_failure(self):
+        self.store.subscription_requesting("UC1", "https://callback", "ngrok", 3)
+        self.store.subscription_verified("UC1", 432000)
+        self.store.subscription_failed("UC1", "timeout", 1, 1234)
+        row = self.store.subscription_rows()[0]
+        self.assertEqual(row["state"], "VERIFIED")
+        self.assertIsNone(row["last_error"])
+
 
 class TestDetectionCoordinator(unittest.TestCase):
     def test_polling_can_enqueue_post_start_video_missed_by_websub(self):
@@ -77,12 +102,12 @@ class TestDetectionCoordinator(unittest.TestCase):
         durable.transition.assert_called_once_with("UC1", "missed", "QUEUED_DOWNLOAD")
         channels.update_watermark.assert_called_once()
 
-    def test_polling_enqueues_video_published_while_app_was_off(self):
+    def test_polling_does_not_enqueue_video_published_while_app_was_off(self):
         from youtube_monitor.core import _register_detected_video, download_queue
         while not download_queue.empty():
             download_queue.get_nowait()
         durable = MagicMock()
-        durable.register_detection.return_value = (True, "DISCOVERED")
+        durable.register_detection.return_value = (False, "BASELINE_IGNORED")
         with patch("youtube_monitor.core._monitor_started_epoch", 1000), \
              patch("youtube_monitor.core._monitor_session_id", "session"), \
              patch("youtube_monitor.core.time.time", return_value=1001), \
@@ -96,8 +121,8 @@ class TestDetectionCoordinator(unittest.TestCase):
             queued = _register_detected_video(
                 "UC1", "old", "1970-01-01T00:16:39Z", "detected", "POLLING"
             )
-        self.assertTrue(queued)
-        self.assertEqual(download_queue.get_nowait()[1], "old")
+        self.assertFalse(queued)
+        self.assertTrue(download_queue.empty())
 
 
 class TestVideoReadyCallback(unittest.TestCase):

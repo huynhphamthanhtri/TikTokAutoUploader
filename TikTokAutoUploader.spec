@@ -1,4 +1,4 @@
-﻿# -*- mode: python ; coding: utf-8 -*-
+# -*- mode: python ; coding: utf-8 -*-
 
 import os
 import site
@@ -113,6 +113,7 @@ hidden_imports += collect_submodules('pyngrok')
 hidden_imports += collect_submodules('googleapiclient')
 hidden_imports += collect_submodules('charset_normalizer')
 hidden_imports += collect_submodules('patchright')
+hidden_imports += collect_submodules('youtube_monitor')
 hidden_imports += [
     'config_service',
     'log_engine',

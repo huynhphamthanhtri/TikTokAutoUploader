@@ -718,7 +718,16 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     activity_view.pack(fill="both", expand=True)
     widgets["activity_view"] = activity_view
 
+    from youtube_monitor.polling_ui import ApiPollingView
+    subtab_api_frame = ctk.CTkFrame(yt_content_container, fg_color="transparent")
+    subtab_api_frame.grid(row=0, column=0, sticky="nsew")
+    subtab_api_frame.grid_remove()
+    api_polling_view = ApiPollingView(subtab_api_frame)
+    api_polling_view.pack(fill="both", expand=True)
+    widgets["api_polling_view"] = api_polling_view
+    yt_subtabs.append(("api_polling", "⚡ API & Quét Video"))
     yt_subtab_frames = {
+        "api_polling": subtab_api_frame,
         "monitor": subtab_monitor_frame,
         "batch": subtab_batch_frame,
         "history": subtab_history_frame,
@@ -754,6 +763,8 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
         yt_subtab_buttons[key] = btn
 
     widgets["switch_youtube_subtab"] = _switch_youtube_subtab
+    youtube_monitor_view.handlers = dict(youtube_monitor_view.handlers)
+    youtube_monitor_view.handlers["open_api_polling"] = lambda: _switch_youtube_subtab("api_polling")
 
     # --------------------------------------------------------------------------
     # WORKSPACE 5: MONETIZATION WORKSPACE
