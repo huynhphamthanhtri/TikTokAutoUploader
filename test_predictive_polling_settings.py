@@ -7,6 +7,7 @@ The real SQLite deduplication implementation is exercised below.
 """
 import copy
 import json
+import os
 import queue
 import tempfile
 import unittest
@@ -45,6 +46,7 @@ class TestPredictivePollingSettings(unittest.TestCase):
         self.orig_pending = core._pending_video_ids
         self.orig_scheduler = core._predictive_scheduler
         self.orig_config_json = core.CONFIG_JSON
+        self.orig_stop_event = core.stop_event
 
     def tearDown(self):
         core.channels_store = self.orig_channels_store
@@ -55,6 +57,7 @@ class TestPredictivePollingSettings(unittest.TestCase):
         core._pending_video_ids = self.orig_pending
         core._predictive_scheduler = self.orig_scheduler
         core.CONFIG_JSON = self.orig_config_json
+        core.stop_event = self.orig_stop_event
         self.tmp_dir.cleanup()
 
     def _setup_scheduler(self):
@@ -282,7 +285,7 @@ class TestPredictivePollingSettings(unittest.TestCase):
         settings = {**DEFAULTS, "poll_interval_seconds": 2.75, "stop_after_detection": False}
         core.set_predictive_polling(settings)
         code = "import sys,json; from pathlib import Path; from youtube_monitor import core; core.CONFIG_JSON=Path(sys.argv[1]); print(json.dumps(core.get_config()['predictive_polling']))"
-        result = subprocess.run([sys.executable, "-c", code, str(path)], capture_output=True, text=True, check=True)
+        result = subprocess.run([sys.executable, "-c", code, str(path)], capture_output=True, text=True, check=True, timeout=15)
         self.assertEqual(json.loads(result.stdout), settings)
 
     def test_pool_status_accepts_legacy_null_metadata(self):
@@ -315,6 +318,7 @@ class TestPredictivePollingSettings(unittest.TestCase):
         self.assertEqual(format_number(1200), "1.200")
         self.assertIn("⚡ API & Quét Video", Path("app_ui.py").read_text(encoding="utf-8"))
 
+    @unittest.skipIf(os.environ.get("CI", "").lower() == "true", "Interactive Tk rendering is verified on desktop runner")
     def test_real_ui_estimate_validation_save_and_labels(self):
         import customtkinter as ctk
         from youtube_monitor.polling_ui import ApiPollingView
