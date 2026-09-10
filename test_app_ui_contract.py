@@ -143,6 +143,14 @@ class TestAppUIContract(unittest.TestCase):
         self.assertFalse(widgets["guide_workspace"].winfo_manager())
 
         switch_ws("stats")
+
+        # Test workspace router switching to statistics and aliases
+        switch_ws = widgets["switch_workspace"]
+        switch_ws("statistics")
+        self.assertTrue(widgets["stats_workspace"].winfo_manager())
+        self.assertFalse(widgets["guide_workspace"].winfo_manager())
+
+        switch_ws("stats")
         self.assertTrue(widgets["stats_workspace"].winfo_manager())
 
         switch_ws("guide")
@@ -153,6 +161,10 @@ class TestAppUIContract(unittest.TestCase):
         """Log classifier returns correct base_tag and important_tag."""
         self.assertEqual(classify_log_message("Upload failed with error 403")[0], "ERROR")
         self.assertEqual(classify_log_message("Proxy ok và sẵn sàng")[1], "INFO")
+
+    def test_appearance_mode_defaults_to_light(self):
+        """Application UI theme foundation must default to Light mode for high contrast."""
+        self.assertEqual(ctk.get_appearance_mode(), "Light")
 
 
 if __name__ == "__main__":

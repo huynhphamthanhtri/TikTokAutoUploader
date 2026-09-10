@@ -1604,7 +1604,7 @@ class YouTubeMonitorView(ctk.CTkFrame):
                 et = pw.get("end_time", "")
                 sm = pw.get("sample_count", 0)
                 cf = int(float(pw.get("confidence", 0)) * 100)
-                ctk.CTkLabel(p_row, text=f"⏰ Giờ dự kiến: {exp}  ➔  Quét 1s từ {st} đến {et}", font=("Segoe UI Semibold", 10)).pack(side="left", padx=8, pady=4)
+                ctk.CTkLabel(p_row, text=f"⏰ Giờ dự kiến: {exp}  ➔  Quét 1s từ {st} đến {et}", font=("Segoe UI Semibold", 10), text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=8, pady=4)
                 ctk.CTkLabel(p_row, text=f"Mẫu: {sm} video | Tin cậy: {cf}%", font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_MUTED).pack(side="right", padx=8)
 
         def _do_reanalyze():
@@ -1648,7 +1648,7 @@ class YouTubeMonitorView(ctk.CTkFrame):
                 st = mw.get("start_time", "00:00")
                 et = mw.get("end_time", "00:00")
                 lk = "🔒 Khóa" if mw.get("locked") else "Mở"
-                ctk.CTkLabel(m_row, text=f"Quét 1s từ {st} đến {et} ({lk})", font=("Segoe UI Semibold", 10)).pack(side="left", padx=8, pady=4)
+                ctk.CTkLabel(m_row, text=f"Quét 1s từ {st} đến {et} ({lk})", font=("Segoe UI Semibold", 10), text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=8, pady=4)
 
                 def _del_mw(i=idx):
                     manual_wins.pop(i)
@@ -1663,20 +1663,20 @@ class YouTubeMonitorView(ctk.CTkFrame):
         form_frame = ctk.CTkFrame(content_scroll, fg_color=UIThemeTokens.BG_CARD, corner_radius=6)
         form_frame.pack(fill="x", pady=(6, 12), padx=2)
 
-        ctk.CTkLabel(form_frame, text="Thêm khung giờ mới:", font=UIThemeTokens.FONT_BADGE).pack(anchor="w", padx=8, pady=(6, 2))
+        ctk.CTkLabel(form_frame, text="Thêm khung giờ mới:", font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_PRIMARY).pack(anchor="w", padx=8, pady=(6, 2))
         inputs_row = ctk.CTkFrame(form_frame, fg_color="transparent")
         inputs_row.pack(fill="x", padx=8, pady=(0, 8))
 
-        ctk.CTkLabel(inputs_row, text="Từ:", font=UIThemeTokens.FONT_BODY).pack(side="left", padx=(0, 4))
+        ctk.CTkLabel(inputs_row, text="Từ:", font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(0, 4))
         start_entry = ctk.CTkEntry(inputs_row, width=65, height=26, placeholder_text="17:50")
         start_entry.pack(side="left", padx=(0, 8))
 
-        ctk.CTkLabel(inputs_row, text="Đến:", font=UIThemeTokens.FONT_BODY).pack(side="left", padx=(0, 4))
+        ctk.CTkLabel(inputs_row, text="Đến:", font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(0, 4))
         end_entry = ctk.CTkEntry(inputs_row, width=65, height=26, placeholder_text="18:10")
         end_entry.pack(side="left", padx=(0, 8))
 
         locked_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(inputs_row, text="Khóa (Locked)", variable=locked_var, font=UIThemeTokens.FONT_BADGE).pack(side="left", padx=(0, 8))
+        ctk.CTkCheckBox(inputs_row, text="Khóa (Locked)", variable=locked_var, font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(0, 8))
 
         def _add_manual():
             st_val = start_entry.get().strip()

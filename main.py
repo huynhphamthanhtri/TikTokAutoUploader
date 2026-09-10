@@ -7766,7 +7766,7 @@ def _run_single_upload_test_from_env():
 # =========================
 # UI Setup
 # =========================
-ctk.set_appearance_mode("System")
+ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
 root = ctk.CTk()
 root.title("DONGLAO-TIKTOK — Automation & Studio Suite")
@@ -7778,7 +7778,7 @@ apply_app_icon(root)
 
 selected_project_var = StringVar(master=root)
 filter_var = StringVar(master=root, value="")
-theme_var = StringVar(master=root, value="System")
+theme_var = StringVar(master=root, value="Light")
 scale_var = StringVar(master=root, value="100%")
 header_total_label = StringVar(master=root, value="0")
 header_running_label = StringVar(master=root, value="0")

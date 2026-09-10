@@ -20,6 +20,12 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+# Force Light appearance mode across all CustomTkinter components
+try:
+    ctk.set_appearance_mode("Light")
+except Exception:
+    pass
+
 
 # CustomTkinter upstream bugfix: CTkToplevel schedules an async 200ms after-callback
 # (_windows_set_titlebar_icon) to set the window icon on Windows. In headless CI and fast

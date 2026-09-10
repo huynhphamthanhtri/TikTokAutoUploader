@@ -58,7 +58,10 @@ class TestPredictivePollingSettings(unittest.TestCase):
         core._predictive_scheduler = self.orig_scheduler
         core.CONFIG_JSON = self.orig_config_json
         core.stop_event = self.orig_stop_event
-        self.tmp_dir.cleanup()
+        try:
+            self.tmp_dir.cleanup()
+        except Exception:
+            pass
 
     def _setup_scheduler(self):
         import uuid

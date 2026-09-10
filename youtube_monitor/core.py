@@ -910,47 +910,220 @@ def add_api_key_to_pool(api_key):
     api_key = str(api_key or "").strip()
     ok, msg = api_key_manager.test_key(api_key)
     if ok:
-        cfg = get_config()
-        api_key_manager.load_from_config(cfg)
-        api_key_manager.add_key(api_key)
-        api_key_manager.save_to_config(cfg)
-        _save_config(cfg)
+        with api_key_manager._lock:
+            cfg = get_config()
+            api_key_manager.load_from_config(cfg)
+            api_key_manager.add_key(api_key)
+            api_key_manager.save_to_config(cfg)
+            _save_config(cfg)
         log(f"[API] Đã thêm key ...{api_key[-4:]} vào pool.")
     return ok, msg
 
 
+def parse_api_keys_text(text):
+    """
+    Trích xuất danh sách API key từ chuỗi văn bản tự do (nhiều dòng, phân tách bởi
+    dấu phẩy, chấm phẩy, khoảng trắng, có hoặc không có dấu ngoặc kép/đơn).
+    Tự động loại bỏ chú thích (#, //), khoảng trắng thừa và lọc trùng lặp giữ nguyên thứ tự xuất hiện.
+    """
+    if not text:
+        return []
+    if isinstance(text, (list, tuple, set)):
+        text = "\n".join(str(item) for item in text)
+
+    lines = []
+    for line in str(text).splitlines():
+        line_clean = re.sub(r"(#|//).*$", "", line).strip()
+        if line_clean:
+            lines.append(line_clean)
+    cleaned_text = "\n".join(lines)
+
+    tokens = re.split(r"[\r\n,;]+", cleaned_text)
+    keys = []
+    seen = set()
+    for tok in tokens:
+        k = tok.strip().strip("'\"`[](){} \t")
+        if not k:
+            continue
+        sub_tokens = k.split()
+        for sub in sub_tokens:
+            cleaned = sub.strip().strip("'\"`[](){} \t")
+            if cleaned and cleaned not in seen:
+                seen.add(cleaned)
+                keys.append(cleaned)
+    return keys
+
+
+def add_api_keys_bulk_to_pool(raw_keys, test_before_add=False, progress_cb=None):
+    """
+    Nạp hàng loạt nhiều API Key vào pool.
+    - raw_keys: Chuỗi văn bản nhiều dòng hoặc danh sách các chuỗi key.
+    - test_before_add: Nếu True, gọi test_key() kiểm tra từng key qua Google API.
+    - progress_cb: Callback f(current, total, key, ok, message) khi kiểm tra.
+    Trả về dict: {
+        'total_input': int,
+        'added': list of str,
+        'duplicate': list of str,
+        'invalid': list of dict {'key': str, 'error': str}
+    }
+    """
+    keys = parse_api_keys_text(raw_keys)
+    with api_key_manager._lock:
+        cfg = get_config()
+        api_key_manager.load_from_config(cfg)
+        existing_keys = set(api_key_manager.get_keys())
+
+    added = []
+    duplicate = []
+    invalid = []
+    total = len(keys)
+
+    for idx, key in enumerate(keys, 1):
+        if key in existing_keys:
+            duplicate.append(key)
+            if progress_cb:
+                progress_cb(idx, total, key, False, "Đã tồn tại trong pool")
+            continue
+
+        if test_before_add:
+            ok, msg = api_key_manager.test_key(key)
+            if not ok:
+                invalid.append({"key": key, "error": msg})
+                if progress_cb:
+                    progress_cb(idx, total, key, False, msg)
+                continue
+
+        existing_keys.add(key)
+        added.append(key)
+        if progress_cb:
+            progress_cb(idx, total, key, True, "Hợp lệ và đã thêm vào pool")
+
+    if added:
+        with api_key_manager._lock:
+            cfg = get_config()
+            api_key_manager.load_from_config(cfg)
+            for key in added:
+                api_key_manager.add_key(key)
+            api_key_manager.save_to_config(cfg)
+            _save_config(cfg)
+        log(f"[API] Đã nạp hàng loạt {len(added)} key vào pool (trùng {len(duplicate)}, lỗi {len(invalid)}).")
+
+    return {
+        "total_input": total,
+        "added": added,
+        "duplicate": duplicate,
+        "invalid": invalid,
+    }
+
+
+
 def remove_api_key_from_pool(api_key):
     api_key = str(api_key or "").strip()
-    cfg = get_config()
-    api_key_manager.load_from_config(cfg)
-    removed = api_key_manager.remove_key(api_key)
-    if removed:
-        api_key_manager.save_to_config(cfg)
-        _save_config(cfg)
-        log(f"[API] Đã xóa key ...{api_key[-4:]} khỏi pool.")
-    return removed
+    with api_key_manager._lock:
+        cfg = get_config()
+        api_key_manager.load_from_config(cfg)
+        removed = api_key_manager.remove_key(api_key)
+        if removed:
+            api_key_manager.save_to_config(cfg)
+            _save_config(cfg)
+            log(f"[API] Đã xóa key ...{api_key[-4:]} khỏi pool.")
+        return removed
 
 
 def get_api_keys_pool_status():
-    cfg = get_config()
-    plain_keys = cfg.get("api_keys") or []
-    pool = cfg.get("api_keys_pool") or []
-    configured_keys = {str(key).strip() for key in plain_keys if str(key).strip()} if isinstance(plain_keys, list) else set()
-    if isinstance(pool, list):
-        configured_keys.update(str(item["key"]).strip() for item in pool if isinstance(item, dict) and item.get("key"))
-    # Refreshing the UI must not overwrite a cooldown just recorded by polling.
-    if set(api_key_manager.get_keys()) != configured_keys:
-        api_key_manager.load_from_config(cfg)
-    return api_key_manager.get_all_status()
+    with api_key_manager._lock:
+        cfg = get_config()
+        plain_keys = cfg.get("api_keys") or []
+        pool = cfg.get("api_keys_pool") or []
+        configured_keys = {str(key).strip() for key in plain_keys if str(key).strip()} if isinstance(plain_keys, list) else set()
+        if isinstance(pool, list):
+            configured_keys.update(str(item["key"]).strip() for item in pool if isinstance(item, dict) and item.get("key"))
+        # Refreshing the UI must not overwrite a cooldown just recorded by polling.
+        if set(api_key_manager.get_keys()) != configured_keys:
+            api_key_manager.load_from_config(cfg)
+        return api_key_manager.get_all_status()
 
 
 def test_api_key_in_pool(api_key):
-    get_api_keys_pool_status()
-    result = api_key_manager.test_key(api_key)
-    cfg = get_config()
-    api_key_manager.save_to_config(cfg)
-    _save_config(cfg)
-    return result
+    with api_key_manager._lock:
+        get_api_keys_pool_status()
+        result = api_key_manager.test_key(api_key)
+        cfg = get_config()
+        api_key_manager.save_to_config(cfg)
+        _save_config(cfg)
+        return result
+
+
+def test_all_api_keys_in_pool(progress_cb=None):
+    """
+    Kiểm tra toàn bộ các API Key trong pool và cập nhật trạng thái vào config.
+    progress_cb(current, total, key, status, message)
+    Trả về dict thống kê tổng thể trạng thái của pool.
+    """
+    with api_key_manager._lock:
+        cfg = get_config()
+        api_key_manager.load_from_config(cfg)
+        keys = api_key_manager.get_keys()
+
+    total = len(keys)
+    if total == 0:
+        return {
+            "total": 0,
+            "active": 0,
+            "quota_exceeded": 0,
+            "rate_limited": 0,
+            "invalid": 0,
+            "error": 0,
+            "results": [],
+        }
+
+    results = []
+    active_count = 0
+    quota_count = 0
+    rate_count = 0
+    invalid_count = 0
+    error_count = 0
+
+    for idx, key in enumerate(keys, 1):
+        ok, msg = api_key_manager.test_key(key)
+        if ok:
+            status = "ACTIVE"
+        else:
+            with api_key_manager._lock:
+                info = api_key_manager._keys_map.get(key)
+                status = info.status if (info and info.status != "ACTIVE") else "INVALID"
+        if status == "ACTIVE":
+            active_count += 1
+        elif status == "QUOTA_EXCEEDED":
+            quota_count += 1
+        elif status == "RATE_LIMITED":
+            rate_count += 1
+        elif status == "INVALID":
+            invalid_count += 1
+        else:
+            error_count += 1
+
+        results.append({"key": key, "ok": ok, "status": status, "message": msg})
+        if progress_cb:
+            progress_cb(idx, total, key, status, msg)
+
+    with api_key_manager._lock:
+        cfg = get_config()
+        api_key_manager.save_to_config(cfg)
+        _save_config(cfg)
+
+    log(f"[API] Đã kiểm tra tổng thể {total} key: {active_count} active, {quota_count} quota exceeded, {invalid_count} invalid, {rate_count} rate limited.")
+
+    return {
+        "total": total,
+        "active": active_count,
+        "quota_exceeded": quota_count,
+        "rate_limited": rate_count,
+        "invalid": invalid_count,
+        "error": error_count,
+        "results": results,
+    }
+
 
 
 class ChannelsStore:
@@ -3331,7 +3504,7 @@ def start_monitor():
             key_manager=api_key_manager,
             on_video_detected=_register_detected_video,
             stop_event=stop_event,
-            settings_provider=lambda: get_config()["predictive_polling"],
+            settings_provider=lambda: get_config().get("predictive_polling", {}),
         )
         t = threading.Thread(target=_polling_worker, args=(run_gen,), daemon=True, name="youtube-polling-reconciliation")
         _add_thread(t)
