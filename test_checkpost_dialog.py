@@ -21,6 +21,7 @@ from tiktok_dedup_engine import (
 from tiktok_dedup_ui import CheckPostDialog
 
 
+@unittest.skipIf(os.environ.get("CI", "").lower() == "true", "Interactive Tk rendering is verified on desktop runner")
 class TestCheckPostDialog(unittest.TestCase):
     """Kiểm tra toàn diện Hộp thoại Kiểm Tra Bài Đăng (CheckPostDialog)."""
 

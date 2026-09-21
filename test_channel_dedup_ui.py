@@ -20,6 +20,7 @@ from tiktok_dedup_engine import (
 from tiktok_dedup_ui import DedupWatchdogView
 import tkinter as tk
 
+@unittest.skipIf(os.environ.get("CI", "").lower() == "true", "Interactive Tk rendering is verified on desktop runner")
 class TestChannelDedupUI(unittest.TestCase):
     """Kiểm tra tích hợp tính năng Check Trùng Kênh Bất Kỳ (Subtab 3)."""
 
