@@ -1,3 +1,18 @@
+# Phiên bản 1.2.5
+
+## Điểm mới
+- **Hệ thống Dedup Watchdog Engine (Phát hiện video trùng lặp)**: Tích hợp công nghệ phân tích dữ liệu TikTok Mobile API (`group_id != aweme_id`) để nhận diện chính xác các video trùng lặp hoặc reup bị đánh bản quyền trên kênh TikTok.
+- **Hộp thoại Kiểm tra bài đăng (Check Post / Check Trùng)**: Cho phép kiểm tra trạng thái bài đăng, nhận diện video trùng lặp trên profile được chọn hoặc kênh bất kỳ (`@username`), hiển thị chi tiết mã Aweme ID, Group ID và ghi nhận vào Audit Log.
+- **Giao diện Giám sát Trùng lặp (Dedup Watchdog Workspace)**: Bổ sung không gian làm việc chuyên biệt để theo dõi tiến trình quét bài đăng ngầm, lịch sử phát hiện trùng và cảnh báo tức thì.
+
+## Cải thiện
+- **Tối ưu tốc độ khởi động Profile (Khởi động tức thì)**: Loại bỏ hoàn toàn bước đo `psutil.cpu_percent` gây block 0.5 giây cho mỗi lần mở profile, giúp quá trình mở hàng chục profile diễn ra trơn tru, liền mạch.
+- **Cập nhật cấu hình đóng gói TikTokAutoUploader**: Bổ sung `tiktok_dedup_engine` và `tiktok_dedup_ui` vào danh sách module nội bộ của ứng dụng để đảm bảo bản build đóng gói chạy ổn định.
+
+## Sửa lỗi
+- **Khắc phục lỗi bỏ qua profile khi khởi động hàng loạt (Low Res)**: Sửa triệt để hiện tượng Batch Start tự động bỏ qua profile (`Bỏ qua (Low Res)`) do hệ điều hành tạm thời tăng tải CPU hoặc RAM.
+- **Khắc phục lỗi System Resource Low**: Loại bỏ hoàn toàn ngoại lệ `SessionSetupError("System Resource Low")` và trạng thái `Bị lỗi` giả tạo khi mở profile đơn lẻ.
+
 # Phiên bản 1.2.4
 
 ## Điểm mới

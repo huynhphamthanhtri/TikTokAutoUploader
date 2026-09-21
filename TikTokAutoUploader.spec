@@ -124,6 +124,8 @@ hidden_imports += [
     'upload_preparation',
     'youtube_monitor.ngrok_owner',
     'ui_statistics',
+    'tiktok_dedup_engine',
+    'tiktok_dedup_ui',
 ]
 
 a = Analysis(
