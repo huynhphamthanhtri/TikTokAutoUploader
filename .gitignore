@@ -64,6 +64,7 @@ test_update/
 
 # Scratch work (never committed)
 scratch/
+_backup_*/
 
 # Secrets
 service_account.json

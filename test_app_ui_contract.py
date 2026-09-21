@@ -157,6 +157,13 @@ class TestAppUIContract(unittest.TestCase):
         self.assertTrue(widgets["guide_workspace"].winfo_manager())
         self.assertFalse(widgets["stats_workspace"].winfo_manager())
 
+        switch_ws("dedup")
+        self.assertTrue(widgets["dedup_workspace"].winfo_manager())
+        self.assertFalse(widgets["guide_workspace"].winfo_manager())
+
+        switch_ws("watchdog")
+        self.assertTrue(widgets["dedup_workspace"].winfo_manager())
+
     def test_classify_log_message(self):
         """Log classifier returns correct base_tag and important_tag."""
         self.assertEqual(classify_log_message("Upload failed with error 403")[0], "ERROR")

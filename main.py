@@ -7426,6 +7426,11 @@ def on_closing():
         get_watchdog_manager().stop()
     except Exception:
         pass
+    try:
+        if 'dedup_worker' in globals():
+            dedup_worker.stop()
+    except Exception:
+        pass
     root.after(500, root.destroy)
 
 def change_license_key():
@@ -8463,6 +8468,119 @@ def change_page_size(val):
 def get_profiles_statistics_snapshot():
     return profiles, projects
 
+# --------------------------------------------------------------------------
+# DEDUP WATCHDOG ENGINE INTEGRATION
+# --------------------------------------------------------------------------
+from tiktok_dedup_engine import DedupDatabase, DedupConfig, DedupWatchdogWorker, ProfileContext
+from tiktok_dedup_ui import DedupWatchdogView, CheckPostDialog
+
+def _get_dedup_profile_contexts():
+    contexts = []
+    # Đồng bộ thông tin từ TikTokManager database nếu có
+    ttm_profiles = {}
+    ttm_db_path = Path(os.path.expanduser("~")) / "AppData" / "Roaming" / "tiktokmanager" / "profiles.db"
+    if ttm_db_path.exists():
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(ttm_db_path), timeout=5.0)
+            cur = conn.cursor()
+            cur.execute("SELECT id, name, tiktok_account, sec_uid, cookie, proxy_type, proxy_host, proxy_port, proxy_username, proxy_password FROM profiles WHERE deleted_at IS NULL")
+            for r in cur.fetchall():
+                pid, pname, pacct, psec, pcookie, ptype, phost, pport, puser, ppass = r
+                p_proxy = f"{phost}:{pport}" if phost and pport else ""
+                if puser and ppass and p_proxy:
+                    p_proxy = f"{p_proxy}:{puser}:{ppass}"
+                acct_name = ""
+                if pacct:
+                    try:
+                        parsed_acc = json.loads(pacct)
+                        acct_name = parsed_acc.get("user", {}).get("uniqueId") or ""
+                    except Exception:
+                        acct_name = pacct
+                ttm_profiles[pname] = {
+                    "sec_uid": psec or "",
+                    "cookie": pcookie or "",
+                    "account": acct_name or pname,
+                    "proxy": p_proxy,
+                }
+            conn.close()
+        except Exception:
+            pass
+
+    for name, prof_data in profiles.items():
+        cfg = prof_data.get('config', {})
+        ttm_extra = ttm_profiles.get(name, {})
+        cookies = cfg.get('cookies') or cfg.get('cookie') or cfg.get('cookie_str') or ttm_extra.get('cookie', '')
+        sec_uid = cfg.get('sec_uid') or ttm_extra.get('sec_uid', '')
+        account = cfg.get('tiktok_id') or cfg.get('tiktok_account') or ttm_extra.get('account') or name
+        proxy_str = cfg.get('proxy_string') or ttm_extra.get('proxy', '')
+
+        contexts.append(ProfileContext(
+            profile_id=name,
+            tiktok_account=account,
+            sec_uid=sec_uid,
+            cookies=cookies,
+            proxy_type=cfg.get('proxy_type') or "http",
+            proxy_string=proxy_str,
+        ))
+    return contexts
+
+dedup_db = DedupDatabase(app_base_dir() / "dedup_watchdog.db")
+dedup_config = DedupConfig(enabled=False)
+dedup_worker = DedupWatchdogWorker(
+    db=dedup_db,
+    config=dedup_config,
+    profile_provider=_get_dedup_profile_contexts,
+    on_progress=lambda msg: update_status(f"[Dedup] {msg}"),
+)
+
+def _build_dedup_view(parent_frame):
+    return DedupWatchdogView(
+        parent_frame,
+        db=dedup_db,
+        worker=dedup_worker,
+        get_profiles_func=_get_dedup_profile_contexts,
+    )
+
+def check_profile_posts_dialog(profile_name: Optional[str] = None):
+    """Mở hộp thoại Kiểm tra bài đăng (Check Post / Check Trùng) chuyên biệt theo chuẩn TikTokManager."""
+    target_name = profile_name
+    if not target_name:
+        if 'tree' in globals():
+            sel = tree.selection()
+            if sel:
+                target_name = tree.item(sel[0], 'values')[0]
+        if not target_name and 'ui_widgets' in globals() and 'monetization_tree' in ui_widgets:
+            mono_tree = ui_widgets['monetization_tree']
+            sel_m = mono_tree.selection()
+            if sel_m:
+                target_name = mono_tree.item(sel_m[0], 'values')[0]
+
+    if not target_name:
+        messagebox.showwarning("Kiểm tra bài đăng", "Vui lòng chọn 1 profile trong danh sách để kiểm tra bài đăng.")
+        return
+
+    contexts = _get_dedup_profile_contexts()
+    target_ctx = None
+    for ctx in contexts:
+        if ctx.profile_id == target_name:
+            target_ctx = ctx
+            break
+
+    if not target_ctx:
+        prof_data = profiles.get(target_name, {})
+        cfg = prof_data.get('config', {})
+        target_ctx = ProfileContext(
+            profile_id=target_name,
+            tiktok_account=cfg.get('tiktok_id') or target_name,
+            sec_uid=cfg.get('sec_uid') or "",
+            cookies=cfg.get('cookies') or cfg.get('cookie') or "",
+            proxy_type=cfg.get('proxy_type') or "http",
+            proxy_string=cfg.get('proxy_string') or "",
+        )
+
+    dlg = CheckPostDialog(root, profile=target_ctx, db=dedup_db)
+
 activity_handlers = {
     'get_logs': get_activity_logs,
     'get_activity_logs': get_activity_logs,
@@ -8489,6 +8607,7 @@ ui_handlers = {
     'open_browser': open_browser,
     'get_tiktok_cookies': get_tiktok_cookies,
     'check_cookie_live': check_cookie_live,
+    'check_profile_posts_dialog': check_profile_posts_dialog,
     'inspect_tiktok_account': inspect_selected_tiktok_account,
     'refresh_all_monetization': refresh_all_monetization,
     'refresh_selected_monetization': refresh_selected_monetization,
@@ -8526,6 +8645,7 @@ ui_handlers = {
     'get_activity_logs': get_activity_logs,
     'clear_stats': clear_activity_log,
     'get_mtime': get_activity_mtime,
+    'dedup_view_builder': _build_dedup_view,
 }
 ui_widgets = build_dashboard(root, ui_state, ui_handlers)
 

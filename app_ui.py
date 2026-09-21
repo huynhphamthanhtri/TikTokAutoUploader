@@ -226,6 +226,15 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     btn_nav_guide.pack(fill="x", pady=2)
     sidebar_buttons["guide"] = btn_nav_guide
 
+    btn_nav_dedup = SidebarButton(
+        nav_container,
+        text="Quét Trùng / Gậy",
+        icon_text="🛡️",
+    )
+    btn_nav_dedup.pack(fill="x", pady=2)
+    sidebar_buttons["dedup"] = btn_nav_dedup
+    sidebar_buttons["watchdog"] = btn_nav_dedup
+
     # Projects List Section on Sidebar
     proj_header_frame = ctk.CTkFrame(sidebar, fg_color="transparent")
     proj_header_frame.pack(fill="x", padx=12, pady=(16, 4))
@@ -424,7 +433,21 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     btn_check_cookie.pack(side="left", padx=3)
     widgets["btn_check_cookie"] = btn_check_cookie
 
+    btn_check_post = ctk.CTkButton(
+        manage_left,
+        text="🔁 Check Post",
+        width=104,
+        height=32,
+        font=UIThemeTokens.FONT_BUTTON,
+        fg_color=("#0284c7", "#0369a1"),
+        hover_color=("#0369a1", "#075985"),
+        command=handlers.get('check_profile_posts_dialog', lambda: None),
+    )
+    btn_check_post.pack(side="left", padx=3)
+    widgets["btn_check_post"] = btn_check_post
+
     overflow_actions = [
+        ("🔁 Check Post (Trùng/Shadow)", handlers.get('check_profile_posts_dialog', lambda: None)),
         ("Sửa", handlers['edit_profile']),
         ("Chi tiết", handlers['view_profile_details']),
         ("Đổi tên", handlers['rename_profile']),
@@ -990,6 +1013,14 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     stats_workspace.grid_remove()
     widgets["stats_workspace"] = stats_workspace
 
+    # --------------------------------------------------------------------------
+    # WORKSPACE 8: DEDUP WATCHDOG (QUÉT TRÙNG & SHADOWBAN) WORKSPACE
+    # --------------------------------------------------------------------------
+    dedup_workspace = ctk.CTkFrame(workspace_container, fg_color="transparent")
+    dedup_workspace.grid(row=0, column=0, sticky="nsew")
+    dedup_workspace.grid_remove()
+    widgets["dedup_workspace"] = dedup_workspace
+
     # ==========================================================================
     # WORKSPACE ROUTER LOGIC
     # ==========================================================================
@@ -1004,6 +1035,8 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
         "stats": (stats_workspace, btn_nav_statistics),
         "analytics": (stats_workspace, btn_nav_statistics),
         "guide": (guide_workspace, btn_nav_guide),
+        "dedup": (dedup_workspace, btn_nav_dedup),
+        "watchdog": (dedup_workspace, btn_nav_dedup),
     }
 
     def switch_workspace(target_name: str) -> None:
@@ -1025,6 +1058,13 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
                 stats_view.reload_data(force=False)
             except Exception:
                 pass
+        elif target_name in ("dedup", "watchdog"):
+            target_key = "dedup"
+            if "dedup_view" in widgets and hasattr(widgets["dedup_view"], "refresh_data"):
+                try:
+                    widgets["dedup_view"].refresh_data()
+                except Exception:
+                    pass
         else:
             target_key = target_name
 
@@ -1034,6 +1074,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
             "monetization": (monetization_workspace, btn_nav_monetization),
             "statistics": (stats_workspace, btn_nav_statistics),
             "guide": (guide_workspace, btn_nav_guide),
+            "dedup": (dedup_workspace, btn_nav_dedup),
         }
 
         for name, (ws_frame, nav_btn) in primary_workspaces.items():
@@ -1054,11 +1095,18 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     stats_view.pack(fill="both", expand=True, padx=6, pady=6)
     widgets["stats_view"] = stats_view
 
+    # Initialize dedup watchdog workspace view if builder provided
+    if "dedup_view_builder" in handlers and callable(handlers["dedup_view_builder"]):
+        dedup_view = handlers["dedup_view_builder"](dedup_workspace)
+        dedup_view.pack(fill="both", expand=True, padx=6, pady=6)
+        widgets["dedup_view"] = dedup_view
+
     btn_nav_profiles.configure(command=lambda: switch_workspace("profiles"))
     btn_nav_youtube.configure(command=lambda: switch_workspace("youtube_studio"))
     btn_nav_monetization.configure(command=lambda: switch_workspace("monetization"))
     btn_nav_statistics.configure(command=lambda: switch_workspace("statistics"))
     btn_nav_guide.configure(command=lambda: switch_workspace("guide"))
+    btn_nav_dedup.configure(command=lambda: switch_workspace("dedup"))
 
     switch_workspace("profiles")  # Default to profiles
     widgets["switch_workspace"] = switch_workspace
@@ -1131,6 +1179,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     # Super Context Menu for Profiles Tree
     ctx_menu = Menu(root, tearoff=0)
     ctx_menu.add_command(label="🌐 Login / Mở trình duyệt", command=handlers['open_browser'])
+    ctx_menu.add_command(label="🔁 Kiểm tra bài đăng (Check Post / Check Trùng)", command=handlers.get('check_profile_posts_dialog', lambda: None))
     ctx_menu.add_command(label="Kiểm tra Cookie (Đã chọn)", command=handlers['check_cookie_live'])
     ctx_menu.add_command(label="Kiểm tra thông tin TikTok", command=handlers['inspect_tiktok_account'])
     ctx_menu.add_command(label="💰 Kiểm tra Thu nhập / KYC / CRP", command=handlers.get('check_monetization_selected', handlers.get('refresh_selected_monetization', lambda: None)))
@@ -1157,6 +1206,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
 
     # Super Context Menu for Monetization Tree
     mono_ctx_menu = Menu(root, tearoff=0)
+    mono_ctx_menu.add_command(label="🔁 Kiểm tra bài đăng (Check Post / Check Trùng)", command=handlers.get('check_profile_posts_dialog', lambda: None))
     mono_ctx_menu.add_command(label="🔍 Xem Chi Tiết Toàn Diện (Monetization & KYC)", command=handlers.get('view_monetization_details', lambda: None))
     mono_ctx_menu.add_command(label="🔄 Kiểm Tra Lại Tài Khoản Này", command=handlers.get('refresh_selected_monetization', lambda: None))
     mono_ctx_menu.add_command(label="📊 Cập nhật Views & Follower", command=handlers.get('refresh_selected_analytics', lambda: None))
