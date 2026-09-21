@@ -33,12 +33,15 @@ class TestChannelDedupUI(unittest.TestCase):
 
         # Mock messagebox để tránh popup modal chặn test
         import tkinter.messagebox as mb
+        import tiktok_dedup_ui
         self._orig_showinfo = mb.showinfo
         self._orig_showwarning = mb.showwarning
         self._orig_showerror = mb.showerror
+        self._orig_ui_mb = tiktok_dedup_ui.messagebox
         mb.showinfo = MagicMock()
         mb.showwarning = MagicMock()
         mb.showerror = MagicMock()
+        tiktok_dedup_ui.messagebox = MagicMock()
 
         # Khởi tạo Tk root ẩn để test UI components
         self.root = tk.Tk()
@@ -46,9 +49,11 @@ class TestChannelDedupUI(unittest.TestCase):
 
     def tearDown(self):
         import tkinter.messagebox as mb
+        import tiktok_dedup_ui
         mb.showinfo = self._orig_showinfo
         mb.showwarning = self._orig_showwarning
         mb.showerror = self._orig_showerror
+        tiktok_dedup_ui.messagebox = self._orig_ui_mb
         self.worker.stop()
         self.root.destroy()
         if self.db_file.exists():

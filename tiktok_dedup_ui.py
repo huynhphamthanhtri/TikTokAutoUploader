@@ -936,6 +936,7 @@ class CheckPostDialog(ctk.CTkToplevel):
         parent,
         profile: ProfileContext,
         db: Optional[DedupDatabase] = None,
+        autoload: bool = True,
         *args,
         **kwargs,
     ):
@@ -943,6 +944,7 @@ class CheckPostDialog(ctk.CTkToplevel):
         self.profile = profile
         self.db = db
         self.client = TikTokDedupApiClient(profile)
+        self._is_loading = False
 
         profile_display = profile.tiktok_account or profile.profile_id
         self.title(f"Kiểm tra bài đăng - {profile_display}")
@@ -960,7 +962,8 @@ class CheckPostDialog(ctk.CTkToplevel):
         self._username = profile.tiktok_account.lstrip("@") if profile.tiktok_account else profile.profile_id
 
         self._build_ui()
-        self.after(150, self.load_posts)
+        if autoload:
+            self.after(150, self.load_posts)
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)

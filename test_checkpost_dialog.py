@@ -32,14 +32,17 @@ class TestCheckPostDialog(unittest.TestCase):
 
         # Mock messagebox để tránh popup modal chặn test tự động
         import tkinter.messagebox as mb
+        import tiktok_dedup_ui
         self._orig_showinfo = mb.showinfo
         self._orig_showwarning = mb.showwarning
         self._orig_showerror = mb.showerror
         self._orig_askyesno = mb.askyesno
+        self._orig_ui_mb = tiktok_dedup_ui.messagebox
         mb.showinfo = MagicMock()
         mb.showwarning = MagicMock()
         mb.showerror = MagicMock()
         mb.askyesno = MagicMock(return_value=True)
+        tiktok_dedup_ui.messagebox = MagicMock()
 
         self.root = tk.Tk()
         self.root.withdraw()
@@ -55,10 +58,12 @@ class TestCheckPostDialog(unittest.TestCase):
 
     def tearDown(self):
         import tkinter.messagebox as mb
+        import tiktok_dedup_ui
         mb.showinfo = self._orig_showinfo
         mb.showwarning = self._orig_showwarning
         mb.showerror = self._orig_showerror
         mb.askyesno = self._orig_askyesno
+        tiktok_dedup_ui.messagebox = self._orig_ui_mb
         self.root.destroy()
         if self.db_file.exists():
             try:
@@ -68,7 +73,7 @@ class TestCheckPostDialog(unittest.TestCase):
 
     def test_checkpost_dialog_population_and_duplicate_detection(self):
         """Kiểm tra dialog hiển thị đúng 9 video với 2 video trùng từ payload TikTokManager."""
-        dialog = CheckPostDialog(self.root, profile=self.profile, db=self.db)
+        dialog = CheckPostDialog(self.root, profile=self.profile, db=self.db, autoload=False)
 
         # Đọc trực tiếp datares.txt
         payload_path = ROOT_DIR / "datares.txt"
@@ -119,7 +124,7 @@ class TestCheckPostDialog(unittest.TestCase):
     @patch("webbrowser.open")
     def test_checkpost_dialog_actions(self, mock_web_open):
         """Kiểm tra các nút thao tác mở link video gốc và bài đăng."""
-        dialog = CheckPostDialog(self.root, profile=self.profile, db=self.db)
+        dialog = CheckPostDialog(self.root, profile=self.profile, db=self.db, autoload=False)
         payload_path = ROOT_DIR / "datares.txt"
         with open(payload_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
