@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-sys.path.insert(0, r"e:\BK_TOOL_VIBE_AUTO_UPLOAD\VIBE_AUTO_UPLOAD-LP")
+ROOT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT_DIR))
 sys.stdout.reconfigure(encoding='utf-8')
 
 from tiktok_dedup_engine import (
@@ -23,7 +24,7 @@ class TestChannelDedupUI(unittest.TestCase):
     """Kiểm tra tích hợp tính năng Check Trùng Kênh Bất Kỳ (Subtab 3)."""
 
     def setUp(self):
-        self.db_file = Path(r"e:\BK_TOOL_VIBE_AUTO_UPLOAD\VIBE_AUTO_UPLOAD-LP\scratch\test_channel_ui.db")
+        self.db_file = ROOT_DIR / "temp_test_channel_ui.db"
         if self.db_file.exists():
             self.db_file.unlink()
         self.db = DedupDatabase(db_path=self.db_file)
@@ -77,7 +78,7 @@ class TestChannelDedupUI(unittest.TestCase):
         self.assertEqual(view._active_subtab, "channel")
 
         # 2. Đọc payload thực tế datares.txt
-        payload_path = Path(r"e:\BK_TOOL_VIBE_AUTO_UPLOAD\VIBE_AUTO_UPLOAD-LP\datares.txt")
+        payload_path = ROOT_DIR / "datares.txt"
         self.assertTrue(payload_path.exists(), "datares.txt phải tồn tại trong workspace")
 
         with open(payload_path, "r", encoding="utf-8") as f:

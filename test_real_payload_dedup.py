@@ -3,7 +3,8 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, r"e:\BK_TOOL_VIBE_AUTO_UPLOAD\VIBE_AUTO_UPLOAD-LP")
+ROOT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT_DIR))
 sys.stdout.reconfigure(encoding='utf-8')
 
 from tiktok_dedup_engine import analyze_tiktok_video, VideoItemAnalysis
@@ -12,7 +13,9 @@ class TestRealPayloadDedup(unittest.TestCase):
     """Kiểm tra nhận diện trên dữ liệu thực tế trích xuất từ TikTokManager."""
 
     def test_detect_real_duplicates_from_ttm_payload(self):
-        payload_path = r"C:\Users\huynh\AppData\Local\Programs\tiktokmanager\_decompiled\datares.txt"
+        payload_path = ROOT_DIR / "datares.txt"
+        if not payload_path.exists():
+            payload_path = Path(r"C:\Users\huynh\AppData\Local\Programs\tiktokmanager\_decompiled\datares.txt")
         with open(payload_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         

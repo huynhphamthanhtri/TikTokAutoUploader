@@ -19,7 +19,9 @@ import unittest
 from pathlib import Path
 from tiktok_dedup_engine import analyze_tiktok_video, TikTokDedupApiClient, ProfileContext
 
-MOBILE_FIXTURE_PATH = Path(__file__).resolve().parent / "scratch" / "user61172346518401_mobile_api.json"
+MOBILE_FIXTURE_PATH = Path(__file__).resolve().parent / "data" / "feeds" / "user61172346518401_mobile_api.json"
+if not MOBILE_FIXTURE_PATH.exists():
+    MOBILE_FIXTURE_PATH = Path(__file__).resolve().parent / "scratch" / "user61172346518401_mobile_api.json"
 
 # aweme_id của các video được TikTokManager gắn badge "Trùng" trong ảnh
 EXPECTED_DUP_AWEME_IDS = {

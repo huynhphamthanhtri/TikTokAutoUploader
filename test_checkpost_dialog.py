@@ -6,7 +6,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import tkinter as tk
 
-sys.path.insert(0, r"e:\BK_TOOL_VIBE_AUTO_UPLOAD\VIBE_AUTO_UPLOAD-LP")
+ROOT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT_DIR))
 sys.stdout.reconfigure(encoding='utf-8')
 
 from tiktok_dedup_engine import (
@@ -24,7 +25,7 @@ class TestCheckPostDialog(unittest.TestCase):
     """Kiểm tra toàn diện Hộp thoại Kiểm Tra Bài Đăng (CheckPostDialog)."""
 
     def setUp(self):
-        self.db_file = Path(r"e:\BK_TOOL_VIBE_AUTO_UPLOAD\VIBE_AUTO_UPLOAD-LP\scratch\test_checkpost.db")
+        self.db_file = ROOT_DIR / "temp_test_checkpost.db"
         if self.db_file.exists():
             self.db_file.unlink()
         self.db = DedupDatabase(db_path=self.db_file)
@@ -70,7 +71,7 @@ class TestCheckPostDialog(unittest.TestCase):
         dialog = CheckPostDialog(self.root, profile=self.profile, db=self.db)
 
         # Đọc trực tiếp datares.txt
-        payload_path = Path(r"e:\BK_TOOL_VIBE_AUTO_UPLOAD\VIBE_AUTO_UPLOAD-LP\datares.txt")
+        payload_path = ROOT_DIR / "datares.txt"
         self.assertTrue(payload_path.exists())
         with open(payload_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
@@ -119,7 +120,7 @@ class TestCheckPostDialog(unittest.TestCase):
     def test_checkpost_dialog_actions(self, mock_web_open):
         """Kiểm tra các nút thao tác mở link video gốc và bài đăng."""
         dialog = CheckPostDialog(self.root, profile=self.profile, db=self.db)
-        payload_path = Path(r"e:\BK_TOOL_VIBE_AUTO_UPLOAD\VIBE_AUTO_UPLOAD-LP\datares.txt")
+        payload_path = ROOT_DIR / "datares.txt"
         with open(payload_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
         dialog._on_posts_loaded(raw.get("aweme_list", []))

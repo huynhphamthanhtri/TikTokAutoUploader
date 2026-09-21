@@ -1,0 +1,233 @@
+{
+  "status_code": 0,
+  "min_cursor": 1782555560000,
+  "max_cursor": 1787861663000,
+  "has_more": 1,
+  "aweme_list": [
+    {
+      "aweme_id": "7678807350064483606",
+      "group_id": "7678807350064483606",
+      "desc": "They Dont Want You To See This Database! #firstamendment #audit #police",
+      "create_time": 1787861663,
+      "author": {
+        "uid": "7504517349170316311",
+        "unique_id": "user61172346518401",
+        "nickname": "user61172346518401"
+      },
+      "statistics": {
+        "play_count": 496,
+        "digg_count": 23,
+        "comment_count": 1,
+        "share_count": 0
+      },
+      "status": {
+        "in_reviewing": 0
+      },
+      "display_penalty_type": 0,
+      "region": "US",
+      "video": {
+        "duration": 50
+      }
+    },
+    {
+      "aweme_id": "7678772431397588226",
+      "group_id": "7671234567890123456",
+      "desc": "Virginia Trooper Turned a Traffic Stop Into a Show #shorts #police #cops",
+      "create_time": 1787844000,
+      "author": {
+        "uid": "7504517349170316311",
+        "unique_id": "user61172346518401",
+        "nickname": "user61172346518401"
+      },
+      "statistics": {
+        "play_count": 1362,
+        "digg_count": 45,
+        "comment_count": 7,
+        "share_count": 15
+      },
+      "status": {
+        "in_reviewing": 0
+      },
+      "display_penalty_type": 0,
+      "region": "US",
+      "video": {
+        "duration": 57
+      }
+    },
+    {
+      "aweme_id": "7678438252101012758",
+      "group_id": "7678438252101012758",
+      "desc": "Cop Claims He Does Not Know Who You Are #cops #shorts #firstamendment",
+      "create_time": 1787700000,
+      "author": {
+        "uid": "7504517349170316311",
+        "unique_id": "user61172346518401",
+        "nickname": "user61172346518401"
+      },
+      "statistics": {
+        "play_count": 1020,
+        "digg_count": 49,
+        "comment_count": 7,
+        "share_count": 5
+      },
+      "status": {
+        "in_reviewing": 0
+      },
+      "display_penalty_type": 0,
+      "region": "US",
+      "video": {
+        "duration": 49
+      }
+    },
+    {
+      "aweme_id": "7678413916610825494",
+      "group_id": "7678413916610825494",
+      "desc": "He Wouldnt Get Out Of The Car In Virginia #police #arrested #trafficstop",
+      "create_time": 1787690000,
+      "author": {
+        "uid": "7504517349170316311",
+        "unique_id": "user61172346518401",
+        "nickname": "user61172346518401"
+      },
+      "statistics": {
+        "play_count": 584,
+        "digg_count": 17,
+        "comment_count": 2,
+        "share_count": 2
+      },
+      "status": {
+        "in_reviewing": 0
+      },
+      "display_penalty_type": 0,
+      "region": "US",
+      "video": {
+        "duration": 57
+      }
+    },
+    {
+      "aweme_id": "7678060615272828183",
+      "group_id": "7678060615272828183",
+      "desc": "Why He Refused To Get On The Ground Raw Bodycam #cops #police #shorts",
+      "create_time": 1787543000,
+      "author": {
+        "uid": "7504517349170316311",
+        "unique_id": "user61172346518401",
+        "nickname": "user61172346518401"
+      },
+      "statistics": {
+        "play_count": 843,
+        "digg_count": 25,
+        "comment_count": 1,
+        "share_count": 0
+      },
+      "status": {
+        "in_reviewing": 0
+      },
+      "display_penalty_type": 0,
+      "region": "US",
+      "video": {
+        "duration": 41
+      }
+    },
+    {
+      "aweme_id": "7678028218963627286",
+      "group_id": "7665098765432101234",
+      "desc": "Why this cop changed his story mid-stop #trafficstop #copwatch #police",
+      "create_time": 1787530000,
+      "author": {
+        "uid": "7504517349170316311",
+        "unique_id": "user61172346518401",
+        "nickname": "user61172346518401"
+      },
+      "statistics": {
+        "play_count": 236,
+        "digg_count": 2,
+        "comment_count": 0,
+        "share_count": 0
+      },
+      "status": {
+        "in_reviewing": 0
+      },
+      "display_penalty_type": 0,
+      "region": "US",
+      "video": {
+        "duration": 46
+      }
+    },
+    {
+      "aweme_id": "7677325434337398038",
+      "group_id": "7677325434337398038",
+      "desc": "Cops Had No Reason to Detain Arizona First Amendment Auditor! #firstamendment #cops #shorts",
+      "create_time": 1787258000,
+      "author": {
+        "uid": "7504517349170316311",
+        "unique_id": "user61172346518401",
+        "nickname": "user61172346518401"
+      },
+      "statistics": {
+        "play_count": 695,
+        "digg_count": 44,
+        "comment_count": 0,
+        "share_count": 11
+      },
+      "status": {
+        "in_reviewing": 0
+      },
+      "display_penalty_type": 0,
+      "region": "US",
+      "video": {
+        "duration": 56
+      }
+    },
+    {
+      "aweme_id": "7677297230436388118",
+      "group_id": "7677297230436388118",
+      "desc": "They Tried To Kick Me Off The Property #cops #police #shorts",
+      "create_time": 1787247000,
+      "author": {
+        "uid": "7504517349170316311",
+        "unique_id": "user61172346518401",
+        "nickname": "user61172346518401"
+      },
+      "statistics": {
+        "play_count": 967,
+        "digg_count": 75,
+        "comment_count": 5,
+        "share_count": 6
+      },
+      "status": {
+        "in_reviewing": 0
+      },
+      "display_penalty_type": 0,
+      "region": "US",
+      "video": {
+        "duration": 57
+      }
+    },
+    {
+      "aweme_id": "7676954935992274198",
+      "group_id": "7676954935992274198",
+      "desc": "He Told The Cop To Stop And This Happened #shorts #police #cops",
+      "create_time": 1787110000,
+      "author": {
+        "uid": "7504517349170316311",
+        "unique_id": "user61172346518401",
+        "nickname": "user61172346518401"
+      },
+      "statistics": {
+        "play_count": 414,
+        "digg_count": 33,
+        "comment_count": 3,
+        "share_count": 2
+      },
+      "status": {
+        "in_reviewing": 0
+      },
+      "display_penalty_type": 0,
+      "region": "US",
+      "video": {
+        "duration": 52
+      }
+    }
+  ]
+}

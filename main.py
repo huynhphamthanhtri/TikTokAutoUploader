@@ -9,7 +9,7 @@ from dataclasses import replace
 from urllib.parse import urlsplit
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from typing import Any, List, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 def app_base_dir():
     if getattr(sys, "frozen", False):
