@@ -3073,23 +3073,9 @@ class VideoFolderHandler(FileSystemEventHandler):
         _mark_upload_timing(file_path, 'enqueued_at')
         profiles[self.profile_name]['queue'].put(file_path)
 
-def check_system_resources(profile_name):
-    try:
-        # Kiểm tra tài nguyên, nếu cao thì chờ 5s rồi kiểm tra lại
-        for _ in range(3):
-            mem = psutil.virtual_memory()
-            cpu = psutil.cpu_percent(interval=0.5)
-            
-            if mem.percent < 92 and cpu < 95:
-                return True
-            
-            # Nếu cao, log và đợi
-            msg = f"RAM > 90%" if mem.percent > 90 else f"CPU > 95%"
-            update_status(f"[{profile_name}] {msg}. Đợi giảm tải...")
-            time.sleep(5)
-            
-        return False
-    except Exception: return True
+def check_system_resources(profile_name=None):
+    """Kiểm tra tài nguyên hệ thống (deprecated - đã loại bỏ kiểm tra CPU/RAM để không chặn khởi động profile)."""
+    return True
 
 def after_kill_cleanup_running_profiles():
     for name in list(running_profiles):
@@ -3166,12 +3152,6 @@ def ensure_driver(profile_name, lifecycle_gen=None):
         token = None
         try:
             attempt_start = time.perf_counter()
-            if not check_system_resources(profile_name):
-                update_status(f"[{profile_name}] Tài nguyên thấp. Tạm nghỉ 5s.")
-                time.sleep(5)
-                if attempt == DRIVER_INIT_RETRIES - 1:
-                    raise SessionSetupError("System Resource Low")
-                continue
 
             update_status(f"[{profile_name}] Mở Patchright (Lần {attempt + 1})...")
             _set_profile_ui(profile_name, status='Đang khởi động', browser='Đang mở', upload='Chờ video', last_error='')
@@ -5042,10 +5022,6 @@ def _thread_sequential_start(targets, context_name):
             try:
                 if name not in profiles or profiles[name]['running']:
                     summary['already'] += 1
-                    continue
-                if not check_system_resources(name):
-                    update_status(f"[{name}] Bỏ qua (Low Res).")
-                    skip_reasons["Tài nguyên thấp"] = skip_reasons.get("Tài nguyên thấp", 0) + 1
                     continue
                 update_status(f"[{name}] Đang khởi động...")
                 start_profile(name)
