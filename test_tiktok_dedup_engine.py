@@ -279,7 +279,7 @@ class TestDedupWatchdogWorker(unittest.TestCase):
             {"id": "v_dup", "group_id": "v_other_root", "create_time": now - 7200, "desc": "Duplicate clip"},
         ]
 
-        with patch("tiktok_dedup_engine.TikTokDedupApiClient.fetch_post_feed", return_value=fake_feed), \
+        with patch("tiktok_dedup_engine.TikTokDedupApiClient.fetch_profile_posts", return_value=fake_feed), \
              patch("tiktok_dedup_engine.TikTokDedupApiClient.delete_post") as mock_del:
 
             detected = worker.scan_profile_now(self.profile)
@@ -301,7 +301,7 @@ class TestDedupWatchdogWorker(unittest.TestCase):
             {"id": "v_dup", "group_id": "v_other_root", "create_time": now - 7200, "desc": "Dup to delete"},
         ]
 
-        with patch("tiktok_dedup_engine.TikTokDedupApiClient.fetch_post_feed", return_value=fake_feed), \
+        with patch("tiktok_dedup_engine.TikTokDedupApiClient.fetch_profile_posts", return_value=fake_feed), \
              patch("tiktok_dedup_engine.TikTokDedupApiClient.delete_post", return_value=True) as mock_del:
 
             detected = worker.scan_profile_now(self.profile)
@@ -322,7 +322,7 @@ class TestDedupWatchdogWorker(unittest.TestCase):
             {"id": "v_dup", "group_id": "v_other_root", "create_time": now - 7200, "desc": "Dup to hide"},
         ]
 
-        with patch("tiktok_dedup_engine.TikTokDedupApiClient.fetch_post_feed", return_value=fake_feed), \
+        with patch("tiktok_dedup_engine.TikTokDedupApiClient.fetch_profile_posts", return_value=fake_feed), \
              patch("tiktok_dedup_engine.TikTokDedupApiClient.set_post_private", return_value=True) as mock_hide:
 
             detected = worker.scan_profile_now(self.profile)
@@ -345,6 +345,7 @@ class TestDedupWatchdogWorker(unittest.TestCase):
         self.assertFalse(worker.is_running())
 
 
+@unittest.skipIf(os.environ.get("CI", "").lower() == "true", "Interactive Tk rendering is verified on desktop runner")
 class TestDedupWatchdogView(unittest.TestCase):
     """Kiểm tra giao diện DedupWatchdogView."""
 
