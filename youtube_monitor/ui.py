@@ -51,11 +51,13 @@ class YouTubeMonitorView(ctk.CTkFrame):
         self.channel_filter_var = ctk.StringVar(value="Tất cả")
         self.search_var = ctk.StringVar(value="")
         self.channel_view_mode_var = ctk.StringVar(value="grouped")
+        self.short_under_dir_var = ctk.StringVar(value="")
 
         self._build()
         self.refresh_profiles()
         self._load_max_minutes()
         self._load_video_quality()
+        self._load_short_under_dir()
 
         # Bind responsive layout handler
         self.bind("<Configure>", self._on_configure)
@@ -237,6 +239,7 @@ class YouTubeMonitorView(ctk.CTkFrame):
         self.ctx_menu.add_command(label="🔄 Đổi Profile đích...", command=lambda: self._open_profile_picker())
         self.ctx_menu.add_command(label="⚡ Bật/Tắt theo dõi kênh", command=lambda: self._toggle_active())
         self.ctx_menu.add_command(label="✂️ Bật/Tắt điều chỉnh 40-60s", command=lambda: self._toggle_short())
+        self.ctx_menu.add_command(label="⏱️ Đổi mốc giây Shorts...", command=lambda: self._set_channel_short_duration())
         self.ctx_menu.add_separator()
         self.ctx_menu.add_command(label="📊 Xem / Sửa lịch đăng & Khung giờ...", command=lambda: self._open_schedule_dialog())
         self.ctx_menu.add_command(label="🔄 Phân tích lại lịch đăng qua API", command=lambda: self._reanalyze_schedule())
@@ -533,6 +536,47 @@ class YouTubeMonitorView(ctk.CTkFrame):
         )
         self.quality_menu.set("Tối đa 720p (Nhanh)")
         self.quality_menu.pack(side="left", fill="x", expand=True)
+
+        # Short Under-Threshold Folder Row
+        ctk.CTkLabel(
+            card_cfg,
+            text="Thư mục video ngắn (< mốc):",
+            font=UIThemeTokens.FONT_SUBTITLE,
+            text_color=UIThemeTokens.TEXT_MUTED,
+        ).pack(anchor="w", padx=10, pady=(2, 2))
+
+        short_dir_row = ctk.CTkFrame(card_cfg, fg_color="transparent")
+        short_dir_row.pack(fill="x", padx=10, pady=(0, 6))
+
+        self.short_dir_entry = ctk.CTkEntry(
+            short_dir_row,
+            textvariable=self.short_under_dir_var,
+            placeholder_text="Mặc định: downloads/shorts_under_threshold",
+            height=28,
+            font=UIThemeTokens.FONT_BODY,
+        )
+        self.short_dir_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        ctk.CTkButton(
+            short_dir_row,
+            text="Chọn...",
+            font=UIThemeTokens.FONT_BUTTON,
+            width=60,
+            height=28,
+            command=self._choose_short_under_dir,
+        ).pack(side="left", padx=(0, 3))
+
+        ctk.CTkButton(
+            short_dir_row,
+            text="📁 Mở",
+            font=UIThemeTokens.FONT_BUTTON,
+            width=48,
+            height=28,
+            fg_color=UIThemeTokens.BG_HOVER,
+            hover_color=UIThemeTokens.BORDER_LIGHT,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+            command=self._open_short_under_dir,
+        ).pack(side="right")
 
         # Diagnostics & Status Badges
         diag_frame = ctk.CTkFrame(card_cfg, corner_radius=6, fg_color=UIThemeTokens.BG_HOVER)
@@ -893,6 +937,16 @@ class YouTubeMonitorView(ctk.CTkFrame):
             self.cookie_var.set(cookie_path)
             self.cookie_display_var.set(Path(cookie_path).name)
 
+        under_dir_fn = self.handlers.get("get_short_under_dir")
+        if under_dir_fn:
+            try:
+                res = under_dir_fn()
+                val = res[1] if isinstance(res, tuple) else str(res or "")
+                if val and self.short_under_dir_var.get() != str(val):
+                    self.short_under_dir_var.set(str(val))
+            except Exception:
+                pass
+
         try:
             self._channels_data = list(self.handlers.get("get_channels", lambda: [])() or [])
         except Exception:
@@ -959,6 +1013,51 @@ class YouTubeMonitorView(ctk.CTkFrame):
             except Exception:
                 pass
 
+    def _load_short_under_dir(self):
+        try:
+            fn = self.handlers.get("get_short_under_dir")
+            if fn:
+                res = fn()
+                val = res[1] if isinstance(res, tuple) else str(res or "")
+                if val:
+                    self.short_under_dir_var.set(str(val))
+        except Exception:
+            pass
+
+    def _choose_short_under_dir(self):
+        curr = self.short_under_dir_var.get().strip()
+        folder = filedialog.askdirectory(title="Chọn thư mục lưu video ngắn dưới mốc", initialdir=curr or None, parent=self)
+        if folder:
+            self.short_under_dir_var.set(folder)
+            ok, msg = self._run_handler("set_short_under_dir", folder)
+            if ok:
+                self.append_log(f"Đã cập nhật thư mục video ngắn tập trung: {folder}", error=False)
+            else:
+                self.append_log(f"Lỗi lưu thư mục video ngắn: {msg}", error=True)
+
+    def _open_short_under_dir(self):
+        curr = self.short_under_dir_var.get().strip()
+        if not curr:
+            fn = self.handlers.get("get_short_under_dir")
+            if fn:
+                res = fn()
+                curr = res[1] if isinstance(res, tuple) else str(res or "")
+        if curr:
+            folder = os.path.normpath(curr)
+            if not os.path.exists(folder):
+                try:
+                    os.makedirs(folder, exist_ok=True)
+                except Exception:
+                    pass
+            if os.path.exists(folder):
+                try:
+                    os.startfile(folder)
+                    return
+                except Exception as e:
+                    self.append_log(f"Lỗi khi mở thư mục: {e}", error=True)
+                    return
+        self.append_log("Chưa cấu hình hoặc không tìm thấy thư mục video ngắn", error=True)
+
     def _on_channel_filter_change(self, _value=None):
         self._channels_snapshot = None
         self._render_current_channels()
@@ -1002,6 +1101,7 @@ class YouTubeMonitorView(ctk.CTkFrame):
                 item.get("profile_name", ""),
                 bool(item.get("active")),
                 bool(item.get("process_short")),
+                float(item.get("short_min_duration", 30.0)),
                 int(item.get("seen_count", 0) or 0),
                 item.get("folder", ""),
             ))
@@ -1066,7 +1166,8 @@ class YouTubeMonitorView(ctk.CTkFrame):
                 title = (item.get("title") or "").strip()
                 display_name = title if title else cid
                 status_text = "● Hoạt động" if item.get("active") else "Ⅱ Tạm dừng"
-                short_text = "⚡ 40–60s -> 61s" if item.get("process_short") else "⚪ Giữ nguyên"
+                min_sec = int(round(float(item.get("short_min_duration", 30.0))))
+                short_text = f"⚡ {min_sec}–60s -> 61s" if item.get("process_short") else "⚪ Giữ nguyên"
                 tag = "tag_active" if item.get("active") else "tag_inactive"
 
                 values = (
@@ -1099,7 +1200,8 @@ class YouTubeMonitorView(ctk.CTkFrame):
             title = (item.get("title") or "").strip()
             display_name = title if title else cid
             status_text = "● Hoạt động" if item.get("active") else "Ⅱ Tạm dừng"
-            short_text = "⚡ 40–60s -> 61s" if item.get("process_short") else "⚪ Giữ nguyên"
+            min_sec = int(round(float(item.get("short_min_duration", 30.0))))
+            short_text = f"⚡ {min_sec}–60s -> 61s" if item.get("process_short") else "⚪ Giữ nguyên"
             tag = "tag_active" if item.get("active") else "tag_inactive"
 
             values = (
@@ -1500,6 +1602,44 @@ class YouTubeMonitorView(ctk.CTkFrame):
             self._refresh_channels_after_action(preferred_cid=target_cid)
         else:
             self.append_log(f"Lỗi đổi trạng thái Shorts {target_cid}: {msg}", error=True)
+
+    def _set_channel_short_duration(self, cid: Optional[str] = None):
+        target_cid = self._resolve_target_channel(cid, require_tree=True)
+        if not target_cid:
+            return
+        valid, err = self._validate_channel_live_fail_closed(target_cid)
+        if not valid:
+            self.append_log(f"Không thể đổi mốc Shorts: {err}", error=True)
+            return
+
+        channel_item = next((c for c in self._channels_data if c.get("channel_id") == target_cid), {})
+        curr_min = channel_item.get("short_min_duration", 30.0)
+        title = channel_item.get("title") or target_cid
+
+        from tkinter import simpledialog
+        new_val = simpledialog.askstring(
+            "Cài đặt mốc Shorts",
+            f"Nhập mốc thời gian tối thiểu (giây) để xử lý Shorts cho kênh:\n'{title}'\n(Video từ mốc này đến 60s sẽ làm chậm lên 61s, dưới mốc sẽ lưu vào thư mục tập trung):",
+            initialvalue=str(int(curr_min) if float(curr_min).is_integer() else curr_min),
+            parent=self,
+        )
+        if new_val is None:
+            return
+        try:
+            val_float = float(new_val.strip())
+            if val_float <= 0 or val_float >= 60:
+                messagebox.showerror("Giá trị không hợp lệ", "Mốc giây tối thiểu phải lớn hơn 0 và nhỏ hơn 60 giây.", parent=self)
+                return
+        except ValueError:
+            messagebox.showerror("Giá trị không hợp lệ", "Vui lòng nhập một số hợp lệ (ví dụ: 30 hoặc 40).", parent=self)
+            return
+
+        ok, msg = self._run_handler("set_short_min_duration", target_cid, val_float)
+        if ok:
+            self.append_log(f"Đã cập nhật mốc Shorts kênh {title} ({target_cid}) thành {val_float:.0f}s: {msg}", error=False)
+            self._refresh_channels_after_action(preferred_cid=target_cid)
+        else:
+            self.append_log(f"Lỗi đổi mốc Shorts {target_cid}: {msg}", error=True)
 
     def _remove_with_confirm(self, cid: Optional[str] = None):
         target_cid = self._resolve_target_channel(cid, require_tree=True)

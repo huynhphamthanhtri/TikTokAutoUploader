@@ -120,6 +120,10 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn(":rollback", content)
         self.assertIn("_internal_backup", content)
         self.assertIn("update_error.txt", content)
+        self.assertIn('Start-Sleep -Seconds 3', content)
+        self.assertIn('Start-Sleep -Seconds 5', content)
+        self.assertNotIn('timeout /t', content)
+        self.assertNotIn('del "%~f0"', content)
 
 
 if __name__ == "__main__":

@@ -344,9 +344,21 @@ class TestCallbackServerHealth(unittest.TestCase):
         mock_server = MagicMock()
         mock_server.server_address = ("0.0.0.0", 5000)
         mock_make.return_value = mock_server
-        mock_get.side_effect = [Exception("timeout"), MagicMock(status_code=200)]
+        test_thread = threading.get_ident()
+        health_calls = 0
+
+        def health_response(url, **_kwargs):
+            nonlocal health_calls
+            if threading.get_ident() == test_thread and url.endswith("/youtube_health"):
+                health_calls += 1
+                if health_calls == 1:
+                    raise TimeoutError("simulated first health check timeout")
+            return MagicMock(status_code=200)
+
+        mock_get.side_effect = health_response
         ok, port = _start_callback_server(5000)
         self.assertTrue(ok)
+        self.assertEqual(health_calls, 2)
         _stop_callback_server()
 
     @patch("youtube_monitor.core.make_server")

@@ -1,3 +1,17 @@
+# Phiên bản 1.2.6
+
+## Điểm mới
+- Có thể đặt ngưỡng thời lượng Shorts riêng cho từng kênh YouTube.
+- Có thể chọn thư mục tập trung để lưu video ngắn hơn ngưỡng của kênh.
+
+## Cải thiện
+- Ngưỡng mặc định để kéo dài Shorts lên 61 giây là 30 giây; video dưới ngưỡng được lưu riêng và không đưa vào hàng đợi đăng TikTok.
+- Bổ sung các điều khiển cấu hình Shorts theo kênh trong giao diện YouTube Monitor.
+
+## Sửa lỗi
+- Lưu và nạp lại ngưỡng Shorts theo kênh qua các lần khởi động, tránh mất cấu hình đã chọn.
+- Sửa script cập nhật chạy ngầm trên Windows: chờ ứng dụng đóng đúng thời gian và trả mã kết quả chính xác sau khi cập nhật.
+
 # Phiên bản 1.2.5
 
 ## Điểm mới

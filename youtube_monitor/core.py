@@ -66,9 +66,10 @@ CSV_LOG = APP_ROOT / "downloads_log.csv"
 STATE_DB = APP_ROOT / "youtube_monitor_state.db"
 YOUTUBE_LOGIN_PROFILE = APP_ROOT / "Auto_Data" / "YouTube_Login_Profile"
 NGROK_BINARY = APP_ROOT / "ngrok.exe"
+DEFAULT_SHORT_UNDER_DIR = APP_ROOT / "downloads" / "shorts_under_threshold"
 
 NGROK_PORT_DEFAULT = 5000
-SHORT_SLOW_MIN_DURATION = 40.0
+SHORT_SLOW_MIN_DURATION = 30.0
 SHORT_SLOW_MAX_DURATION = 60.0
 SHORT_TARGET_DURATION = 61.0
 MIN_SECONDS = 61
@@ -133,6 +134,7 @@ CONFIG_DEFAULTS = {
     "poll_interval_degraded_seconds": 30,
     "poll_scan_limit": 10,
     "push_detection_mode": "auto",
+    "short_under_threshold_dir": str(DEFAULT_SHORT_UNDER_DIR),
 }
 
 FAILURE_PERMANENT = "permanent"
@@ -343,6 +345,37 @@ def set_predictive_polling(settings):
         cfg["predictive_polling"] = {**cfg["predictive_polling"], **values}
         _save_config(cfg)
     return values
+
+
+def get_short_under_threshold_dir() -> Path:
+    cfg = get_config()
+    raw = cfg.get("short_under_threshold_dir")
+    if raw and str(raw).strip():
+        p = Path(str(raw).strip())
+    else:
+        p = DEFAULT_SHORT_UNDER_DIR
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return p
+
+
+def set_short_under_threshold_dir(dir_path: str):
+    if not dir_path or not str(dir_path).strip():
+        p = DEFAULT_SHORT_UNDER_DIR
+    else:
+        p = Path(str(dir_path).strip())
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        log(f"[Config] Không tạo được thư mục video ngắn {p}: {e}")
+        return False, f"Không tạo được thư mục: {e}"
+    cfg = get_config()
+    cfg["short_under_threshold_dir"] = str(p.resolve())
+    _save_config(cfg)
+    log(f"[Config] Đã cập nhật thư mục video ngắn tập trung: {p}")
+    return True, str(p.resolve())
 
 
 def get_predictive_runtime_status():
@@ -1146,6 +1179,7 @@ class ChannelsStore:
                 "last_pub_utc": meta.get("last_pub_utc"),
                 "last_known_video_id": meta.get("last_known_video_id", ""),
                 "process_short": bool(meta.get("process_short", True)),
+                "short_min_duration": float(meta.get("short_min_duration", SHORT_SLOW_MIN_DURATION)),
                 "title": meta.get("title", ""),
                 "thumbnail": meta.get("thumbnail", ""),
                 "channel_url": meta.get("channel_url", ""),
@@ -1175,6 +1209,7 @@ class ChannelsStore:
                         "last_pub_utc": meta.get("last_pub_utc"),
                         "last_known_video_id": meta.get("last_known_video_id", ""),
                         "process_short": meta.get("process_short", True),
+                        "short_min_duration": float(meta.get("short_min_duration", SHORT_SLOW_MIN_DURATION)),
                         "title": meta.get("title", ""),
                         "thumbnail": meta.get("thumbnail", ""),
                         "channel_url": meta.get("channel_url", ""),
@@ -1236,9 +1271,13 @@ class ChannelsStore:
         with _store_lock:
             return {cid: dict(m, seen=set(m.get("seen", set()))) for cid, m in self._channels.items()}
 
-    def add_channel(self, cid, folder, profile_name="", process_short=True, title="", thumbnail="", channel_url=""):
+    def add_channel(self, cid, folder, profile_name="", process_short=True, title="", thumbnail="", channel_url="", short_min_duration=None):
         with _store_lock:
             existing = self._channels.get(cid, {})
+            try:
+                min_dur = float(short_min_duration) if short_min_duration is not None else float(existing.get("short_min_duration", SHORT_SLOW_MIN_DURATION))
+            except (ValueError, TypeError):
+                min_dur = SHORT_SLOW_MIN_DURATION
             self._channels[cid] = {
                 "folder": folder,
                 "profile_name": profile_name,
@@ -1246,6 +1285,7 @@ class ChannelsStore:
                 "seen": set(existing.get("seen", set())),
                 "last_pub_utc": existing.get("last_pub_utc"),
                 "process_short": process_short,
+                "short_min_duration": min_dur,
                 "title": title or existing.get("title", ""),
                 "thumbnail": thumbnail or existing.get("thumbnail", ""),
                 "channel_url": channel_url or existing.get("channel_url", ""),
@@ -1302,6 +1342,19 @@ class ChannelsStore:
             self._dirty = True
             self._revision += 1
             return self._channels[cid]["process_short"]
+
+    def set_short_min_duration(self, cid, min_duration):
+        with _store_lock:
+            if cid not in self._channels:
+                return None
+            try:
+                val = round(max(1.0, float(min_duration)), 1)
+            except (ValueError, TypeError):
+                val = SHORT_SLOW_MIN_DURATION
+            self._channels[cid]["short_min_duration"] = val
+            self._dirty = True
+            self._revision += 1
+            return val
 
     def get_meta(self, cid):
         with _store_lock:
@@ -2383,13 +2436,13 @@ def _cleanup_temp_dl(older_than_seconds=86400):
     return removed
 
 
-def apply_short_processing(downloaded_path, duration, process_short, log_fn=log):
+def apply_short_processing(downloaded_path, duration, process_short, log_fn=log, min_duration=None):
     """Apply the YouTube Short duration rules to a downloaded video.
 
     Rules:
     * ``process_short`` off -> video is kept unchanged.
-    * duration ``< 40s``   -> kept unchanged.
-    * duration in ``[40s, 60s]`` -> slowed down to ``SHORT_TARGET_DURATION``.
+    * duration ``< min_thresh`` -> kept unchanged (under threshold).
+    * duration in ``[min_thresh, 60s]`` -> slowed down to ``SHORT_TARGET_DURATION``.
     * duration ``> 60s``  -> kept unchanged.
     * Unknown duration (``<= 0`` or in the slow window) is re-probed from the
       downloaded file before deciding.
@@ -2397,20 +2450,21 @@ def apply_short_processing(downloaded_path, duration, process_short, log_fn=log)
     Returns ``(processed_path, created_paths)``. Raises if the slowdown helper
     fails; the original ``downloaded_path`` is never modified by this function.
     """
+    min_thresh = float(min_duration) if min_duration is not None else SHORT_SLOW_MIN_DURATION
     dur = float(duration or 0)
     processed_path, created_paths = downloaded_path, []
 
     if process_short:
-        if dur <= 0 or (SHORT_SLOW_MIN_DURATION <= dur <= SHORT_SLOW_MAX_DURATION):
+        if dur <= 0 or (min_thresh <= dur <= SHORT_SLOW_MAX_DURATION):
             actual_dur = ffmpeg_helper.probe_duration(downloaded_path)
             if actual_dur is not None and actual_dur > 0:
                 dur = actual_dur
 
-        if SHORT_SLOW_MIN_DURATION <= dur <= SHORT_SLOW_MAX_DURATION:
-            log_fn(f"[Short] Video dài {dur:.1f}s (trong khoảng 40s-60s) -> Làm chậm đạt {SHORT_TARGET_DURATION}s")
+        if min_thresh <= dur <= SHORT_SLOW_MAX_DURATION:
+            log_fn(f"[Short] Video dài {dur:.1f}s (trong khoảng {min_thresh:.0f}s-60s) -> Làm chậm đạt {SHORT_TARGET_DURATION}s")
             processed_path, created_paths = slowdown_to_min_duration_in_temp(downloaded_path, SHORT_TARGET_DURATION)
-        elif dur < SHORT_SLOW_MIN_DURATION:
-            log_fn(f"[Short] Video dài {dur:.1f}s (< 40s) -> Giữ nguyên thời lượng")
+        elif dur < min_thresh:
+            log_fn(f"[Short] Video dài {dur:.1f}s (< {min_thresh:.0f}s) -> Giữ nguyên thời lượng")
         else:
             log_fn(f"[Short] Video dài {dur:.1f}s (> 60s) -> Giữ nguyên thời lượng")
     else:
@@ -2552,15 +2606,29 @@ def _download_one_result(channel_id, video_id, published_iso=None, detected_iso=
             _permanent = True
             return DownloadOutcome(ok=False, retryable=False, permanent=True, failure_class="no_file", attempts_used=attempts_used, detail="Không tìm thấy file tải về")
 
+        meta = channels_store.get_meta(channel_id) or {}
+        short_min_dur = float(meta.get("short_min_duration", SHORT_SLOW_MIN_DURATION))
         dur = float(info.get("duration") or 0)
+        if dur <= 0 or (process_short and dur <= SHORT_SLOW_MAX_DURATION):
+            p_dur = ffmpeg_helper.probe_duration(downloaded_path)
+            if p_dur is not None and p_dur > 0:
+                dur = p_dur
+
         t_process_start = time.perf_counter()
-        processed_path, created_paths = apply_short_processing(downloaded_path, dur, process_short)
+        processed_path, created_paths = apply_short_processing(downloaded_path, dur, process_short, min_duration=short_min_dur)
         t_process_end = time.perf_counter()
         process_s = t_process_end - t_process_start
 
+        is_under_short = bool(process_short and dur < short_min_dur)
+        if is_under_short:
+            target_out_folder = str(get_short_under_threshold_dir())
+            Path(target_out_folder).mkdir(parents=True, exist_ok=True)
+        else:
+            target_out_folder = out_folder
+
         t_move = time.perf_counter()
         try:
-            final_path = _finalize_video(processed_path, out_folder, info.get("title") or video_id, video_id)
+            final_path = _finalize_video(processed_path, target_out_folder, info.get("title") or video_id, video_id)
         except Exception as e:
             log(f"[DL] Finalize lỗi {video_id}: {e}")
             try:
@@ -2591,7 +2659,8 @@ def _download_one_result(channel_id, video_id, published_iso=None, detected_iso=
 
         append_csv_log(channel_id, video_id, published_iso, detected_iso or datetime.now(timezone.utc).isoformat(), final_path)
         title = info.get("title") or video_id
-        append_activity("youtube_download", video_name=title, video_url=url, profile=activity_profile, status="success", detail=f"channel={channel_id}", file_path=final_path)
+        activity_detail = f"channel={channel_id}" if not is_under_short else f"channel={channel_id} (short_under_threshold: {dur:.1f}s < {short_min_dur:.0f}s, no upload)"
+        append_activity("youtube_download", video_name=title, video_url=url, profile=activity_profile, status="success", detail=activity_detail, file_path=final_path)
         remember_download(final_path, video_id=video_id, title=title, channel_id=channel_id, profile=activity_profile)
         today = datetime.now().strftime("%Y-%m-%d")
         if downloaded_today_date != today:
@@ -2601,10 +2670,12 @@ def _download_one_result(channel_id, video_id, published_iso=None, detected_iso=
         log(f"[DL] Đã lưu: {final_path}")
         delivery_state = "DOWNLOADED"
         delivery_reason = "download_only"
-        # Dependency inversion: the monitor must never import the application entry
-        # module. Under `python main.py`, doing so executes main.py again as module
-        # `main` and creates a second Tk root in the same process.
-        if profile_name:
+
+        if is_under_short:
+            delivery_state = "LOCAL_SHORT_SAVED"
+            delivery_reason = "under_min_duration"
+            log(f"[Short] {video_id} dài {dur:.1f}s (< {short_min_dur:.0f}s): Lưu tại thư mục tập trung, KHÔNG đẩy lên TikTok.")
+        elif profile_name:
             intent = VideoReadyIntent(
                 profile_name=profile_name,
                 final_path=str(final_path),
@@ -3748,6 +3819,7 @@ def get_channels():
             "profile_name": meta.get("profile_name", ""),
             "active": bool(meta.get("active", True)),
             "process_short": bool(meta.get("process_short", True)),
+            "short_min_duration": float(meta.get("short_min_duration", SHORT_SLOW_MIN_DURATION)),
             "seen_count": len(meta.get("seen", set())),
             "last_pub_utc": meta.get("last_pub_utc"),
             "title": meta.get("title", ""),
@@ -3782,6 +3854,14 @@ def toggle_channel_short(channel_id):
     value = channels_store.toggle_process_short(channel_id)
     channels_store.save_now()
     return True, f"Short={value}"
+
+
+def set_channel_short_min_duration(channel_id, min_duration):
+    value = channels_store.set_short_min_duration(channel_id, min_duration)
+    if value is None:
+        return False, "Không tìm thấy kênh."
+    channels_store.save_now()
+    return True, f"Mốc Shorts: {value:.0f}s"
 
 
 def rename_channel_profile(old_name, new_name):

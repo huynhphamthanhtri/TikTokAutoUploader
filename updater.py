@@ -195,7 +195,7 @@ class GitHubReleaseUpdater:
             "set \"BACKED_INTERNAL=0\"\n"
             "set \"BACKED_EXE=0\"\n"
             "echo Đang chờ ứng dụng đóng...\n"
-            "timeout /t 3 /nobreak >nul\n"
+            'powershell -NoProfile -Command "Start-Sleep -Seconds 3" >nul 2>&1\n'
             "echo Đang thay thế tệp ứng dụng...\n"
             f'set "APP_DIR=%~dp0"\n'
             f'set "NEW_DIR={extracted_app_dir.resolve()}"\n'
@@ -213,11 +213,10 @@ class GitHubReleaseUpdater:
             f'if not exist "%APP_DIR%{APP_NAME}.exe" goto rollback\n'
             f'echo Đang khởi động phiên bản mới...\n'
             f'start "" "%APP_DIR%{APP_NAME}.exe" || goto rollback\n'
-            f'timeout /t 5 /nobreak >nul\n'
+            'powershell -NoProfile -Command "Start-Sleep -Seconds 5" >nul 2>&1\n'
             f'rmdir /s /q "%APP_DIR%_internal_backup" 2>nul\n'
             f'del "%APP_DIR%{APP_NAME}.exe.backup" 2>nul\n'
             f'del "%APP_DIR%update_error.txt" 2>nul\n'
-            f'del "%~f0"\n'
             f'exit /b 0\n'
             f':rollback\n'
             f'echo Không thể cài đặt bản cập nhật. Đang khôi phục phiên bản cũ...\n'
@@ -231,7 +230,6 @@ class GitHubReleaseUpdater:
             f')\n'
             f'echo Cập nhật thất bại. Ứng dụng đã khôi phục phiên bản trước.> "%APP_DIR%update_error.txt"\n'
             f'if exist "%APP_DIR%{APP_NAME}.exe" start "" "%APP_DIR%{APP_NAME}.exe"\n'
-            f'del "%~f0"\n'
             f'exit /b 1\n'
         )
         with open(script_path, "w", encoding="utf-8") as f:
