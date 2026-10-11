@@ -104,7 +104,7 @@ class TestShortPerChannelConfig(unittest.TestCase):
         self.assertTrue(outcome.ok, msg=f"Download failed: {outcome.detail} ({outcome.failure_class})")
 
         # Final video must be placed in central directory, NOT channel folder
-        self.assertTrue(str(outcome.final_path).startswith(str(central_dir)))
+        self.assertEqual(Path(outcome.final_path).resolve().parent, central_dir.resolve())
         self.assertTrue(Path(outcome.final_path).exists())
 
         # Crucial check: VideoReadyIntent must NOT have been emitted to TikTok
@@ -143,7 +143,7 @@ class TestShortPerChannelConfig(unittest.TestCase):
         self.assertTrue(outcome.ok, msg=f"Download failed: {outcome.detail} ({outcome.failure_class})")
 
         # Final video must be placed in channel folder
-        self.assertTrue(str(outcome.final_path).startswith(str(channel_folder)))
+        self.assertEqual(Path(outcome.final_path).resolve().parent, channel_folder.resolve())
 
         # Slowdown helper MUST be called
         mock_slow.assert_called_once_with(str(fake_video_file), core.SHORT_TARGET_DURATION)
@@ -184,7 +184,7 @@ class TestShortPerChannelConfig(unittest.TestCase):
         self.assertTrue(outcome.ok, msg=f"Download failed: {outcome.detail} ({outcome.failure_class})")
 
         # Since threshold is 40s, 35s is under threshold -> central dir, NO upload
-        self.assertTrue(str(outcome.final_path).startswith(str(central_dir)))
+        self.assertEqual(Path(outcome.final_path).resolve().parent, central_dir.resolve())
         mock_emit.assert_not_called()
         mock_slow.assert_not_called()
 
