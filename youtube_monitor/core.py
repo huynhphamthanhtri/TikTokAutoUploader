@@ -3119,8 +3119,12 @@ def _recover_ngrok(run_gen):
 
 
 def _wait_recovery(seconds):
-    _recovery_kick.wait(seconds)
-    _recovery_kick.clear()
+    end_time = time.time() + max(0.0, float(seconds))
+    while not stop_event.is_set() and time.time() < end_time:
+        remaining = end_time - time.time()
+        if _recovery_kick.wait(timeout=min(0.2, max(0.01, remaining))):
+            _recovery_kick.clear()
+            break
 
 
 def retry_ngrok_recovery():
@@ -3651,6 +3655,7 @@ def set_websub_health(ok, error_msg=""):
 def _force_stop():
     global _monitor_started, _monitor_started_epoch, _monitor_session_id, _callback_server, _callback_server_thread, _callback_port, _callback_instance_id, public_callback_url, public_callback_verified
     stop_event.set()
+    _recovery_kick.set()
     _stop_callback_server()
     _stop_active_tunnel()
     _join_all_threads(timeout=3)
@@ -3676,6 +3681,7 @@ def stop_monitor():
             return True, "YouTube Monitor chưa chạy."
         _set_monitor_state("STOPPING")
         stop_event.set()
+        _recovery_kick.set()
         channels_store.stop_autosave()
         _stop_callback_server()
         _stop_active_tunnel()

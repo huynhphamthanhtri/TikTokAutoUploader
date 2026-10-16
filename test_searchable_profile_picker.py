@@ -1,3 +1,4 @@
+import os
 import queue
 import threading
 import unittest
@@ -160,6 +161,7 @@ class TestProfilePickerFieldAndHelpers(unittest.TestCase):
         field.destroy()
 
 
+@unittest.skipIf(os.environ.get("CI", "").lower() == "true", "Interactive Tk dialogs are verified on a desktop runner")
 class TestSearchableProfilePickerModalHardened(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
