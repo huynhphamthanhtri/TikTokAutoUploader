@@ -211,7 +211,29 @@ class PatchrightBrowserTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             config.headed = False
         self.browser.open_session(config).result(2)
-        self.assertFalse(self.playwright.chromium.launches[0][1]["headless"])
+        launch_kwargs = self.playwright.chromium.launches[0][1]
+        self.assertFalse(launch_kwargs["headless"])
+        self.assertTrue(launch_kwargs.get("no_viewport"))
+        self.assertNotIn("viewport", launch_kwargs)
+
+    def test_default_viewport_none_passes_no_viewport_true(self):
+        """Khi viewport là None, PatchrightBrowser phải truyền no_viewport=True để giữ toàn màn hình."""
+        config = BrowserSessionConfig(self.profile)
+        self.browser.open_session(config).result(2)
+        launch_kwargs = self.playwright.chromium.launches[0][1]
+        self.assertTrue(launch_kwargs.get("no_viewport"))
+        self.assertNotIn("viewport", launch_kwargs)
+
+    def test_build_session_config_includes_start_maximized(self):
+        """Cấu hình khởi tạo session phải chứa cờ --start-maximized trong args."""
+        from browser_patchright_glue import build_session_config
+        app_cfg = {
+            "browser_profile_path": self.profile,
+            "browser_executable": r"C:\browser\chrome.exe",
+        }
+        session_cfg = build_session_config(app_cfg)
+        self.assertIn("--start-maximized", session_cfg.args)
+
 
     def test_profile_is_exclusive_and_reopen_increments_generation(self):
         first = self.open()

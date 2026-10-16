@@ -78,6 +78,7 @@ from browser_maintenance import (
     maintain_browser,
 )
 import browser_patchright_glue as browser_glue
+from tiktok_direct_uploader import run_direct_upload
 from browser_patchright_glue import (
     PatchrightOwnershipConflict,
     ProfileBusyError,
@@ -3334,6 +3335,10 @@ def _on_video_detected(intent):
     lc = get_lifecycle(profile_name)
     if lc.is_cancelled:
         return
+    upload_mode = str(profiles[profile_name].get('config', {}).get('upload_mode', 'auto') or 'auto').strip().lower()
+    if upload_mode in ('auto', 'api'):
+        # Mặc định đăng qua API, không prewarm browser để tiết kiệm tài nguyên
+        return
     _preparation_coordinator.submit(profile_name, lc.generation, _prewarm_browser)
 
 
@@ -3376,28 +3381,75 @@ def upload_video(profile_name, video_path):
                 if not profiles.get(profile_name, {}).get('running', False) or get_lifecycle(profile_name).is_cancelled:
                     last_error = 'cancelled_safe'
                     break
-                phase_started = time.perf_counter()
-                token = ensure_driver(profile_name)
-                record_phase('ensure_driver_seconds', phase_started)
-                update_status(f"[{profile_name}] Đang đăng: {short_name}")
-                _set_profile_ui(profile_name, upload='Đang tải video', last_error='')
-                phase_started = time.perf_counter()
-                upload_invoked = True
-                result = browser_glue.run_upload(
-                    token,
-                    video_path,
-                    status_callback=lambda message: update_status(f"[{profile_name}] {message}"),
-                    stop_before_post=os.environ.get('UPLOAD_TEST_STOP_BEFORE_POST') == '1',
-                )
-                # Patchright owns before_dispatch=mark_post_dispatch_started semantics.
-                record_phase('patchright_upload_seconds', phase_started)
+                prof_cfg = profiles.get(profile_name, {}).get('config', {})
+                upload_mode = str(prof_cfg.get('upload_mode', 'auto') or 'auto').strip().lower()
+
+                result = None
+                # Engine 1: Thử Direct API Upload nếu mode là 'api' hoặc 'auto'
+                if upload_mode in ('api', 'auto'):
+                    api_phase = time.perf_counter()
+                    update_status(f"[{profile_name}] Đang tải lên qua API: {short_name}")
+                    _set_profile_ui(profile_name, upload='Đang tải video (API)', last_error='')
+                    try:
+                        default_caption = Path(video_path).stem
+                        api_res = run_direct_upload(
+                            profile_name=profile_name,
+                            profile_config=prof_cfg,
+                            video_path=video_path,
+                            caption=default_caption,
+                            status_callback=lambda message: update_status(f"[{profile_name}] {message}"),
+                            stop_before_post=os.environ.get('UPLOAD_TEST_STOP_BEFORE_POST') == '1',
+                            cancellation_event=getattr(get_lifecycle(profile_name), 'cancellation_event', None) or getattr(get_lifecycle(profile_name), '_cancel_event', None),
+                            workspace_dir=Path(os.path.dirname(os.path.abspath(__file__))),
+                        )
+                        record_phase('api_upload_seconds', api_phase)
+                        if api_res.outcome in ('posted', 'prepared'):
+                            result = api_res
+                            upload_invoked = True
+                        elif upload_mode == 'api':
+                            result = api_res
+                            upload_invoked = True
+                        else:
+                            # Mode 'auto': nếu gặp lỗi tài khoản bị block thì dừng hẳn
+                            if api_res.outcome == 'rejected' and str(api_res.details.get('rejection_scope') or '') == 'account_posting_blocked':
+                                result = api_res
+                                upload_invoked = True
+                            else:
+                                update_status(f"[{profile_name}] [INFO] API Upload chưa hoàn tất ({api_res.message}), tự động chuyển sang Browser Fallback...")
+                                result = None
+                    except Exception as api_err:
+                        if upload_mode == 'api':
+                            raise
+                        update_status(f"[{profile_name}] [WARN] API Upload gặp lỗi ({api_err}), chuyển sang Browser Fallback...")
+                        result = None
+
+                # Engine 2: Nếu chưa có kết quả (Mode browser hoặc Fallback từ API)
+                if result is None:
+                    phase_started = time.perf_counter()
+                    token = ensure_driver(profile_name)
+                    record_phase('ensure_driver_seconds', phase_started)
+                    update_status(f"[{profile_name}] Đang đăng (Browser): {short_name}")
+                    _set_profile_ui(profile_name, upload='Đang tải video (Browser)', last_error='')
+                    phase_started = time.perf_counter()
+                    upload_invoked = True
+                    result = browser_glue.run_upload(
+                        token,
+                        video_path,
+                        status_callback=lambda message: update_status(f"[{profile_name}] {message}"),
+                        stop_before_post=os.environ.get('UPLOAD_TEST_STOP_BEFORE_POST') == '1',
+                    )
+                    # Patchright owns before_dispatch=mark_post_dispatch_started semantics.
+                    record_phase('patchright_upload_seconds', phase_started)
+
                 benchmark_post_clicked = bool(result.post_dispatched)
                 benchmark_outcome = str(result.outcome or '')
                 last_error = result.message or result.outcome
 
                 if result.outcome == 'posted':
                     benchmark_success = True
-                    _set_profile_ui(profile_name, upload='Đã đăng', last_error='')
+                    is_api_post = str(result.details.get('engine') or '') == 'api_direct' or result.confirmation == 'api'
+                    engine_label = 'Đã đăng (API)' if is_api_post else 'Đã đăng'
+                    _set_profile_ui(profile_name, upload=engine_label, last_error='')
                     _advance_patchright_migration(
                         profiles[profile_name]['config'],
                         MigrationState.LOGIN_VERIFIED.value,
@@ -3417,12 +3469,13 @@ def upload_video(profile_name, video_path):
                         os.remove(video_path)
                     except Exception as error:
                         update_status(f"[{profile_name}] [WARN] Đã đăng nhưng không xóa được video: {error}")
-                    try:
-                        _export_live_cookies_to_config(token, profile_name)
-                    except Exception as error:
-                        update_status(f"[{profile_name}] [WARN] Đã đăng nhưng không lưu được cookie live: {error}")
-                    if not profiles[profile_name]['config'].get('open_only_when_video', False):
-                        _return_to_upload_page(profile_name)
+                    if token is not None:
+                        try:
+                            _export_live_cookies_to_config(token, profile_name)
+                        except Exception as error:
+                            update_status(f"[{profile_name}] [WARN] Đã đăng nhưng không lưu được cookie live: {error}")
+                        if not profiles[profile_name]['config'].get('open_only_when_video', False):
+                            _return_to_upload_page(profile_name)
                     return True
 
                 if result.outcome == 'prepared':
@@ -3705,7 +3758,10 @@ def process_video_queue_thread(profile_name):
             else:
                 _set_profile_ui(profile_name, upload='Đăng lỗi')
             profiles[profile_name]['queue'].task_done()
-            if open_only and profiles.get(profile_name, {}).get('running') and profiles[profile_name]['queue'].empty():
+            open_only = config.get('open_only_when_video', False)
+            upload_mode = str(config.get('upload_mode', 'auto') or 'auto').strip().lower()
+            should_close = open_only or (upload_mode in ('auto', 'api') and _browser_session_valid(profiles.get(profile_name, {}).get('driver')))
+            if should_close and profiles.get(profile_name, {}).get('running') and profiles[profile_name]['queue'].empty():
                 close_profile_browser(profile_name)
         except KeyError:
             update_status(f"[{profile_name}] Profile đã bị xóa, dừng queue thread.")
@@ -5007,6 +5063,34 @@ def update_profile_list(*args):
 _batch_start_in_progress = False
 _batch_stop_in_progress = False
 
+def _is_profile_ready_after_start(name: str) -> bool:
+    """Kiểm tra xem profile đã sẵn sàng sau khi khởi động hay chưa.
+    - Với chế độ API / Lazy browser (không mở browser trước):
+      Sẵn sàng ngay khi Watchdog đã được kích hoạt (profiles[name]['watch_started_at'])
+      hoặc khi browser fallback đã mở hợp lệ.
+    - Với chế độ Browser truyền thống:
+      Sẵn sàng khi browser session hợp lệ.
+    """
+    if name not in profiles or not profiles[name].get('running', False):
+        return False
+
+    config = profiles[name].get('config') or {}
+    upload_mode = str(config.get('upload_mode', 'auto') or 'auto').strip().lower()
+    is_lazy = upload_mode in ('auto', 'api') or config.get('open_only_when_video', False)
+
+    if is_lazy:
+        # Nếu ở chế độ API hoặc Lazy browser:
+        # 1. Watchdog đã bắt đầu theo dõi thư mục video -> ĐÃ SẴN SÀNG!
+        if profiles[name].get('watch_started_at') is not None:
+            return True
+        # 2. Hoặc browser fallback đã mở hợp lệ -> ĐÃ SẴN SÀNG!
+        if _browser_session_valid(profiles[name].get('driver')):
+            return True
+        return False
+
+    # Chế độ Browser truyền thống: Cần browser driver hợp lệ
+    return _browser_session_valid(profiles[name].get('driver'))
+
 def _thread_sequential_start(targets, context_name):
     global _batch_start_in_progress
     try:
@@ -5029,13 +5113,13 @@ def _thread_sequential_start(targets, context_name):
 
                 start_t = time.time()
                 while time.time() - start_t < START_PROFILE_TIMEOUT:
-                    if _browser_session_valid(profiles[name].get('driver')): break
+                    if _is_profile_ready_after_start(name): break
                     if not profiles[name]['running']: break
-                    time.sleep(1)
+                    time.sleep(0.5)
 
-                if _browser_session_valid(profiles[name].get('driver')):
+                if _is_profile_ready_after_start(name):
                     update_status(f"[{name}] OK ({time.time()-start_t:.1f}s).")
-                    time.sleep(1)
+                    time.sleep(0.5)
                 elif not profiles[name]['running']: pass
                 else:
                     update_status(f"[{name}] Timeout. Dừng.")
@@ -5238,9 +5322,11 @@ def start_profile(name=None):
     if auto_created:
         update_status(f"[{name}] Đã tự động tạo thư mục còn thiếu.")
 
+    upload_mode = str(config.get('upload_mode', 'auto') or 'auto').strip().lower()
+    initial_browser_ui = 'Chờ video' if (upload_mode in ('auto', 'api') or config.get('open_only_when_video', False)) else 'Đang mở'
     profiles[name]['running'] = True
     running_profiles.add(name)
-    _set_profile_ui(name, status='Đang khởi động', browser='Đang mở', upload='Chờ video', last_error='', refresh=False)
+    _set_profile_ui(name, status='Đang khởi động', browser=initial_browser_ui, upload='Chờ video', last_error='', refresh=False)
     update_profile_list()
 
     def _worker():
@@ -5248,22 +5334,50 @@ def start_profile(name=None):
             if name not in profiles or not profiles[name].get('running', False) or lc.is_cancelled or not lc.is_current(start_gen):
                 return
 
-            if config.get('open_only_when_video', False):
-                profiles[name]['watch_started_at'] = time.time()
+            upload_mode = str(config.get('upload_mode', 'auto') or 'auto').strip().lower()
+
+            # Mặc định đăng bằng API hoặc Chế độ chỉ mở khi có video: Không mở browser trước
+            if upload_mode in ('auto', 'api') or config.get('open_only_when_video', False):
                 try:
                     mgr = get_watchdog_manager()
                     ok_sched, msg = mgr.schedule_folder(name, config["folder_path"], start_gen)
                     if not ok_sched:
                         update_status(f"[{name}] Không thể theo dõi thư mục: {msg}")
+                        stop_profile(name)
                         return
+                    profiles[name]['watch_started_at'] = time.time()
                     adopted = _reconcile_startup_folder(name, config["folder_path"], start_gen)
                     if adopted:
                         update_status(f"[{name}] Đã tiếp nhận {adopted} video có sẵn trong thư mục.")
                 except Exception as e:
                     update_status(f"[{name}] Lỗi khởi tạo watchdog: {e}")
+                    stop_profile(name)
                     return
-                _set_profile_ui(name, status='Đang chạy', browser='Chờ video', upload='Chờ video mới')
-                update_status(f"[{name}] Chế độ chỉ mở khi có video mới: bỏ qua video cũ, đang chờ video mới.")
+
+                from tiktok_cookie_extractor import check_profile_api_readiness
+                api_ok, api_msg, _ = check_profile_api_readiness(config, Path(os.path.dirname(os.path.abspath(__file__))))
+
+                if upload_mode == 'api':
+                    if not api_ok:
+                        update_status(f"[{name}] [API Check Lỗi]: {api_msg}. Vui lòng bấm 'Mở Chrome' để đăng nhập trước khi chạy chế độ Chỉ API.")
+                        _set_profile_ui(name, status='Lỗi', browser='Cần đăng nhập', last_error=api_msg)
+                        stop_profile(name)
+                        return
+                    browser_desc = 'Chờ video (Chỉ API - Sẵn sàng)'
+                    status_desc = f'Chế độ chỉ API: {api_msg}. Đang chờ video mới...'
+                elif upload_mode == 'auto':
+                    if api_ok:
+                        browser_desc = 'Chờ video (API Sẵn sàng)'
+                        status_desc = f'Mặc định đăng API: {api_msg}.'
+                    else:
+                        browser_desc = 'Chờ video (Fallback Browser)'
+                        status_desc = f'Mặc định đăng API: {api_msg}. Sẽ mở trình duyệt khi có video mới.'
+                else:
+                    browser_desc = 'Chờ video'
+                    status_desc = 'Chế độ chỉ mở khi có video mới: bỏ qua video cũ, đang chờ video mới.'
+
+                _set_profile_ui(name, status='Đang chạy', browser=browser_desc, upload='Chờ video mới')
+                update_status(f"[{name}] {status_desc}")
                 threading.Thread(target=process_video_queue_thread, args=(name,), daemon=True).start()
                 return
 
@@ -5374,7 +5488,10 @@ def close_profile_browser(name):
         except Exception:
             pass
     kill_stale_chrome_processes(name)
-    _set_profile_ui(name, browser='Đã đóng', upload='Chờ video mới')
+    cfg = profiles.get(name, {}).get('config', {})
+    up_mode = str(cfg.get('upload_mode', 'auto') or 'auto').strip().lower()
+    browser_lbl = 'Chờ video (Ưu tiên API)' if up_mode == 'auto' else ('Không mở (Chỉ API)' if up_mode == 'api' else 'Đã đóng')
+    _set_profile_ui(name, browser=browser_lbl, upload='Chờ video mới')
     update_status(f"[{name}] Hết video mới trong hàng chờ, đã đóng trình duyệt để tiết kiệm tài nguyên.")
 
 def stop_profile(selected_name=None):

@@ -234,6 +234,22 @@ async def upload_tiktok(
             url = str(getattr(response, "url", ""))
             request = getattr(response, "request", None)
             method = str(getattr(request, "method", "POST")).upper()
+            url_lower = url.lower()
+            if any(term in url_lower for term in ("upload", "tiktokcdn", "project", "post", "top/v1", "api/v1")):
+                try:
+                    status_c = int(getattr(response, "status", 0) or 0)
+                    body_txt = (await response.text())[:4000]
+                    entry_res = {
+                        "url": url,
+                        "status": status_c,
+                        "method": method,
+                        "req_headers": dict(getattr(request, "headers", {}) or {}),
+                        "body": body_txt,
+                    }
+                    with open("captured_all_tiktok_responses.jsonl", "a", encoding="utf-8") as f:
+                        f.write(json.dumps(entry_res, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
             if POST_ENDPOINT_FRAGMENT not in url or method != "POST":
                 return
             status = int(getattr(response, "status", 0) or 0)
@@ -246,6 +262,11 @@ async def upload_tiktok(
                     payload = {}
             code = payload.get("status_code", payload.get("statusCode")) if isinstance(payload, dict) else None
             response_state.update(http_status=status, status_code=code, payload=payload, seen=True)
+            try:
+                with open("captured_ground_truth_response.json", "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
             if not 200 <= status < 300 or (code is not None and code != 0):
                 response_state["rejected"] = True
             elif code == 0:
@@ -262,9 +283,34 @@ async def upload_tiktok(
         try:
             url = str(getattr(request, "url", ""))
             method = str(getattr(request, "method", "")).upper()
-            if POST_ENDPOINT_FRAGMENT in url and method == "POST":
+            url_lower = url.lower()
+            if any(term in url_lower for term in ("upload", "tiktokcdn", "project", "post", "top/v1", "api/v1")):
+                try:
+                    pdata = getattr(request, "post_data", "") or ""
+                    pdata_repr = f"<binary len={len(pdata)}>" if len(pdata) > 20000 else pdata
+                    payload_entry = {
+                        "url": url,
+                        "method": method,
+                        "headers": dict(getattr(request, "headers", {}) or {}),
+                        "post_data": pdata_repr,
+                    }
+                    with open("captured_all_tiktok_posts.jsonl", "a", encoding="utf-8") as f:
+                        f.write(json.dumps(payload_entry, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+            if (POST_ENDPOINT_FRAGMENT in url or "/project/post" in url) and method == "POST":
                 dispatch_state["request_seen"] = True
                 dispatch_state["request_url"] = url
+                try:
+                    payload_entry = {
+                        "url": url,
+                        "headers": dict(getattr(request, "headers", {}) or {}),
+                        "post_data": getattr(request, "post_data", ""),
+                    }
+                    with open("captured_ground_truth_post.json", "w", encoding="utf-8") as f:
+                        json.dump(payload_entry, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -287,6 +333,8 @@ async def upload_tiktok(
         if not path.is_file():
             return result("failed", f"Video file does not exist: {path}")
         _raise_if_cancelled(cancellation_event)
+        page.on("request", request_listener)
+        page.on("response", response_listener)
         await report(f"Opening TikTok upload page for {path.name}")
         _t = time.perf_counter()
         if await upload_surface_ready(page):
@@ -329,10 +377,6 @@ async def upload_tiktok(
         baseline_success = set(await _visible_texts(page.locator(SELECTORS["success"])))
         baseline_url = str(getattr(page, "url", ""))
 
-        # Register before click. This listener remains active throughout the
-        # confirmation window so a fast request/response cannot be missed.
-        page.on("request", request_listener)
-        page.on("response", response_listener)
         await report(f"Dispatching Post for {path.name}")
         _raise_if_cancelled(cancellation_event)
         _t = time.perf_counter()
@@ -493,6 +537,12 @@ async def _wait_for_confirmation(
     success_url_parts = ("/tiktokstudio/content", "/creator-center/content", "/manage")
     while time.monotonic() < deadline:
         _raise_if_cancelled(cancellation_event)
+        try:
+            post_now = page.locator("xpath=//div[(contains(@class,'TUXModal') or @role='dialog') and .//*[contains(normalize-space(),'Continue to post')]]//button[normalize-space()='Post now' or .//*[normalize-space()='Post now']]").first
+            if await post_now.count() > 0 and await post_now.is_visible():
+                await post_now.click()
+        except Exception:
+            pass
         if response_state.get("rejected"):
             return "rejected"
         if response_state.get("confirmed"):

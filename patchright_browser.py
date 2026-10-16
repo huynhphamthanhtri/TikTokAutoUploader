@@ -294,6 +294,8 @@ class PatchrightBrowser:
                     "width": config.viewport[0],
                     "height": config.viewport[1],
                 }
+            else:
+                kwargs["no_viewport"] = True
             if config.locale is not None:
                 kwargs["locale"] = config.locale
             if config.timezone_id is not None:

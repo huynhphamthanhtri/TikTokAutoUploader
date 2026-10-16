@@ -612,7 +612,22 @@ class CreateEditProfileModal(SafeCTkToplevel):
 
         ctk.CTkLabel(f1, text="Ghi Chú:", font=UIThemeTokens.FONT_BODY).pack(anchor="w", pady=(0, 2))
         self.note_var = ctk.StringVar(value=str(self.initial_config.get("note", "")))
-        ctk.CTkEntry(f1, textvariable=self.note_var, height=30).pack(fill="x")
+        ctk.CTkEntry(f1, textvariable=self.note_var, height=30).pack(fill="x", pady=(0, 8))
+
+        # Chế độ tải lên (Upload Engine)
+        ctk.CTkLabel(f1, text="Chế Độ Đăng Video (Upload Engine):", font=UIThemeTokens.FONT_BODY).pack(anchor="w", pady=(0, 2))
+        raw_mode = str(self.initial_config.get("upload_mode", "auto")).lower()
+        self._mode_reverse_map = {
+            "Tự động (Ưu tiên API, lỗi sang Browser)": "auto",
+            "Chỉ API (Nhanh, không mở Chrome)": "api",
+            "Chỉ Trình duyệt (Patchright Chrome)": "browser",
+        }
+        mode_forward_map = {v: k for k, v in self._mode_reverse_map.items()}
+        self.upload_mode_var = ctk.StringVar(value=mode_forward_map.get(raw_mode, mode_forward_map["auto"]))
+        ctk.CTkOptionMenu(f1, values=list(self._mode_reverse_map.keys()), variable=self.upload_mode_var, height=30).pack(fill="x", pady=(0, 6))
+
+        self.bypass_proxy_chunks_var = ctk.BooleanVar(value=bool(self.initial_config.get("upload_bypass_hosts", True)))
+        ctk.CTkCheckBox(f1, text="Bypass Proxy khi upload video (Tiết kiệm dung lượng Proxy)", variable=self.bypass_proxy_chunks_var, font=UIThemeTokens.FONT_BODY).pack(anchor="w", pady=(0, 4))
 
         # --- TAB 2: Proxy & Mạng ---
         f2 = ctk.CTkFrame(tab_proxy, fg_color="transparent")
@@ -708,6 +723,8 @@ class CreateEditProfileModal(SafeCTkToplevel):
         new_config["project_name"] = self.project_var.get().strip()
         new_config["tiktok_account"] = self.tiktok_var.get().strip()
         new_config["note"] = self.note_var.get().strip()
+        new_config["upload_mode"] = self._mode_reverse_map.get(self.upload_mode_var.get(), "auto")
+        new_config["upload_bypass_hosts"] = bool(self.bypass_proxy_chunks_var.get())
         new_config["use_proxy"] = self.use_proxy_var.get()
         new_config["proxy_type"] = self.proxy_type_var.get().strip().lower()
         new_config["proxy_string"] = self.proxy_str_var.get().strip()

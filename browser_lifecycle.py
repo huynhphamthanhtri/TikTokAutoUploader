@@ -43,6 +43,10 @@ class ProfileLifecycle:
     def is_cancelled(self):
         return self._cancel_event.is_set()
 
+    @property
+    def cancellation_event(self):
+        return self._cancel_event
+
     def is_current(self, gen):
         return gen == self.generation and not self.is_cancelled
 

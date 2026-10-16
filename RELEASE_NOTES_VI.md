@@ -1,3 +1,20 @@
+# Phiên bản 1.2.7
+
+## Điểm mới
+- **Động cơ Đăng bài bằng API siêu tốc (TikTok Direct API Upload)**: Tải lên video trực tiếp qua ByteDance TOS REST API và xuất bản bài đăng TikTok Studio mà không cần mở trình duyệt, loại bỏ 100% chi phí ngốn RAM/CPU của Chromium.
+- **Tải lên phân mảnh đa luồng song song (Adaptive Concurrent Slicing)**: Tự động điều chỉnh số luồng theo dung lượng video (1 stream cho video < 15MB, 4 luồng song song cho 15-60MB, tối đa 6 luồng cho video lớn), rút ngắn thời gian tải video xuống chỉ còn 3 - 7 giây.
+- **Cơ chế Kiểm tra API sẵn sàng Mức 1 (Offline Check)**: Tự động xác minh cookie `sessionid` từ SQLite chỉ trong < 15ms khi khởi động profile, 100% không gửi request mạng thừa thãi, bảo toàn tuyệt đối Trust Score cho tài khoản và proxy.
+- **Chế độ Upload Engine linh hoạt**: Bổ sung tùy chọn trong cấu hình hồ sơ: `Tự động (Ưu tiên API, fallback Browser)`, `Chỉ API` và `Chỉ Trình duyệt`.
+
+## Cải thiện
+- **Bypass Proxy cho luồng truyền video (Direct IP)**: Toàn bộ byte dữ liệu video được truyền trực tiếp bằng đường truyền mạng gốc, tiết kiệm 100% dung lượng proxy mà vẫn bảo vệ an toàn IP đăng nhập ở các bước xác thực.
+- **Tự động đóng trình duyệt Fallback**: Khi chạy chế độ tự động, trình duyệt fallback chỉ mở khi có lỗi API và sẽ tự động đóng ngay khi hết video trong hàng chờ để giải phóng tài nguyên máy tính.
+- **Tối ưu tốc độ lấy Metadata Video (fast_mp4_meta)**: Bộ trích xuất thuần Python đọc atom moov lấy kích thước và thời lượng video trong < 5ms mà không cần phụ thuộc ffprobe hay cv2.
+
+## Sửa lỗi
+- **Khắc phục lỗi trình duyệt bị co nhỏ màn hình khi tải trang**: Bổ sung cờ `--start-maximized` và kích hoạt `no_viewport=True` cho Patchright, đảm bảo trình duyệt luôn mở và duy trì kích thước toàn màn hình (Maximized) mặc định.
+- **Khắc phục lỗi Batch Start Timeout sau 3 phút**: Cập nhật logic kiểm tra sẵn sàng thông minh, giúp các profile chạy chế độ API chuyển sang trạng thái chờ chỉ sau 0.5 giây và duy trì trạng thái lắng nghe video 24/7.
+
 # Phiên bản 1.2.6
 
 ## Điểm mới

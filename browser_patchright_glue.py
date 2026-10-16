@@ -495,6 +495,7 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profi
     # Ultra-optimized arguments for low RAM, anti-freeze & high concurrency multi-profile TikTok automation
     kwargs["args"] = (
         "--no-first-run",
+        "--start-maximized",
         "--log-level=3",
         "--disable-session-crashed-bubble",
         "--disable-backgrounding-occluded-windows",

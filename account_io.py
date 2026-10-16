@@ -54,6 +54,8 @@ ACCOUNT_DEFAULTS = {
     'pass_mail_backup': '',
     'note': '',
     'proxy_type': DEFAULT_PROXY_TYPE,
+    'upload_mode': 'auto',
+    'upload_bypass_hosts': True,
 }
 
 

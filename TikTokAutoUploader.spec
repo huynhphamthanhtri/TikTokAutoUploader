@@ -22,6 +22,8 @@ project_datas = [
     ('icon.ico', '.'),
     ('assets/templates', 'assets/templates'),
     ('assets/donglao_browser_logo.png', 'assets'),
+    ('tiktok_mssdk.js', '.'),
+    ('tiktok_signer_worker.js', '.'),
 ]
 
 datas = project_datas
@@ -126,6 +128,14 @@ hidden_imports += [
     'ui_statistics',
     'tiktok_dedup_engine',
     'tiktok_dedup_ui',
+    'fast_mp4_meta',
+    'tiktok_sigv4',
+    'tiktok_cookie_extractor',
+    'tiktok_signer_bridge',
+    'tiktok_vod_uploader',
+    'tiktok_publish_client',
+    'tiktok_direct_uploader',
+    'tls_client_engine',
 ]
 
 a = Analysis(
