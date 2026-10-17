@@ -1,3 +1,39 @@
+# Phiên bản 1.2.8
+
+## Điểm mới
+- **Hệ Thống Lên Lịch Đăng TikTok Tự Động (TikTok Auto-Scheduler Engine)**:
+  - Bổ sung không gian làm việc chuyên biệt (Tab Lịch Đăng) quản lý tập trung toàn bộ hàng đợi bài đăng đa kênh với đầy đủ chức năng: Bắt đầu chạy lịch, Tạm dừng, Đăng ngay lập tức, Thử lại lỗi, Xóa bản ghi và Dọn dẹp task cũ.
+  - Hộp thoại **1-Click Lên Lịch Tự Động** (`BulkScheduleModal`): Nạp video từ thư mục hoặc từng file, tự động phân bổ đều video cho hàng chục tài khoản theo thuật toán Round-Robin công bằng.
+  - **4 Khung Giờ Vàng Đăng Bài & Jitter Chống Bot**: Tùy chọn phân bổ video vào các khung giờ vàng (Sáng 06:00-08:00, Trưa 11:00-13:00, Chiều 17:00-19:00, Tối 19:00-22:00) kèm cơ chế lệch ngẫu nhiên 5-30 phút để các kênh không đăng trùng giây, loại bỏ hoàn toàn dấu hiệu máy móc.
+  - **Chế độ Hẹn Giờ Trên Server TikTok (Server Schedule)**: Đăng tải trước video lên TikTok Studio qua Direct API và ghim lịch phát hành chính thức (tối đa 10 ngày). Người dùng có thể **TẮT MÁY TÍNH HOÀN TOÀN**, máy chủ TikTok sẽ tự động công khai video đúng giờ hẹn.
+  - **Cơ chế Chống Trùng Lịch (Conflict Guard)**: Tự động phát hiện tài khoản đã có bài chờ đăng và cung cấp 3 giải pháp xử lý xung đột linh hoạt: Nối tiếp (Append - Khuyên dùng), Ghi đè (Overwrite) hoặc Bỏ qua (Skip).
+  - **Tự động Cứu Vãn Bài Đăng Lỡ Hẹn (Auto-Recovery)**: Tự động dời lịch sang ngày tiếp theo nếu máy tính bị tắt đột ngột lúc đến giờ hẹn đối với hàng đợi local.
+  - **Công thức Tiêu Đề Thông Minh**: Tự động sinh tiêu đề hấp dẫn theo mẫu thẻ `{filename}`, `{index}`, `{date}`, `{time}`, `{profile}` kèm bảng xem trước mẫu tức thì.
+- **Tích Hợp Ghi Chú Lịch Đăng Trực Quan Trên Bảng Profile Chính**:
+  - Cột `Tiến Độ Đăng` (`upload`) tự động hiển thị ngày hẹn muộn nhất và số lượng video đang xếp hàng (ví dụ: `📅 Đến 20/10 (3 clip)`), giúp người dùng nhận diện ngay profile nào đang rảnh hoặc đã kín lịch, tránh lên lịch trùng lặp.
+  - Nếu clip trước vừa đăng xong: Hiển thị `Đã đăng • 📅 20/10`. Khi đang thực tế upload, luôn ưu tiên hiển thị `Đang tải video` / `Đang đăng`.
+  - Ô tìm kiếm `🔍` trên màn hình chính hỗ trợ lọc nhanh profile theo mốc ngày hẹn hoặc số clip.
+
+## Cải thiện
+- **Tối Ưu Hóa Tốc Độ Khởi Động Ứng Dụng (Startup Performance Optimization)**:
+  - Xác thực bản quyền Cache-First: Đọc token bản quyền đã lưu từ ổ đĩa trong < 1ms, loại bỏ hoàn toàn hiện tượng đơ giao diện khi mở tool, tự động đồng bộ xác thực ngầm sau 3 giây.
+  - Trì hoãn kiểm tra tài nguyên trình duyệt sang luồng nền, giúp giao diện chính xuất hiện nhanh hơn 1.5 - 2.5 giây.
+  - Đồng bộ Google Sheets không đồng bộ (Asynchronous Sync), không block luồng UI.
+- **Giao Diện Tinh Gọn, Tối Đa Diện Tích Hiển Thị Bảng Hồ Sơ**:
+  - Loại bỏ thanh `header_bar` và 4 thẻ thống kê KPI trên cùng màn hình chính, mở rộng tối đa không gian hiển thị danh sách tài khoản.
+  - Thiết lập phân trang mặc định là **50 dòng / trang** ngay khi khởi động phần mềm, giúp người dùng quan sát được nhiều tài khoản cùng lúc mà không phải chuyển trang liên tục.
+  - Mở rộng cột `Tiến Độ Đăng` lên `145px` hiển thị trọn vẹn badge lịch hẹn mà không làm xô lệch 10 cột dữ liệu chuẩn.
+- **Tối Ưu Trải Nghiệm Hộp Thoại Lên Lịch (BulkScheduleModal UX)**:
+  - Cố định thanh nút bấm thao tác ở chân hộp thoại (Fixed Bottom Footer), luôn hiển thị sẵn sàng nút `🚀 1-Click Lên Lịch Tự Động` và `Hủy (Esc)` mà không cần người dùng phải cuộn chuột.
+  - Cửa sổ modal kích thước chuẩn `720x780px` tự động căn giữa màn hình, cuộn mượt mà với `CTkScrollableFrame`.
+- **Cập Nhật Mục Hướng Dẫn Sử Dụng (User Guide)**:
+  - Bổ sung Mục 6 chuyên sâu về "Lên Lịch Đăng TikTok Tự Động & Hẹn Giờ Khung Giờ Vàng" trong tab Hướng Dẫn Sử Dụng (`ui_guide.py`), cập nhật 11 tình huống xử lý lỗi thường gặp trong vận hành.
+
+## Sửa lỗi
+- **Khắc phục lỗi Modal Lên Lịch bị che khuất nút thao tác**: Xử lý triệt để hiện tượng trên màn hình độ phân giải thấp phải kéo giãn cửa sổ thủ công mới thấy nút bấm.
+- **Khắc phục lỗi Import và Đồng Bộ Đa Luồng**: Khởi tạo sớm Singleton `global_schedule_manager`, bổ sung `UploadState` trong import, tự động cập nhật bảng hồ sơ chính ngay khi có thao tác tạo lịch, hủy lịch hoặc hoàn tất đăng bài từ daemon nền.
+- **Khắc phục cấu hình đóng gói PyInstaller**: Bổ sung đầy đủ các module scheduler mới vào cấu hình biên dịch để đảm bảo file `.exe` chạy trơn tru trên mọi máy người dùng.
+
 # Phiên bản 1.2.7
 
 ## Điểm mới

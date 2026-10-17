@@ -22,13 +22,14 @@ from ui_components import UIThemeTokens
 # ALLOWLIST & CONSTANTS
 # ==============================================================================
 
-SAFE_NAVIGATION_TARGETS: Set[str] = {"profiles", "youtube", "monetization", "statistics", "dedup"}
+SAFE_NAVIGATION_TARGETS: Set[str] = {"profiles", "youtube", "monetization", "statistics", "dedup", "schedule"}
 
 FILTER_CATEGORIES: List[Tuple[str, str, str]] = [
     ("all", "Tất cả", "📋"),
     ("start", "Bắt đầu", "🚀"),
     ("accounts", "Tài khoản", "👤"),
     ("upload", "Đăng video", "🎬"),
+    ("schedule", "Lịch Đăng", "📅"),
     ("youtube", "YouTube", "📺"),
     ("kyc", "Thu nhập & KYC", "💰"),
     ("stats", "Thống kê", "📊"),
@@ -51,7 +52,7 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "blocks": [
             {
                 "kind": "intro",
-                "text": "DONGLAO-TIKTOK là bộ công cụ tự động hóa toàn diện giúp bạn quản lý đa tài khoản TikTok, đăng video tự động qua API hoặc trình duyệt, theo dõi kênh YouTube, giám sát gậy bản quyền và tổng hợp thu nhập tập trung.",
+                "text": "DONGLAO-TIKTOK là bộ công cụ tự động hóa toàn diện giúp bạn quản lý đa tài khoản TikTok, đăng video tự động qua API hoặc trình duyệt, lên lịch phát hành thông minh, theo dõi kênh YouTube, giám sát gậy bản quyền và tổng hợp thu nhập tập trung.",
             },
             {
                 "kind": "step",
@@ -63,7 +64,7 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
             },
             {
                 "kind": "step",
-                "text": "Kích hoạt bản quyền: Nhập License Key được cấp ở lần mở đầu tiên. Phần mềm sẽ tự động kích hoạt và ghi nhớ bản quyền trên máy tính của bạn.",
+                "text": "Kích hoạt bản quyền: Nhập License Key được cấp ở lần mở đầu tiên. Phần mềm tự động ghi nhớ và xác thực siêu tốc từ bộ nhớ đệm an toàn trên máy tính của bạn ở những lần mở sau.",
             },
             {
                 "kind": "step",
@@ -136,7 +137,7 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "tag": "accounts",
         "icon": "🍪",
         "title": "3. Đăng Nhập Và Quản Lý Cookie",
-        "subtitle": "Cơ chế đăng nhập ưu tiên cookie và duy trì phiên làm việc",
+        "subtitle": "Cơ chế đăng nhập ưu tiên cookie, tự động tiêm cookie và duy trì phiên làm việc",
         "blocks": [
             {
                 "kind": "intro",
@@ -145,6 +146,10 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
             {
                 "kind": "step",
                 "text": "Bấm nút 'Login/Mở trình duyệt' trên thanh công cụ. Nếu tài khoản đã có cookie hợp lệ, trình duyệt sẽ tự động mở thẳng trang TikTok cá nhân.",
+            },
+            {
+                "kind": "step",
+                "text": "Tự động tiêm cookie: Khi khởi động trình duyệt hoặc nạp hồ sơ, hệ thống tự động giải mã và nạp cookie vào phiên duyệt web để duy trì đăng nhập liền mạch.",
             },
             {
                 "kind": "step",
@@ -168,8 +173,8 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "id": "manage_accounts",
         "tag": "accounts",
         "icon": "🗂️",
-        "title": "4. Quản Lý Danh Sách Tài Khoản & Dự Án",
-        "subtitle": "Tìm kiếm thông minh, phân nhóm chiến dịch và menu chuột phải",
+        "title": "4. Quản Lý Danh Sách Tài Khoản, Dự Án & Check Post",
+        "subtitle": "Tìm kiếm thông minh, phân trang, kiểm tra bài đăng và menu chuột phải",
         "blocks": [
             {
                 "kind": "intro",
@@ -177,11 +182,19 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
             },
             {
                 "kind": "step",
+                "text": "Bộ phân trang mượt mà: Lựa chọn hiển thị 10, 20, 50 hoặc 100 tài khoản trên mỗi trang ở góc dưới bảng điều khiển, giúp phần mềm phản hồi nhanh và cuộn mượt mà ngay cả khi quản trị hàng trăm profile.",
+            },
+            {
+                "kind": "step",
                 "text": "Tìm kiếm nhanh: Gõ tên tài khoản, TikTok ID hoặc ghi chú vào ô tìm kiếm ở đầu bảng để lọc danh sách tức thì.",
             },
             {
                 "kind": "step",
-                "text": "Thao tác chuột phải: Nhấp chuột phải vào một dòng tài khoản để mở menu tiện ích: Sửa thông tin, Mở trình duyệt, Xem chi tiết thu nhập, Kiểm tra trùng lặp, Đổi tên hoặc Xóa.",
+                "text": "Kiểm tra bài đăng nhanh (Check Post): Bấm nút 'Check Post' trên thanh công cụ hoặc nhấp chuột phải chọn 'Check Post' để mở bảng kiểm tra toàn diện các video đã đăng trên kênh (phát hiện video gốc, trùng lặp, bài bị bóp tương tác hoặc giam duyệt).",
+            },
+            {
+                "kind": "step",
+                "text": "Thao tác chuột phải: Nhấp chuột phải vào một dòng tài khoản để mở menu tiện ích: Sửa thông tin, Mở trình duyệt, Lên lịch đăng bài tự động, Xem chi tiết thu nhập, Kiểm tra trùng lặp, Đổi tên hoặc Xóa.",
             },
             {
                 "kind": "step",
@@ -202,8 +215,8 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "id": "auto_upload",
         "tag": "upload",
         "icon": "🎬",
-        "title": "5. Đăng Video Tự Động & Chế Độ API",
-        "subtitle": "Cơ chế tải lên siêu tốc qua Direct API và dự phòng thông minh qua trình duyệt",
+        "title": "5. Đăng Video Tự Động Theo Thư Mục",
+        "subtitle": "Cơ chế canh thư mục tải lên siêu tốc qua Direct API và dự phòng trình duyệt",
         "blocks": [
             {
                 "kind": "intro",
@@ -234,8 +247,66 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
                 "text": "Tự động tối ưu: Phần mềm tự động điều chỉnh độ dài một số video ngắn khi cần thiết để phù hợp với quy định đăng video của TikTok.",
             },
             {
+                "kind": "bullet",
+                "text": "Lên lịch đăng theo giờ hẹn: Nếu bạn muốn phân bổ hàng loạt video theo các khung giờ vàng cố định trong nhiều ngày và có thể tắt máy tính hoàn toàn, hãy sử dụng tính năng Lên Lịch Đăng (Mục 6).",
+            },
+            {
                 "kind": "warn",
                 "text": "Không tắt phần mềm khi đang có tiến trình đăng video để tránh việc gián đoạn phiên tải lên.",
+            },
+        ],
+    },
+    {
+        "id": "auto_schedule",
+        "tag": "schedule",
+        "icon": "📅",
+        "title": "6. Lên Lịch Đăng TikTok & Hẹn Giờ Server",
+        "subtitle": "1-Click lên lịch tự động, hẹn giờ máy chủ TikTok, phân bổ khung giờ vàng và chống trùng lịch",
+        "blocks": [
+            {
+                "kind": "intro",
+                "text": "Tính năng Lịch Đăng giúp bạn lên lịch xuất bản hàng chục, hàng trăm video cho nhiều tài khoản TikTok cùng lúc theo các khung giờ vàng chỉ với 1 cú nhấp chuột.",
+            },
+            {
+                "kind": "step",
+                "text": "Khởi động lên lịch: Tích chọn các tài khoản trên Bảng Hồ Sơ → Bấm nút 'Lên Lịch' trên thanh công cụ (hoặc nhấp chuột phải chọn 'Lên lịch đăng bài tự động...').",
+            },
+            {
+                "kind": "step",
+                "text": "Nạp video: Bấm 'Chọn thư mục' để nạp toàn bộ video trong thư mục, hoặc bấm 'Chọn từng file' để nạp danh sách file video mong muốn. Hệ thống tự động phân bổ đều video cho các tài khoản theo thuật toán công bằng.",
+            },
+            {
+                "kind": "step",
+                "text": "Công thức tiêu đề thông minh: Tự động tạo tiêu đề hấp dẫn với các thẻ: {filename} (tên file gốc), {index} (số thứ tự), {date} (ngày đăng), {time} (giờ đăng), {profile} (tên hồ sơ) kèm bảng xem trước mẫu tức thì.",
+            },
+            {
+                "kind": "step",
+                "text": "Khung giờ vàng & Độ trễ chống bot (Jitter): Lựa chọn các khung giờ vàng (Sáng 06:00-08:00, Trưa 11:00-13:00, Chiều 17:00-19:00, Tối 19:00-22:00) và cài đặt độ lệch ngẫu nhiên (ví dụ 10-15 phút) để các kênh không đăng trùng giây, tránh bị thuật toán TikTok nhận diện là hành vi máy móc.",
+            },
+            {
+                "kind": "step",
+                "text": "☁️ Hẹn giờ trên Server TikTok: Video được tải trước lên máy chủ TikTok và ghim lịch phát hành chính thức (hẹn trước tối đa 10 ngày). Sau khi lên lịch xong, bạn có thể TẮT MÁY TÍNH HOÀN TOÀN, TikTok sẽ tự động công khai video đúng giờ hẹn.",
+            },
+            {
+                "kind": "step",
+                "text": "💻 Quản lý hàng đợi trên máy tính: Video lưu trữ trên máy tính, phần mềm chạy ngầm và tự động tải video lên khi đến mốc thời gian đã định.",
+            },
+            {
+                "kind": "step",
+                "text": "Giải quyết xung đột trùng lịch: Nếu tài khoản đã có bài chờ đăng từ trước, phần mềm sẽ hiển thị hộp thoại cảnh báo với 3 giải pháp an toàn: Nối tiếp (xếp lịch mới bắt đầu từ ngày hôm sau của lịch cũ - Khuyên dùng), Ghi đè (hủy lịch cũ, áp dụng lịch mới) hoặc Bỏ qua (chỉ lên lịch cho tài khoản còn trống).",
+            },
+            {
+                "kind": "bullet",
+                "text": "Tác vụ điều khiển tại Tab Lịch Đăng: Quản lý chi tiết toàn bộ hàng đợi bài đăng; bạn có thể bấm 'Bắt Đầu Chạy Lịch', 'Tạm Dừng', 'Đăng Ngay Lập Tức', 'Thử Lại Lỗi' hoặc 'Hủy Lịch'.",
+            },
+            {
+                "kind": "warn",
+                "text": "Đối với chế độ Hẹn giờ trên Server TikTok, thời gian hẹn cần cách thời điểm hiện tại tối thiểu 15 phút và tối đa 10 ngày theo đúng quy định của TikTok.",
+            },
+            {
+                "kind": "shortcut",
+                "text": "Đi đến Tab Lịch Đăng",
+                "target": "schedule",
             },
         ],
     },
@@ -243,7 +314,7 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "id": "youtube_sync",
         "tag": "youtube",
         "icon": "📺",
-        "title": "6. Tải Video YouTube & Lọc Shorts",
+        "title": "7. Tải Video YouTube & Lọc Shorts",
         "subtitle": "Tự động bắt video mới từ YouTube, lọc thời lượng Shorts và tải hàng loạt",
         "blocks": [
             {
@@ -281,7 +352,7 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "id": "monetization_kyc",
         "tag": "kyc",
         "icon": "💰",
-        "title": "7. Thu Nhập, Quỹ Kiếm Tiền & KYC",
+        "title": "8. Thu Nhập, Quỹ Kiếm Tiền & KYC",
         "subtitle": "Theo dõi số dư, Quỹ sáng tạo CRP, xác minh danh tính và thuế",
         "blocks": [
             {
@@ -315,7 +386,7 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "id": "statistics_report",
         "tag": "stats",
         "icon": "📊",
-        "title": "8. Thống Kê & Báo Cáo Hiệu Suất",
+        "title": "9. Thống Kê & Báo Cáo Hiệu Suất",
         "subtitle": "Bảng điều khiển KPI tải/đăng video, tra cứu lỗi nhanh và xuất báo cáo CSV",
         "blocks": [
             {
@@ -353,7 +424,7 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "id": "dedup_watchdog",
         "tag": "dedup",
         "icon": "🛡️",
-        "title": "9. Quét Trùng Lặp & Gậy Bản Quyền (Watchdog)",
+        "title": "10. Quét Trùng Lặp & Gậy Bản Quyền (Watchdog)",
         "subtitle": "Tự động phát hiện video trùng lặp, bảo vệ kênh khỏi flop và dính gậy TikTok",
         "blocks": [
             {
@@ -391,7 +462,7 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "id": "proxy_maintenance",
         "tag": "proxy",
         "icon": "🌐",
-        "title": "10. Proxy & Bảo Trì Hệ Thống",
+        "title": "11. Proxy & Bảo Trì Hệ Thống",
         "subtitle": "Thiết lập kết nối mạng an toàn, tối ưu bộ nhớ và cập nhật công cụ",
         "blocks": [
             {
@@ -429,8 +500,8 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "id": "troubleshooting",
         "tag": "errors",
         "icon": "🛠️",
-        "title": "11. Xử Lý Lỗi Thường Gặp",
-        "subtitle": "Hướng dẫn xử lý nhanh 9 tình huống thực tế thường gặp theo từng bước",
+        "title": "12. Xử Lý Lỗi Thường Gặp",
+        "subtitle": "Hướng dẫn xử lý nhanh 11 tình huống thực tế thường gặp theo từng bước",
         "blocks": [
             {
                 "kind": "intro",
@@ -471,6 +542,14 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
             {
                 "kind": "bullet",
                 "text": "9. Không nhận được thông báo video mới từ YouTube:\n- Dấu hiệu: Kênh YouTube đã đăng video mới nhưng phần mềm chưa tự động nhận.\n- Cách xử lý: Kiểm tra trạng thái YouTube Studio xem đã bấm 'Bắt Đầu' chưa; đảm bảo máy tính có kết nối mạng ổn định.\n- Khi nào cần liên hệ hỗ trợ: Khi monitor đang chạy bình thường nhưng quá 30 phút vẫn chưa nhận video mới.",
+            },
+            {
+                "kind": "bullet",
+                "text": "10. Lỗi hẹn giờ Server TikTok:\n- Dấu hiệu: Báo lỗi 'Thời gian hẹn giờ không hợp lệ' hoặc không ghim được lịch lên TikTok.\n- Cách xử lý: Đảm bảo thời gian hẹn cách thời điểm hiện tại ít nhất 15 phút và không quá 10 ngày; kiểm tra xem múi giờ máy tính có bị lệch không.\n- Khi nào cần liên hệ hỗ trợ: Khi thời gian hẹn hợp lệ nhưng máy chủ TikTok liên tục từ chối.",
+            },
+            {
+                "kind": "bullet",
+                "text": "11. Tác vụ lịch đăng báo lỗi (Failed):\n- Dấu hiệu: Trong bảng Lịch Đăng, tác vụ chuyển sang màu đỏ 'FAILED' hoặc cookie hết hạn khi đến giờ hẹn.\n- Cách xử lý: Kiểm tra lại cookie của tài khoản (nếu die thì mở trình duyệt login lại); chọn dòng tác vụ lỗi rồi bấm nút 'Thử Lại Lỗi' trên thanh công cụ để đưa video trở lại hàng đợi.\n- Khi nào cần liên hệ hỗ trợ: Khi tài khoản cookie sống nhưng tác vụ liên tục báo lỗi khi đăng bài.",
             },
             {
                 "kind": "note",

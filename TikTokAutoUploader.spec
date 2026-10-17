@@ -136,6 +136,9 @@ hidden_imports += [
     'tiktok_publish_client',
     'tiktok_direct_uploader',
     'tls_client_engine',
+    'schedule_calculator',
+    'schedule_manager',
+    'schedule_ui',
 ]
 
 a = Analysis(
