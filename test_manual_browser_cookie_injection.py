@@ -79,9 +79,14 @@ class ManualBrowserCookieInjectionTests(unittest.TestCase):
                 await b.close()
                 return len(retained), auth_retained
 
-        total_retained, auth_retained = asyncio.run(verify_real_chromium())
-        self.assertEqual(total_retained, 4)
-        self.assertEqual(set(auth_retained), {"sessionid", "sessionid_ss", "sid_tt"})
+        try:
+            total_retained, auth_retained = asyncio.run(verify_real_chromium())
+            self.assertEqual(total_retained, 4)
+            self.assertEqual(set(auth_retained), {"sessionid", "sessionid_ss", "sid_tt"})
+        except Exception as e:
+            if "Executable doesn't exist" in str(e) or "Please run the following command to download new browsers" in str(e):
+                self.skipTest("Patchright browser binary not installed in environment")
+            raise
 
     def test_chrome_extension_format_expiration_date_is_renewed(self):
         chrome_format = json.dumps([
