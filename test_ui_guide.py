@@ -29,14 +29,16 @@ VALID_KINDS = {"intro", "step", "bullet", "note", "warn", "example", "shortcut"}
 
 EXPECTED_TITLES = [
     "1. Bắt Đầu Sử Dụng",
-    "2. Thêm Tài Khoản TikTok",
-    "3. Đăng Nhập Và Cookie",
-    "4. Quản Lý Danh Sách Tài Khoản",
-    "5. Đăng Video Tự Động",
-    "6. Tải Video Từ YouTube",
-    "7. Thu Nhập, KYC Và Thuế",
-    "8. Proxy Và Bảo Trì",
-    "9. Xử Lý Lỗi Thường Gặp",
+    "2. Thêm & Nhập Tài Khoản Hàng Loạt",
+    "3. Đăng Nhập Và Quản Lý Cookie",
+    "4. Quản Lý Danh Sách Tài Khoản & Dự Án",
+    "5. Đăng Video Tự Động & Chế Độ API",
+    "6. Tải Video YouTube & Lọc Shorts",
+    "7. Thu Nhập, Quỹ Kiếm Tiền & KYC",
+    "8. Thống Kê & Báo Cáo Hiệu Suất",
+    "9. Quét Trùng Lặp & Gậy Bản Quyền (Watchdog)",
+    "10. Proxy & Bảo Trì Hệ Thống",
+    "11. Xử Lý Lỗi Thường Gặp",
 ]
 
 # Danh sách các thuật ngữ kỹ thuật nội bộ bị cấm trong nội dung hiển thị cho người dùng
@@ -65,9 +67,9 @@ BANNED_TECHNICAL_TERMS = [
 class TestGuideSectionsSchemaAndContent(unittest.TestCase):
     """Kiểm tra cấu trúc dữ liệu GUIDE_SECTIONS và tính chuẩn xác của nội dung."""
 
-    def test_has_all_9_sections_with_exact_titles(self):
+    def test_has_all_11_sections_with_exact_titles(self):
         titles = [s.get("title") for s in GUIDE_SECTIONS]
-        self.assertEqual(len(GUIDE_SECTIONS), 9)
+        self.assertEqual(len(GUIDE_SECTIONS), 11)
         for expected in EXPECTED_TITLES:
             self.assertIn(expected, titles, f"Thiếu mục hướng dẫn: {expected}")
 
@@ -137,6 +139,10 @@ class TestGuideSectionsSchemaAndContent(unittest.TestCase):
             "yt-dlp",
             "Start",
             "License Key",
+            "Direct API",
+            "Quét trùng",
+            "Thống kê",
+            "Dry-Run",
         ]
         for term in essential_terms:
             self.assertIn(term.lower(), all_user_text.lower(), f"Thiếu từ khóa thân thiện người dùng: '{term}'")
@@ -164,15 +170,18 @@ class TestGuidePureLogic(unittest.TestCase):
         self.assertEqual(get_safe_navigation_target("profiles"), "profiles")
         self.assertEqual(get_safe_navigation_target("youtube"), "youtube")
         self.assertEqual(get_safe_navigation_target("monetization"), "monetization")
+        self.assertEqual(get_safe_navigation_target("statistics"), "statistics")
+        self.assertEqual(get_safe_navigation_target("dedup"), "dedup")
         self.assertEqual(get_safe_navigation_target("PROFILES"), "profiles")
+        self.assertEqual(get_safe_navigation_target("STATISTICS"), "statistics")
         self.assertIsNone(get_safe_navigation_target("hacker_tab"))
         self.assertIsNone(get_safe_navigation_target(""))
         self.assertIsNone(get_safe_navigation_target(None))
 
     def test_format_guide_summary(self):
-        self.assertEqual(format_guide_summary(9, 9), "Đang xem 9/9 hướng dẫn")
-        self.assertEqual(format_guide_summary(9, 3), "Đang xem 3/9 hướng dẫn")
-        self.assertEqual(format_guide_summary(9, 0), "Đang xem 0/9 hướng dẫn")
+        self.assertEqual(format_guide_summary(11, 11), "Đang xem 11/11 hướng dẫn")
+        self.assertEqual(format_guide_summary(11, 3), "Đang xem 3/11 hướng dẫn")
+        self.assertEqual(format_guide_summary(11, 0), "Đang xem 0/11 hướng dẫn")
 
     def test_filter_guide_sections_all(self):
         results = filter_guide_sections(GUIDE_SECTIONS, query="", category_tag="all")
@@ -185,6 +194,14 @@ class TestGuidePureLogic(unittest.TestCase):
 
         accounts_sections = filter_guide_sections(GUIDE_SECTIONS, query="", category_tag="accounts")
         self.assertEqual(len(accounts_sections), 3)  # Thêm tài khoản, Cookie, Quản lý tài khoản
+
+        stats_sections = filter_guide_sections(GUIDE_SECTIONS, query="", category_tag="stats")
+        self.assertEqual(len(stats_sections), 1)
+        self.assertEqual(stats_sections[0]["id"], "statistics_report")
+
+        dedup_sections = filter_guide_sections(GUIDE_SECTIONS, query="", category_tag="dedup")
+        self.assertEqual(len(dedup_sections), 1)
+        self.assertEqual(dedup_sections[0]["id"], "dedup_watchdog")
 
         errors_sections = filter_guide_sections(GUIDE_SECTIONS, query="", category_tag="errors")
         self.assertEqual(len(errors_sections), 1)

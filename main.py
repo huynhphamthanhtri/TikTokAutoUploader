@@ -8358,6 +8358,16 @@ def view_monetization_details():
 def _youtube_profile_names():
     return sorted(profiles.keys())
 
+def _youtube_profile_metadata():
+    meta = {}
+    for name, prof in profiles.items():
+        cfg = prof.get('config', {}) if isinstance(prof, dict) else {}
+        meta[name] = {
+            'project': cfg.get('project_name') or 'Mặc định',
+            'tiktok_account': cfg.get('tiktok_account') or '',
+        }
+    return meta
+
 def _youtube_profile_folder(profile_name):
     prof = profiles.get(profile_name)
     if not prof:
@@ -8403,6 +8413,7 @@ def _youtube_retry_ngrok():
 
 youtube_monitor_handlers = {
     'get_profiles': _youtube_profile_names,
+    'get_profiles_meta': _youtube_profile_metadata,
     'get_status': youtube_monitor.get_status,
     'open_youtube_login_browser': youtube_monitor.open_youtube_login_browser,
     'get_channels': youtube_monitor.get_channels,

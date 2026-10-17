@@ -1261,6 +1261,24 @@ class YouTubeMonitorView(ctk.CTkFrame):
         except Exception as e:
             self.append_log(f"Lỗi khi mở thư mục: {e}", error=True)
 
+    def _get_picker_metadata(self) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, List[str]]]:
+        """Trích xuất metadata dự án và bản đồ các kênh đang liên kết với từng profile."""
+        meta_getter = self.handlers.get("get_profiles_meta")
+        profile_meta = meta_getter() if callable(meta_getter) else {}
+        if not isinstance(profile_meta, dict):
+            profile_meta = {}
+
+        channel_assignments: Dict[str, List[str]] = {}
+        for ch in getattr(self, "_channels_data", []) or []:
+            if not isinstance(ch, dict):
+                continue
+            pname = str(ch.get("profile_name") or "").strip()
+            ch_title = str(ch.get("title") or ch.get("channel_id") or "").strip()
+            if pname and ch_title:
+                channel_assignments.setdefault(pname, []).append(ch_title)
+
+        return profile_meta, channel_assignments
+
     def _open_profile_picker(self, cid: Optional[str] = None):
         """Mở Searchable Profile Picker Modal để đổi Profile đích cho kênh đang chọn."""
         target_cid = self._resolve_target_channel(cid, require_tree=True)
@@ -1271,6 +1289,7 @@ class YouTubeMonitorView(ctk.CTkFrame):
         channel_item = next((c for c in self._channels_data if c.get("channel_id") == target_cid), {})
         title = channel_item.get("title") or (self.tree.set(target_cid, "channel") if self.tree.exists(target_cid) else "") or target_cid
         current_prof = channel_item.get("profile_name") or (self.tree.set(target_cid, "profile") if self.tree.exists(target_cid) else "") or ""
+        profile_meta, channel_assignments = self._get_picker_metadata()
 
         from ui_dialogs import SearchableProfilePickerModal
 
@@ -1302,6 +1321,8 @@ class YouTubeMonitorView(ctk.CTkFrame):
             current_profile=current_prof,
             channel_title=title,
             channel_id=target_cid,
+            profile_metadata=profile_meta,
+            channel_assignments=channel_assignments,
             return_focus_to=self.tree,
             on_confirm=_on_confirm_profile,
         )
@@ -1309,6 +1330,7 @@ class YouTubeMonitorView(ctk.CTkFrame):
     def _open_add_channel_profile_picker(self):
         """Mở Searchable Profile Picker để chọn nhanh Profile gán cho kênh mới."""
         from ui_dialogs import SearchableProfilePickerModal
+        profile_meta, channel_assignments = self._get_picker_metadata()
 
         def _on_confirm(selected_profile: str) -> Tuple[bool, str]:
             ok, live_profiles, msg = load_live_profile_names(self.handlers)
@@ -1325,6 +1347,8 @@ class YouTubeMonitorView(ctk.CTkFrame):
             parent=self,
             profiles=self.profile_names,
             current_profile=self.profile_var.get(),
+            profile_metadata=profile_meta,
+            channel_assignments=channel_assignments,
             title_text="Chọn Profile Cho Kênh Mới",
             header_text="➕ CHỌN PROFILE CHO KÊNH MỚI",
             subject_text="🎯 Chọn profile TikTok sẽ nhận video từ kênh này",
@@ -1336,6 +1360,7 @@ class YouTubeMonitorView(ctk.CTkFrame):
     def _open_test_download_profile_picker(self):
         """Mở Searchable Profile Picker để chọn nhanh Profile cho tải thử nghiệm."""
         from ui_dialogs import SearchableProfilePickerModal
+        profile_meta, channel_assignments = self._get_picker_metadata()
 
         def _on_confirm(selected_profile: str) -> Tuple[bool, str]:
             ok, live_profiles, msg = load_live_profile_names(self.handlers)
@@ -1352,6 +1377,8 @@ class YouTubeMonitorView(ctk.CTkFrame):
             parent=self,
             profiles=self.profile_names,
             current_profile=self.test_profile_var.get(),
+            profile_metadata=profile_meta,
+            channel_assignments=channel_assignments,
             title_text="Chọn Profile Tải Thử",
             header_text="⚡ CHỌN PROFILE TẢI THỬ NGHIỆM",
             subject_text="🎯 Chọn profile TikTok nhận video tải thử",

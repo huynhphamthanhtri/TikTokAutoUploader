@@ -918,11 +918,13 @@ class SearchableProfilePickerModal(SafeCTkToplevel):
         subject_text: Optional[str] = None,
         confirm_text: Optional[str] = None,
         return_focus_to: Optional[Any] = None,
+        profile_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
+        channel_assignments: Optional[Dict[str, Sequence[str]]] = None,
     ):
         toplevel_parent = parent.winfo_toplevel() if hasattr(parent, "winfo_toplevel") else parent
         super().__init__(toplevel_parent)
         self.title(title_text or "Chọn Profile Đích Cho Kênh")
-        fit_and_center_dialog(self, 480, 540, parent=toplevel_parent, min_w=400, min_h=440)
+        fit_and_center_dialog(self, 650, 600, parent=toplevel_parent, min_w=540, min_h=460)
         self.transient(toplevel_parent)
         self.grab_set()
         try:
@@ -936,9 +938,18 @@ class SearchableProfilePickerModal(SafeCTkToplevel):
         ))
         self._filtered_profiles: List[str] = list(self._all_profiles)
         self._iid_to_profile: Dict[str, str] = {}
+        self._project_iids: Set[str] = set()
+        self.profile_metadata: Dict[str, Dict[str, Any]] = profile_metadata or {}
+        self.channel_assignments: Dict[str, List[str]] = {}
+        for k, v in (channel_assignments or {}).items():
+            if k and v:
+                self.channel_assignments[str(k)] = [str(c) for c in v if str(c).strip()]
+
+        self._current_filter_chip: str = "ALL"  # "ALL" | "UNASSIGNED" | "ASSIGNED"
         self.current_profile: str = str(current_profile or "").strip()
         self._pending_selected_profile: Optional[str] = self.current_profile or None
         self._user_selected_profile: Optional[str] = None
+        self._is_populating: bool = False
         self.channel_title: str = str(channel_title or "").strip()
         self.channel_id: str = str(channel_id or "").strip()
         self.on_confirm = on_confirm
@@ -952,6 +963,7 @@ class SearchableProfilePickerModal(SafeCTkToplevel):
         self.search_var = ctk.StringVar(value="")
         self.count_var = ctk.StringVar(value="")
         self.error_var = ctk.StringVar(value="")
+        self.warning_var = ctk.StringVar(value="")
 
         self._build_ui()
         self._populate_tree()
@@ -997,6 +1009,8 @@ class SearchableProfilePickerModal(SafeCTkToplevel):
             except (tk.TclError, RuntimeError, Exception):
                 pass
 
+    def _handle_cancel(self):
+        self._close_modal()
 
     def _build_ui(self):
         container = ctk.CTkFrame(self, fg_color="transparent")
@@ -1010,7 +1024,7 @@ class SearchableProfilePickerModal(SafeCTkToplevel):
             border_width=1,
             border_color=UIThemeTokens.BORDER_LIGHT,
         )
-        header_card.pack(fill="x", pady=(0, 10))
+        header_card.pack(fill="x", pady=(0, 8))
 
         h_inner = ctk.CTkFrame(header_card, fg_color="transparent")
         h_inner.pack(fill="x", padx=12, pady=10)
@@ -1053,12 +1067,12 @@ class SearchableProfilePickerModal(SafeCTkToplevel):
 
         # 2. Search Input Box
         search_card = ctk.CTkFrame(container, fg_color="transparent")
-        search_card.pack(fill="x", pady=(0, 6))
+        search_card.pack(fill="x", pady=(0, 4))
 
         self.search_entry = ctk.CTkEntry(
             search_card,
             textvariable=self.search_var,
-            placeholder_text="🔍 Tìm theo tên profile TikTok...",
+            placeholder_text="🔍 Tìm theo profile, dự án, TikTok @username hoặc kênh...",
             height=32,
             font=UIThemeTokens.FONT_BODY,
         )
@@ -1067,7 +1081,70 @@ class SearchableProfilePickerModal(SafeCTkToplevel):
         self.search_entry.bind("<Down>", lambda _e: self._focus_tree())
         self.search_entry.bind("<Return>", lambda _e: self._on_search_return())
 
-        # 3. Treeview Profile Table
+        # 3. Filter Chips & Quick Tree Action Row
+        filter_row = ctk.CTkFrame(container, fg_color="transparent")
+        filter_row.pack(fill="x", pady=(2, 6))
+
+        self.btn_chip_all = ctk.CTkButton(
+            filter_row,
+            text="Tất cả",
+            font=UIThemeTokens.FONT_BADGE,
+            height=26,
+            width=70,
+            command=lambda: self._set_filter_chip("ALL"),
+        )
+        self.btn_chip_all.pack(side="left", padx=(0, 4))
+
+        self.btn_chip_unassigned = ctk.CTkButton(
+            filter_row,
+            text="⚪ Chưa gắn",
+            font=UIThemeTokens.FONT_BADGE,
+            height=26,
+            width=90,
+            command=lambda: self._set_filter_chip("UNASSIGNED"),
+        )
+        self.btn_chip_unassigned.pack(side="left", padx=(0, 4))
+
+        self.btn_chip_assigned = ctk.CTkButton(
+            filter_row,
+            text="🟢 Đã gắn kênh",
+            font=UIThemeTokens.FONT_BADGE,
+            height=26,
+            width=100,
+            command=lambda: self._set_filter_chip("ASSIGNED"),
+        )
+        self.btn_chip_assigned.pack(side="left", padx=(0, 4))
+
+        self._update_chip_styles()
+
+        # Tree expand/collapse controls on the right
+        btn_collapse = ctk.CTkButton(
+            filter_row,
+            text="[-] Thu gọn",
+            font=UIThemeTokens.FONT_BADGE,
+            height=24,
+            width=65,
+            fg_color=UIThemeTokens.BG_HOVER,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+            hover_color=UIThemeTokens.BORDER_LIGHT,
+            command=self._collapse_all,
+        )
+        btn_collapse.pack(side="right", padx=(4, 0))
+
+        btn_expand = ctk.CTkButton(
+            filter_row,
+            text="[+] Mở hết",
+            font=UIThemeTokens.FONT_BADGE,
+            height=24,
+            width=65,
+            fg_color=UIThemeTokens.BG_HOVER,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+            hover_color=UIThemeTokens.BORDER_LIGHT,
+            command=self._expand_all,
+        )
+        btn_expand.pack(side="right")
+
+        # 4. Treeview Profile Table (Project Hierarchy + TikTok username + Channel status)
         from tkinter import ttk
         table_card = ctk.CTkFrame(
             container,
@@ -1076,19 +1153,30 @@ class SearchableProfilePickerModal(SafeCTkToplevel):
             border_width=1,
             border_color=UIThemeTokens.BORDER_LIGHT,
         )
-        table_card.pack(fill="both", expand=True, pady=(0, 6))
+        table_card.pack(fill="both", expand=True, pady=(0, 4))
         table_card.grid_rowconfigure(0, weight=1)
         table_card.grid_columnconfigure(0, weight=1)
 
         self.tree = ttk.Treeview(
             table_card,
             style="Modern.Treeview",
-            columns=("profile",),
-            show="headings",
+            columns=("tiktok_account", "channel_status"),
+            show="tree headings",
             selectmode="browse",
         )
-        self.tree.heading("profile", text="Tên Profile TikTok", anchor="w")
-        self.tree.column("profile", stretch=True, minwidth=180)
+        self.tree.heading("#0", text="Tên Profile / Nhóm Dự Án", anchor="w")
+        self.tree.column("#0", stretch=True, minwidth=200, width=270)
+
+        self.tree.heading("tiktok_account", text="Tài khoản TikTok", anchor="w")
+        self.tree.column("tiktok_account", stretch=False, minwidth=110, width=130)
+
+        self.tree.heading("channel_status", text="Trạng thái Kênh", anchor="w")
+        self.tree.column("channel_status", stretch=True, minwidth=150, width=200)
+
+        self.tree.tag_configure("project_group", font=UIThemeTokens.FONT_BUTTON)
+        self.tree.tag_configure("assigned_profile", foreground=UIThemeTokens.STATUS_LIVE)
+        self.tree.tag_configure("unassigned_profile", foreground=UIThemeTokens.TEXT_MUTED)
+
         self.tree.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
 
         vsb = ttk.Scrollbar(table_card, orient="vertical", command=self.tree.yview)
@@ -1099,7 +1187,18 @@ class SearchableProfilePickerModal(SafeCTkToplevel):
         self.tree.bind("<Double-1>", lambda _e: self._do_confirm())
         self.tree.bind("<Return>", lambda _e: self._do_confirm())
 
-        # 4. Status, Count & Error Info
+        # 5. Warning / Assignment Context Banner
+        self.lbl_warning = ctk.CTkLabel(
+            container,
+            textvariable=self.warning_var,
+            font=UIThemeTokens.FONT_BADGE,
+            text_color=UIThemeTokens.STATUS_WARN,
+            anchor="w",
+            justify="left",
+        )
+        self.lbl_warning.pack(fill="x", pady=(1, 3))
+
+        # 6. Status, Count & Error Info
         info_row = ctk.CTkFrame(container, fg_color="transparent")
         info_row.pack(fill="x", pady=(0, 6))
 
@@ -1119,7 +1218,7 @@ class SearchableProfilePickerModal(SafeCTkToplevel):
         )
         self.lbl_error.pack(side="right")
 
-        # 5. Bottom Action Buttons
+        # 7. Bottom Action Buttons
         btn_row = ctk.CTkFrame(container, fg_color="transparent")
         btn_row.pack(fill="x", pady=(2, 0))
 
@@ -1149,7 +1248,47 @@ class SearchableProfilePickerModal(SafeCTkToplevel):
         )
         self.btn_confirm.pack(side="right")
 
+    def _set_filter_chip(self, chip_mode: str):
+        if self._current_filter_chip == chip_mode:
+            return
+        self._current_filter_chip = chip_mode
+        self._update_chip_styles()
+        self._populate_tree()
+
+    def _update_chip_styles(self):
+        chips = [
+            ("ALL", getattr(self, "btn_chip_all", None)),
+            ("UNASSIGNED", getattr(self, "btn_chip_unassigned", None)),
+            ("ASSIGNED", getattr(self, "btn_chip_assigned", None)),
+        ]
+        for mode, btn in chips:
+            if not btn:
+                continue
+            if mode == self._current_filter_chip:
+                btn.configure(
+                    fg_color=UIThemeTokens.ACCENT_PRIMARY,
+                    text_color="#FFFFFF",
+                    hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
+                )
+            else:
+                btn.configure(
+                    fg_color=UIThemeTokens.BG_CARD,
+                    text_color=UIThemeTokens.TEXT_MUTED,
+                    hover_color=UIThemeTokens.BG_HOVER,
+                )
+
+    def _expand_all(self):
+        for iid in getattr(self, "_project_iids", set()):
+            if self.tree.exists(iid):
+                self.tree.item(iid, open=True)
+
+    def _collapse_all(self):
+        for iid in getattr(self, "_project_iids", set()):
+            if self.tree.exists(iid):
+                self.tree.item(iid, open=False)
+
     def _populate_tree(self):
+        self._is_populating = True
         if getattr(self, "_select_bind_id", None):
             try:
                 self.tree.unbind("<<TreeviewSelect>>", self._select_bind_id)
@@ -1160,70 +1299,196 @@ class SearchableProfilePickerModal(SafeCTkToplevel):
         try:
             self.tree.delete(*self.tree.get_children())
             self._iid_to_profile.clear()
-            total = len(self._all_profiles)
-            filtered_count = len(self._filtered_profiles)
+            self._project_iids.clear()
 
-            self.count_var.set(f"Hiển thị {filtered_count} / {total} profile")
+            total_profiles = len(self._all_profiles)
+            total_unassigned = sum(1 for p in self._all_profiles if not self.channel_assignments.get(p))
+            total_assigned = total_profiles - total_unassigned
 
-            if not self._filtered_profiles:
+            if hasattr(self, "btn_chip_all") and self.btn_chip_all:
+                self.btn_chip_all.configure(text=f"Tất cả ({total_profiles})")
+            if hasattr(self, "btn_chip_unassigned") and self.btn_chip_unassigned:
+                self.btn_chip_unassigned.configure(text=f"⚪ Chưa gắn ({total_unassigned})")
+            if hasattr(self, "btn_chip_assigned") and self.btn_chip_assigned:
+                self.btn_chip_assigned.configure(text=f"🟢 Đã gắn ({total_assigned})")
+
+            query = self.search_var.get().strip().casefold()
+            filtered_profiles: List[str] = []
+            for p in self._all_profiles:
+                meta = self.profile_metadata.get(p, {}) if isinstance(self.profile_metadata, dict) else {}
+                proj = str(meta.get("project") or "Mặc định")
+                acc = str(meta.get("tiktok_account") or "")
+                assigned_chans = self.channel_assignments.get(p, [])
+                is_assigned = len(assigned_chans) > 0
+
+                if self._current_filter_chip == "UNASSIGNED" and is_assigned:
+                    continue
+                if self._current_filter_chip == "ASSIGNED" and not is_assigned:
+                    continue
+
+                if query:
+                    matches = (
+                        query in p.casefold() or
+                        query in proj.casefold() or
+                        query in acc.casefold() or
+                        any(query in str(c).casefold() for c in assigned_chans)
+                    )
+                    if not matches:
+                        continue
+                filtered_profiles.append(p)
+
+            self._filtered_profiles = filtered_profiles
+            filtered_count = len(filtered_profiles)
+            self.count_var.set(f"Hiển thị {filtered_count} / {total_profiles} profile")
+
+            if not filtered_profiles:
                 self.btn_confirm.configure(state="disabled")
+                self.warning_var.set("")
                 return
+
+            # Gom nhóm theo dự án
+            project_groups: Dict[str, List[str]] = {}
+            for p in filtered_profiles:
+                meta = self.profile_metadata.get(p, {}) if isinstance(self.profile_metadata, dict) else {}
+                proj = str(meta.get("project") or "Mặc định").strip() or "Mặc định"
+                project_groups.setdefault(proj, []).append(p)
+
+            # Sắp xếp danh sách dự án (Mặc định đưa lên trước nếu có)
+            sorted_projects = sorted(
+                project_groups.keys(),
+                key=lambda x: (0 if x == "Mặc định" else 1, x.casefold()),
+            )
 
             target_profile = self._user_selected_profile if self._user_selected_profile is not None else self._pending_selected_profile
             target_iid = None
-            for idx, p in enumerate(self._filtered_profiles):
-                iid = f"prof_{idx}"
-                self._iid_to_profile[iid] = p
-                self.tree.insert("", "end", iid=iid, values=(p,))
-                if p == target_profile and target_iid is None:
-                    target_iid = iid
+            first_prof_iid = None
 
-            # Preselect target profile if found, otherwise select first result as visual focus
-            select_iid = target_iid if target_iid else (f"prof_0" if self._filtered_profiles else None)
+            for proj_idx, proj_name in enumerate(sorted_projects):
+                p_list = project_groups[proj_name]
+                proj_iid = f"proj_{proj_idx}"
+                self._project_iids.add(proj_iid)
+                self.tree.insert(
+                    "",
+                    "end",
+                    iid=proj_iid,
+                    text=f"📁 {proj_name} ({len(p_list)})",
+                    values=("", ""),
+                    open=True,
+                    tags=("project_group",),
+                )
+
+                for p in p_list:
+                    prof_idx = len(self._iid_to_profile)
+                    prof_iid = f"prof_{prof_idx}"
+                    self._iid_to_profile[prof_iid] = p
+                    if first_prof_iid is None:
+                        first_prof_iid = prof_iid
+
+                    meta = self.profile_metadata.get(p, {}) if isinstance(self.profile_metadata, dict) else {}
+                    acc = str(meta.get("tiktok_account") or "").strip()
+                    acc_display = f"@{acc}" if acc else "-"
+                    chans = self.channel_assignments.get(p, [])
+                    if chans:
+                        ch_summary = ", ".join(chans[:2])
+                        if len(chans) > 2:
+                            ch_summary += f" (+{len(chans) - 2})"
+                        status_display = f"🟢 Đã gắn ({len(chans)}: {ch_summary})"
+                        row_tag = "assigned_profile"
+                    else:
+                        status_display = "⚪ Chưa gắn"
+                        row_tag = "unassigned_profile"
+
+                    self.tree.insert(
+                        proj_iid,
+                        "end",
+                        iid=prof_iid,
+                        text=f"👤 {p}",
+                        values=(acc_display, status_display),
+                        tags=(row_tag,),
+                    )
+                    if p == target_profile and target_iid is None:
+                        target_iid = prof_iid
+
+            # Preselect profile mục tiêu hoặc profile đầu tiên
+            select_iid = target_iid if target_iid else first_prof_iid
             if select_iid and self.tree.exists(select_iid):
                 self.tree.selection_set(select_iid)
                 self.tree.see(select_iid)
                 self.btn_confirm.configure(state="normal")
+                self._update_warning_banner(self._iid_to_profile.get(select_iid))
             else:
                 self.btn_confirm.configure(state="disabled")
+                self.warning_var.set("")
         finally:
+            self._is_populating = False
             self._select_bind_id = self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
-    def _on_search_change(self):
-        query = self.search_var.get().strip().casefold()
-        if not query:
-            self._filtered_profiles = list(self._all_profiles)
+    def _update_warning_banner(self, profile_name: Optional[str]):
+        if not profile_name:
+            self.warning_var.set("")
+            return
+        chans = self.channel_assignments.get(profile_name, [])
+        if chans:
+            ch_str = ", ".join(chans[:3])
+            if len(chans) > 3:
+                ch_str += f" (+{len(chans) - 3} kênh)"
+            self.warning_var.set(f"⚠️ Profile này đang nhận video từ: {ch_str}")
         else:
-            self._filtered_profiles = [p for p in self._all_profiles if query in p.casefold()]
+            self.warning_var.set("✨ Profile trống, sẵn sàng nhận kênh mới.")
+
+    def _on_search_change(self):
         self._populate_tree()
 
     def _focus_tree(self):
         children = self.tree.get_children()
         if children:
             if not self.tree.selection():
-                self.tree.selection_set(children[0])
-            self.tree.focus(self.tree.selection()[0])
+                # Focus vào profile con đầu tiên nếu có
+                for child in children:
+                    sub_children = self.tree.get_children(child)
+                    if sub_children:
+                        self.tree.selection_set(sub_children[0])
+                        self.tree.focus(sub_children[0])
+                        break
+            else:
+                self.tree.focus(self.tree.selection()[0])
             self.tree.focus_set()
 
     def _on_search_return(self):
         sel = self.tree.selection()
-        if sel:
+        if sel and sel[0] in self._iid_to_profile:
             self._do_confirm()
-        elif self._filtered_profiles:
-            first_iid = "prof_0"
-            if self.tree.exists(first_iid):
+        elif self._iid_to_profile:
+            # Chọn profile con đầu tiên
+            first_iid = next(iter(self._iid_to_profile.keys()), None)
+            if first_iid and self.tree.exists(first_iid):
                 self.tree.selection_set(first_iid)
                 self._do_confirm()
 
     def _on_select(self, _event=None):
         sel = self.tree.selection()
-        if sel:
-            selected_prof = self._get_selected_profile()
-            if selected_prof:
+        if not sel:
+            self.btn_confirm.configure(state="disabled")
+            self.warning_var.set("")
+            return
+        iid = sel[0]
+        if iid in getattr(self, "_project_iids", set()):
+            # Click trúng dòng tiêu đề Thư mục Dự Án -> vô hiệu hóa xác nhận
+            self.btn_confirm.configure(state="disabled")
+            self.error_var.set("ℹ️ Vui lòng chọn profile con bên trong dự án.")
+            self.warning_var.set("")
+            return
+
+        self.error_var.set("")
+        selected_prof = self._iid_to_profile.get(iid)
+        if selected_prof:
+            if not self._is_populating:
                 self._user_selected_profile = selected_prof
             self.btn_confirm.configure(state="normal")
+            self._update_warning_banner(selected_prof)
         else:
             self.btn_confirm.configure(state="disabled")
+            self.warning_var.set("")
 
     def _get_selected_profile(self) -> Optional[str]:
         sel = self.tree.selection()
@@ -1238,7 +1503,11 @@ class SearchableProfilePickerModal(SafeCTkToplevel):
 
         selected = self._get_selected_profile()
         if not selected:
-            self.error_var.set("⚠️ Vui lòng chọn một profile từ danh sách.")
+            sel = self.tree.selection()
+            if sel and sel[0] in getattr(self, "_project_iids", set()):
+                self.error_var.set("⚠️ Vui lòng chọn một profile con, không chọn thư mục dự án.")
+            else:
+                self.error_var.set("⚠️ Vui lòng chọn một profile từ danh sách.")
             return
 
         if not self.on_confirm:

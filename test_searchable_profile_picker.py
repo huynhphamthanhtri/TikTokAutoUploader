@@ -331,6 +331,189 @@ class TestSearchableProfilePickerModalHardened(unittest.TestCase):
         temp_btn.destroy()
         modal._close_modal()
 
+    def test_modal_project_grouping_and_tree_hierarchy(self):
+        """SearchableProfilePickerModal groups profiles under project nodes with tree hierarchy."""
+        meta = {
+            "Prof_Game_1": {"project": "Game", "tiktok_account": "gamer1"},
+            "Prof_Game_2": {"project": "Game", "tiktok_account": "gamer2"},
+            "Prof_Aff_1": {"project": "Affiliate", "tiktok_account": "aff1"},
+            "Prof_Default": {"project": "", "tiktok_account": "def_user"},
+        }
+        modal = SearchableProfilePickerModal(
+            self.root,
+            profiles=["Prof_Game_1", "Prof_Game_2", "Prof_Aff_1", "Prof_Default"],
+            profile_metadata=meta,
+        )
+
+        root_children = modal.tree.get_children("")
+        self.assertGreaterEqual(len(root_children), 3)
+
+        # Ensure project folder nodes exist
+        project_titles = [modal.tree.item(iid, "text") for iid in root_children]
+        self.assertTrue(any("Mặc định" in t for t in project_titles))
+        self.assertTrue(any("Affiliate" in t for t in project_titles))
+        self.assertTrue(any("Game" in t for t in project_titles))
+
+        # Check child items under "Game" project
+        game_iid = next(iid for iid in root_children if "Game" in modal.tree.item(iid, "text"))
+        game_sub = modal.tree.get_children(game_iid)
+        self.assertEqual(len(game_sub), 2)
+        sub_texts = [modal.tree.item(sub, "text") for sub in game_sub]
+        self.assertIn("👤 Prof_Game_1", sub_texts)
+        self.assertIn("👤 Prof_Game_2", sub_texts)
+
+        # Check TikTok username display
+        sub1_values = modal.tree.item(game_sub[0], "values")
+        self.assertTrue(any("@gamer" in str(v) for v in sub1_values))
+
+        modal._close_modal()
+
+    def test_modal_project_folder_selection_blocks_confirm(self):
+        """Clicking or selecting a project group node disables confirm and blocks _do_confirm."""
+        mock_confirm = MagicMock()
+        modal = SearchableProfilePickerModal(
+            self.root,
+            profiles=["P1"],
+            profile_metadata={"P1": {"project": "Project Alpha"}},
+            on_confirm=mock_confirm,
+        )
+
+        root_children = modal.tree.get_children("")
+        proj_iid = root_children[0]
+        self.assertIn(proj_iid, modal._project_iids)
+
+        # Select project node
+        modal.tree.selection_set(proj_iid)
+        modal._on_select()
+
+        self.assertEqual(modal.btn_confirm.cget("state"), "disabled")
+        self.assertIsNone(modal._get_selected_profile())
+        self.assertIn("chọn profile con", modal.error_var.get())
+
+        modal._do_confirm()
+        mock_confirm.assert_not_called()
+
+        modal._close_modal()
+
+    def test_modal_channel_assignment_status_and_warning_indicator(self):
+        """Profiles with channels show assigned badge and warning notice when selected."""
+        assignments = {
+            "Prof_Linked": ["Kênh YouTube A", "Kênh YouTube B"],
+            "Prof_Free": [],
+        }
+        modal = SearchableProfilePickerModal(
+            self.root,
+            profiles=["Prof_Linked", "Prof_Free"],
+            channel_assignments=assignments,
+        )
+
+        linked_iid = next(iid for iid, p in modal._iid_to_profile.items() if p == "Prof_Linked")
+        free_iid = next(iid for iid, p in modal._iid_to_profile.items() if p == "Prof_Free")
+
+        # Values check
+        linked_vals = modal.tree.item(linked_iid, "values")
+        self.assertTrue(any("🟢 Đã gắn" in str(v) for v in linked_vals))
+        free_vals = modal.tree.item(free_iid, "values")
+        self.assertTrue(any("⚪ Chưa gắn" in str(v) for v in free_vals))
+
+        # Select linked profile -> warning notice appears
+        modal.tree.selection_set(linked_iid)
+        modal._on_select()
+        self.assertIn("Kênh YouTube A", modal.warning_var.get())
+        self.assertEqual(modal.btn_confirm.cget("state"), "normal")
+
+        # Select free profile -> ready notice appears
+        modal.tree.selection_set(free_iid)
+        modal._on_select()
+        self.assertIn("sẵn sàng", modal.warning_var.get())
+        self.assertEqual(modal.btn_confirm.cget("state"), "normal")
+
+        modal._close_modal()
+
+    def test_modal_filter_chips_filtering(self):
+        """Filter chips toggle between All, Unassigned, and Assigned profiles."""
+        assignments = {
+            "Assigned_1": ["Chan 1"],
+            "Unassigned_1": [],
+        }
+        modal = SearchableProfilePickerModal(
+            self.root,
+            profiles=["Assigned_1", "Unassigned_1"],
+            channel_assignments=assignments,
+        )
+
+        # Initially ALL
+        self.assertEqual(len(modal._iid_to_profile), 2)
+
+        # Filter UNASSIGNED
+        modal._set_filter_chip("UNASSIGNED")
+        self.assertEqual(len(modal._iid_to_profile), 1)
+        self.assertIn("Unassigned_1", modal._iid_to_profile.values())
+        self.assertNotIn("Assigned_1", modal._iid_to_profile.values())
+
+        # Filter ASSIGNED
+        modal._set_filter_chip("ASSIGNED")
+        self.assertEqual(len(modal._iid_to_profile), 1)
+        self.assertIn("Assigned_1", modal._iid_to_profile.values())
+        self.assertNotIn("Unassigned_1", modal._iid_to_profile.values())
+
+        # Restore ALL
+        modal._set_filter_chip("ALL")
+        self.assertEqual(len(modal._iid_to_profile), 2)
+
+        modal._close_modal()
+
+    def test_modal_smart_search_multi_field(self):
+        """Search query matches profile name, project name, TikTok account, and channel name."""
+        meta = {
+            "Prof_1": {"project": "Alpha_Project", "tiktok_account": "tok_alpha"},
+            "Prof_2": {"project": "Beta_Project", "tiktok_account": "tok_beta"},
+        }
+        assignments = {
+            "Prof_1": ["My Unique YouTube Channel"],
+            "Prof_2": [],
+        }
+        modal = SearchableProfilePickerModal(
+            self.root,
+            profiles=["Prof_1", "Prof_2"],
+            profile_metadata=meta,
+            channel_assignments=assignments,
+        )
+
+        # Match by project name
+        modal.search_var.set("Alpha_Proj")
+        self.assertEqual(list(modal._iid_to_profile.values()), ["Prof_1"])
+
+        # Match by TikTok account
+        modal.search_var.set("tok_beta")
+        self.assertEqual(list(modal._iid_to_profile.values()), ["Prof_2"])
+
+        # Match by linked YouTube channel name
+        modal.search_var.set("Unique YouTube")
+        self.assertEqual(list(modal._iid_to_profile.values()), ["Prof_1"])
+
+        modal._close_modal()
+
+    def test_modal_expand_and_collapse_all(self):
+        """_expand_all and _collapse_all control open state of all project tree branches."""
+        modal = SearchableProfilePickerModal(
+            self.root,
+            profiles=["P1", "P2"],
+            profile_metadata={"P1": {"project": "Proj1"}, "P2": {"project": "Proj2"}},
+        )
+
+        # Collapse all
+        modal._collapse_all()
+        for iid in modal._project_iids:
+            self.assertFalse(modal.tree.item(iid, "open"))
+
+        # Expand all
+        modal._expand_all()
+        for iid in modal._project_iids:
+            self.assertTrue(modal.tree.item(iid, "open"))
+
+        modal._close_modal()
+
 
 class TestYouTubeMonitorViewPhase2(unittest.TestCase):
     @classmethod

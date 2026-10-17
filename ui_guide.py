@@ -22,7 +22,7 @@ from ui_components import UIThemeTokens
 # ALLOWLIST & CONSTANTS
 # ==============================================================================
 
-SAFE_NAVIGATION_TARGETS: Set[str] = {"profiles", "youtube", "monetization"}
+SAFE_NAVIGATION_TARGETS: Set[str] = {"profiles", "youtube", "monetization", "statistics", "dedup"}
 
 FILTER_CATEGORIES: List[Tuple[str, str, str]] = [
     ("all", "Tất cả", "📋"),
@@ -31,6 +31,8 @@ FILTER_CATEGORIES: List[Tuple[str, str, str]] = [
     ("upload", "Đăng video", "🎬"),
     ("youtube", "YouTube", "📺"),
     ("kyc", "Thu nhập & KYC", "💰"),
+    ("stats", "Thống kê", "📊"),
+    ("dedup", "Quét trùng & Gậy", "🛡️"),
     ("proxy", "Proxy", "🌐"),
     ("errors", "Xử lý lỗi", "🛠️"),
 ]
@@ -45,15 +47,15 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "tag": "start",
         "icon": "🚀",
         "title": "1. Bắt Đầu Sử Dụng",
-        "subtitle": "Chuẩn bị và khởi động phần mềm lần đầu tiên",
+        "subtitle": "Chuẩn bị, kích hoạt bản quyền và khởi động phần mềm",
         "blocks": [
             {
                 "kind": "intro",
-                "text": "DONGLAO-TIKTOK là công cụ tự động hóa toàn diện giúp bạn quản lý nhiều tài khoản TikTok, đăng video tự động, theo dõi kênh YouTube và theo dõi thu nhập tập trung.",
+                "text": "DONGLAO-TIKTOK là bộ công cụ tự động hóa toàn diện giúp bạn quản lý đa tài khoản TikTok, đăng video tự động qua API hoặc trình duyệt, theo dõi kênh YouTube, giám sát gậy bản quyền và tổng hợp thu nhập tập trung.",
             },
             {
                 "kind": "step",
-                "text": "Tải phần mềm về máy và giải nén toàn bộ ra một thư mục riêng biệt.",
+                "text": "Tải phần mềm về máy tính và giải nén toàn bộ ra một thư mục riêng biệt (khuyên dùng ổ D hoặc E).",
             },
             {
                 "kind": "step",
@@ -61,11 +63,15 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
             },
             {
                 "kind": "step",
-                "text": "Kích hoạt bản quyền: Nhập License Key được cấp ở lần mở đầu tiên. Phần mềm sẽ tự động ghi nhớ và kích hoạt sẵn sàng cho các lần sau.",
+                "text": "Kích hoạt bản quyền: Nhập License Key được cấp ở lần mở đầu tiên. Phần mềm sẽ tự động kích hoạt và ghi nhớ bản quyền trên máy tính của bạn.",
             },
             {
                 "kind": "step",
                 "text": "Nếu Windows hiển thị cửa sổ bảo mật hỏi quyền kết nối mạng, hãy chọn 'Cho phép' (Allow) để các tính năng tự động hoạt động bình thường.",
+            },
+            {
+                "kind": "step",
+                "text": "Tự động cập nhật: Phần mềm tích hợp tính năng kiểm tra phiên bản mới từ máy chủ. Khi có bản phát hành mới, ứng dụng sẽ thông báo để bạn cập nhật chỉ với 1 click.",
             },
             {
                 "kind": "warn",
@@ -77,41 +83,51 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "id": "add_account",
         "tag": "accounts",
         "icon": "👤",
-        "title": "2. Thêm Tài Khoản TikTok",
-        "subtitle": "Tạo và thiết lập từng tài khoản độc lập",
+        "title": "2. Thêm & Nhập Tài Khoản Hàng Loạt",
+        "subtitle": "Tạo tài khoản đơn lẻ, nhập hàng loạt theo danh sách và gán Proxy",
         "blocks": [
             {
                 "kind": "intro",
-                "text": "Mỗi tài khoản được quản lý trong một hồ sơ riêng biệt với môi trường mạng và trình duyệt cách ly an toàn.",
+                "text": "Mỗi tài khoản được quản lý trong một hồ sơ riêng biệt với môi trường mạng và dấu vân tay trình duyệt cách ly an toàn.",
             },
             {
                 "kind": "step",
-                "text": "Bấm nút 'Thêm' trên thanh công cụ quản lý tài khoản.",
+                "text": "Thêm từng tài khoản: Bấm nút 'Thêm' trên thanh công cụ, điền Tên tài khoản, TikTok ID (ví dụ @username), Proxy (nếu có) và chọn Thư mục video tương ứng.",
             },
             {
                 "kind": "step",
-                "text": "Điền Tên tài khoản, TikTok ID (ví dụ @username), và chọn Thư mục lưu video tương ứng.",
-            },
-            {
-                "kind": "step",
-                "text": "⚡ Dán Nhanh: Bạn có thể dán danh sách tài khoản theo mẫu bên dưới để phần mềm tự động điền toàn bộ các trường:",
+                "text": "⚡ Nhập Hàng Loạt (Batch Import): Bấm nút 'Nhập Hàng Loạt' trên thanh công cụ để thêm cùng lúc hàng chục tài khoản. Bạn có thể dán danh sách tài khoản theo mẫu 11 trường chuẩn bên dưới:",
             },
             {
                 "kind": "example",
-                "text": "TenTaiKhoan|email@example.com|<MAT_KHAU>|@tiktok_id|<KHOA_2FA>|<COOKIE_NEU_CO>|<PROXY_NEU_CO>",
-                "copy_text": "TenTaiKhoan|email@example.com|<MAT_KHAU>|@tiktok_id|<KHOA_2FA>|<COOKIE_NEU_CO>|<PROXY_NEU_CO>",
+                "text": "TenTaiKhoan|email@example.com|<MAT_KHAU>|@tiktok_id|IP:Port:<USER>:<PASS>|<COOKIE_NEU_CO>|<KHOA_2FA>|<PASS_MAIL>|<MAIL_BACKUP>|<PASS_MAIL_BACKUP>|GhiChu",
+                "copy_text": "TenTaiKhoan|email@example.com|<MAT_KHAU>|@tiktok_id|IP:Port:<USER>:<PASS>|<COOKIE_NEU_CO>|<KHOA_2FA>|<PASS_MAIL>|<MAIL_BACKUP>|<PASS_MAIL_BACKUP>|GhiChu",
             },
             {
                 "kind": "step",
-                "text": "Nếu sử dụng Proxy riêng cho tài khoản, hãy nhập vào mục Proxy và bấm 'Kiểm Tra Proxy' để xem trạng thái kết nối và vùng IP trước khi lưu.",
+                "text": "⚡ Mẫu Rút Gọn: Nếu chỉ có thông tin cơ bản, chọn định dạng 'Format cũ' và dán theo mẫu 4 trường sau:",
+            },
+            {
+                "kind": "example",
+                "text": "TenTaiKhoan|<COOKIE_NEU_CO>|IP:Port:<USER>:<PASS>|@tiktok_id",
+                "copy_text": "TenTaiKhoan|<COOKIE_NEU_CO>|IP:Port:<USER>:<PASS>|@tiktok_id",
+            },
+            {
+                "kind": "step",
+                "text": "⚡ Gán Proxy Hàng Loạt: Chọn các tài khoản cần đổi mạng, bấm nút 'Gán Proxy' trên thanh công cụ, dán danh sách proxy và bấm 'Áp Dụng' để phân bổ đều cho từng tài khoản.",
             },
             {
                 "kind": "bullet",
-                "text": "Có thể chọn 'Tự động sinh thư mục chuẩn' để phần mềm tự tạo thư mục lưu trữ video gọn gàng cho từng tài khoản.",
+                "text": "Bật tùy chọn 'Tự động sinh thư mục chuẩn' để phần mềm tự tạo thư mục lưu trữ video riêng biệt và gọn gàng cho từng tài khoản.",
             },
             {
                 "kind": "warn",
                 "text": "Mỗi tài khoản TikTok nên sử dụng một địa chỉ Proxy riêng cùng quốc gia với tài khoản để đạt độ ổn định và an toàn cao nhất.",
+            },
+            {
+                "kind": "shortcut",
+                "text": "Đi đến Danh sách tài khoản",
+                "target": "profiles",
             },
         ],
     },
@@ -119,8 +135,8 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "id": "login_cookie",
         "tag": "accounts",
         "icon": "🍪",
-        "title": "3. Đăng Nhập Và Cookie",
-        "subtitle": "Cơ chế đăng nhập tự động và duy trì phiên làm việc",
+        "title": "3. Đăng Nhập Và Quản Lý Cookie",
+        "subtitle": "Cơ chế đăng nhập ưu tiên cookie và duy trì phiên làm việc",
         "blocks": [
             {
                 "kind": "intro",
@@ -152,8 +168,8 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "id": "manage_accounts",
         "tag": "accounts",
         "icon": "🗂️",
-        "title": "4. Quản Lý Danh Sách Tài Khoản",
-        "subtitle": "Tìm kiếm, sắp xếp và phân nhóm các tài khoản",
+        "title": "4. Quản Lý Danh Sách Tài Khoản & Dự Án",
+        "subtitle": "Tìm kiếm thông minh, phân nhóm chiến dịch và menu chuột phải",
         "blocks": [
             {
                 "kind": "intro",
@@ -165,15 +181,15 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
             },
             {
                 "kind": "step",
-                "text": "Thao tác chuột phải: Nhấp chuột phải vào một dòng tài khoản để mở menu tiện ích: Sửa thông tin, Mở trình duyệt, Xem chi tiết, Đổi tên hoặc Xóa.",
+                "text": "Thao tác chuột phải: Nhấp chuột phải vào một dòng tài khoản để mở menu tiện ích: Sửa thông tin, Mở trình duyệt, Xem chi tiết thu nhập, Kiểm tra trùng lặp, Đổi tên hoặc Xóa.",
             },
             {
                 "kind": "step",
-                "text": "Phân nhóm Dự Án: Sử dụng danh sách Dự Án ở cột bên trái để gom nhóm các tài khoản theo chiến dịch hoặc nhóm quản lý.",
+                "text": "Phân nhóm Dự Án: Sử dụng danh sách Dự Án ở cột bên trái để gom nhóm các tài khoản theo chiến dịch hoặc nhóm quản lý. Có thể chọn nhiều tài khoản và bấm 'Gán Dự Án' để di chuyển nhanh.",
             },
             {
                 "kind": "step",
-                "text": "Chọn tài khoản dễ dàng: Khi gán tài khoản cho kênh YouTube hoặc tải video, sử dụng ô tìm kiếm tài khoản để gán chính xác trong 1 giây.",
+                "text": "Bộ chọn tài khoản thông minh (Searchable Profile Picker): Khi gán tài khoản cho kênh YouTube hoặc thao tác tải video, giao diện tìm kiếm thông minh giúp bạn chọn chính xác tài khoản chỉ trong 1 giây.",
             },
             {
                 "kind": "shortcut",
@@ -186,12 +202,12 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "id": "auto_upload",
         "tag": "upload",
         "icon": "🎬",
-        "title": "5. Đăng Video Tự Động",
-        "subtitle": "Tự động quét thư mục và đăng tải video lên TikTok",
+        "title": "5. Đăng Video Tự Động & Chế Độ API",
+        "subtitle": "Cơ chế tải lên siêu tốc qua Direct API và dự phòng thông minh qua trình duyệt",
         "blocks": [
             {
                 "kind": "intro",
-                "text": "Phần mềm tự động theo dõi thư mục video đã chọn, nhận diện video mới và tiến hành đăng tải tự động lên TikTok.",
+                "text": "Phần mềm tự động theo dõi thư mục video đã chọn, nhận diện video mới và tiến hành đăng tải tự động lên TikTok với tốc độ tối ưu.",
             },
             {
                 "kind": "step",
@@ -203,11 +219,15 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
             },
             {
                 "kind": "step",
-                "text": "Phần mềm tự động kiểm tra phiên làm việc, chuẩn bị video và đăng tải ngầm mà không làm ảnh hưởng đến công việc của bạn trên máy tính.",
+                "text": "Chế độ tải lên Direct API siêu tốc (v1.2.7): Mặc định phần mềm áp dụng chế độ Tự động thông minh (Auto). Video được tải lên trực tiếp qua hệ thống API ngầm, giúp đăng video siêu nhanh, không chiếm chuột/bàn phím và tiết kiệm tối đa bộ nhớ máy tính.",
+            },
+            {
+                "kind": "step",
+                "text": "Dự phòng thông minh (Lazy Browser Fallback): Nếu TikTok yêu cầu giải câu đố xác minh hoặc kiểm tra đặc biệt, phần mềm sẽ tự động chuyển sang trình duyệt an toàn để hoàn tất việc đăng bài mà không làm gián đoạn tiến trình.",
             },
             {
                 "kind": "bullet",
-                "text": "Theo dõi tiến độ qua các trạng thái: Đang chờ video mới, Đang xử lý, Đang đăng bài, Đã đăng thành công hoặc Báo lỗi chi tiết.",
+                "text": "Theo dõi tiến độ qua các trạng thái: Đang chờ video mới, Đang tải video (API), Đang xử lý, Đã đăng thành công hoặc Báo lỗi chi tiết.",
             },
             {
                 "kind": "bullet",
@@ -223,24 +243,28 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "id": "youtube_sync",
         "tag": "youtube",
         "icon": "📺",
-        "title": "6. Tải Video Từ YouTube",
-        "subtitle": "Tự động bắt video mới từ YouTube và tải hàng loạt theo danh sách",
+        "title": "6. Tải Video YouTube & Lọc Shorts",
+        "subtitle": "Tự động bắt video mới từ YouTube, lọc thời lượng Shorts và tải hàng loạt",
         "blocks": [
             {
                 "kind": "intro",
-                "text": "Hệ thống YouTube Monitor tự động phát hiện khi các kênh YouTube bạn theo dõi phát hành video mới, tự tải về và chuyển vào thư mục chờ đăng của tài khoản TikTok.",
+                "text": "Hệ thống YouTube Studio tự động phát hiện khi các kênh YouTube bạn theo dõi phát hành video mới, tự tải về và chuyển vào thư mục chờ đăng của tài khoản TikTok tương ứng.",
             },
             {
                 "kind": "step",
-                "text": "Thêm kênh: Dán đường link kênh YouTube cần theo dõi và chọn tài khoản TikTok nhận video tương ứng.",
+                "text": "Thêm kênh theo dõi: Dán đường link kênh YouTube cần theo dõi và sử dụng bộ tìm kiếm nhanh để chọn tài khoản TikTok nhận video.",
             },
             {
                 "kind": "step",
-                "text": "Bấm 'Bắt Đầu' trong tab YouTube Monitor để kích hoạt chế độ tự động nhận thông báo video mới.",
+                "text": "Thiết lập thời lượng Shorts cho từng kênh: Bạn có thể cài đặt ngưỡng thời lượng tối thiểu cho video Short (mặc định 30 giây). Các video dưới ngưỡng này sẽ tự động được chuyển vào thư mục riêng để bạn kiểm duyệt, tránh đăng video quá ngắn vi phạm chính sách kiếm tiền.",
             },
             {
                 "kind": "step",
-                "text": "Tải Hàng Loạt (Batch Download): Khi cần tải nhiều video cùng lúc, chuyển sang tab Tải Hàng Loạt, dán danh sách link YouTube và bấm Tải.",
+                "text": "Bấm 'Bắt Đầu' trong tab YouTube Studio để kích hoạt chế độ tự động nhận thông báo video mới.",
+            },
+            {
+                "kind": "step",
+                "text": "Tải Hàng Loạt (Batch Download): Khi cần tải nhiều video cùng lúc theo danh sách, chuyển sang tab Tải Hàng Loạt, dán danh sách link YouTube, chọn tài khoản nhận và bấm 'Tải'.",
             },
             {
                 "kind": "step",
@@ -248,7 +272,7 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
             },
             {
                 "kind": "shortcut",
-                "text": "Đi đến YouTube Monitor",
+                "text": "Đi đến YouTube Studio",
                 "target": "youtube",
             },
         ],
@@ -257,8 +281,8 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "id": "monetization_kyc",
         "tag": "kyc",
         "icon": "💰",
-        "title": "7. Thu Nhập, KYC Và Thuế",
-        "subtitle": "Theo dõi số dư, quỹ kiếm tiền CRP, xác minh danh tính và thuế",
+        "title": "7. Thu Nhập, Quỹ Kiếm Tiền & KYC",
+        "subtitle": "Theo dõi số dư, Quỹ sáng tạo CRP, xác minh danh tính và thuế",
         "blocks": [
             {
                 "kind": "intro",
@@ -274,7 +298,7 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
             },
             {
                 "kind": "step",
-                "text": "Theo dõi 4 nhóm trạng thái xác minh đơn giản: Đã xác minh (xanh lá) | Đang chờ duyệt (vàng) | Cần gửi lại giấy tờ | Cần kiểm tra / Kháng nghị.",
+                "text": "Theo dõi 4 nhóm trạng thái xác minh: Đã xác minh (xanh lá) | Đang chờ duyệt (vàng) | Cần gửi lại giấy tờ | Cần kiểm tra / Kháng nghị.",
             },
             {
                 "kind": "warn",
@@ -288,11 +312,87 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         ],
     },
     {
+        "id": "statistics_report",
+        "tag": "stats",
+        "icon": "📊",
+        "title": "8. Thống Kê & Báo Cáo Hiệu Suất",
+        "subtitle": "Bảng điều khiển KPI tải/đăng video, tra cứu lỗi nhanh và xuất báo cáo CSV",
+        "blocks": [
+            {
+                "kind": "intro",
+                "text": "Tab Thống Kê cung cấp cái nhìn toàn cảnh về hiệu suất vận hành: số lượng video YouTube đã tải về, số video TikTok đã đăng thành công và tỷ lệ hoàn thành theo thời gian thực.",
+            },
+            {
+                "kind": "bullet",
+                "text": "Thẻ KPI tổng quan: Theo dõi tổng số video Tải OK, Tải Lỗi, Đăng OK, Đăng Lỗi, sản lượng Hôm Nay, Hôm Qua và Tỷ Lệ Thành Công (%) toàn hệ thống.",
+            },
+            {
+                "kind": "step",
+                "text": "Bộ lọc thời gian linh hoạt: Dễ dàng xem số liệu theo các mốc: Tất cả thời gian, Hôm nay, Hôm qua, 7 ngày qua hoặc 30 ngày qua.",
+            },
+            {
+                "kind": "step",
+                "text": "Bảng chi tiết từng tài khoản: Hiển thị sản lượng tải và đăng cụ thể của từng hồ sơ, kèm thời điểm hoạt động gần nhất để kịp thời phát hiện tài khoản bị đứng hoặc ngưng hoạt động.",
+            },
+            {
+                "kind": "step",
+                "text": "Tra cứu lỗi nhanh (Quick Error Inspector): Khi nhấp chuột vào một tài khoản có video bị lỗi, bảng bên dưới sẽ liệt kê chính xác tên video, mã lỗi/nguyên nhân thất bại, đường dẫn file và đường link gốc. Bạn có thể bấm mở trực tiếp video hoặc file để kiểm tra.",
+            },
+            {
+                "kind": "step",
+                "text": "Xuất báo cáo dữ liệu: Bấm nút 'Xuất Báo Cáo' để tải file bảng tính CSV (chuẩn tiếng Việt có dấu UTF-8) phục vụ báo cáo doanh thu và đối soát nội bộ.",
+            },
+            {
+                "kind": "shortcut",
+                "text": "Đi đến Tab Thống Kê",
+                "target": "statistics",
+            },
+        ],
+    },
+    {
+        "id": "dedup_watchdog",
+        "tag": "dedup",
+        "icon": "🛡️",
+        "title": "9. Quét Trùng Lặp & Gậy Bản Quyền (Watchdog)",
+        "subtitle": "Tự động phát hiện video trùng lặp, bảo vệ kênh khỏi flop và dính gậy TikTok",
+        "blocks": [
+            {
+                "kind": "intro",
+                "text": "Module Dedup Watchdog là lớp phòng vệ tự động giúp bảo vệ toàn bộ dàn kênh TikTok khỏi rủi ro bị bóp tương tác (shadowban), trùng lặp nội dung hoặc bị phạt gậy bản quyền (mã cảnh báo 611).",
+            },
+            {
+                "kind": "bullet",
+                "text": "3 Chế độ hành động an toàn:\n- Chạy thử (Dry-Run): Chỉ ghi nhận và phát cảnh báo trong nhật ký mà không tác động vào kênh (khuyên dùng khi mới làm quen).\n- Tự động Ẩn Private: Tự động chuyển các video bị dính trùng lặp sang chế độ Riêng tư để kênh không bị bóp tương tác.\n- Tự động Xóa: Tự động xóa vĩnh viễn video vi phạm để giữ kênh sạch 100%.",
+            },
+            {
+                "kind": "step",
+                "text": "Kích hoạt Watchdog: Tại tab Quét Trùng / Gậy, chọn chế độ xử lý mong muốn và bấm 'Bật Watchdog' để phần mềm tự động rà soát định kỳ theo chu kỳ bạn chọn.",
+            },
+            {
+                "kind": "step",
+                "text": "Quản lý Danh Sách Theo Dõi (Watchlist): Bật hoặc tắt theo dõi cho từng tài khoản cụ thể. Bạn cũng có thể bấm 'Quét ngay' để kiểm tra tức thì một kênh bất kỳ.",
+            },
+            {
+                "kind": "step",
+                "text": "Kiểm tra trực tiếp từ Bảng Tài Khoản: Nhấp chuột phải vào một dòng tài khoản ở Bảng Hồ Sơ → chọn 'Kiểm Tra Trùng / Gậy' để xem ngay trạng thái bài đăng của kênh đó.",
+            },
+            {
+                "kind": "warn",
+                "text": "Nên sử dụng chế độ 'Chạy thử (Dry-Run)' trước để quan sát độ chính xác của các bài đăng trước khi chuyển sang chế độ tự động Ẩn Private hoặc Xóa.",
+            },
+            {
+                "kind": "shortcut",
+                "text": "Đi đến Quét Trùng / Gậy",
+                "target": "dedup",
+            },
+        ],
+    },
+    {
         "id": "proxy_maintenance",
         "tag": "proxy",
         "icon": "🌐",
-        "title": "8. Proxy Và Bảo Trì",
-        "subtitle": "Thiết lập kết nối mạng an toàn và tối ưu phần mềm",
+        "title": "10. Proxy & Bảo Trì Hệ Thống",
+        "subtitle": "Thiết lập kết nối mạng an toàn, tối ưu bộ nhớ và cập nhật công cụ",
         "blocks": [
             {
                 "kind": "intro",
@@ -317,11 +417,11 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
             },
             {
                 "kind": "step",
-                "text": "Bảo trì trình duyệt: Nếu trình duyệt gặp sự cố hiển thị, vào menu Cài Đặt → chọn 'Reset Browser' để dọn dẹp bộ nhớ đệm an toàn.",
+                "text": "Bảo trì trình duyệt: Nếu trình duyệt gặp sự cố hiển thị hoặc chiếm nhiều dung lượng, vào menu Cài Đặt → chọn 'Reset Browser' để dọn dẹp bộ nhớ đệm an toàn mà không làm mất thông tin tài khoản.",
             },
             {
                 "kind": "step",
-                "text": "Cập nhật công cụ tải: Khi việc tải video YouTube gặp trục trặc, bấm nút 'Cập nhật yt-dlp' trên giao diện YouTube để nhận bản nâng cấp mới nhất.",
+                "text": "Cập nhật công cụ tải: Khi việc tải video YouTube gặp trục trặc, bấm nút 'Cập nhật yt-dlp' trên giao diện YouTube Studio để nhận bản nâng cấp mới nhất.",
             },
         ],
     },
@@ -329,8 +429,8 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
         "id": "troubleshooting",
         "tag": "errors",
         "icon": "🛠️",
-        "title": "9. Xử Lý Lỗi Thường Gặp",
-        "subtitle": "Hướng dẫn xử lý nhanh 7 tình huống thường gặp theo từng bước",
+        "title": "11. Xử Lý Lỗi Thường Gặp",
+        "subtitle": "Hướng dẫn xử lý nhanh 9 tình huống thực tế thường gặp theo từng bước",
         "blocks": [
             {
                 "kind": "intro",
@@ -354,7 +454,7 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
             },
             {
                 "kind": "bullet",
-                "text": "5. Không tải được video từ YouTube:\n- Dấu hiệu: Bấm tải nhưng báo lỗi hoặc tiến trình dừng lại.\n- Cách xử lý: Bấm nút 'Cập nhật yt-dlp' trên giao diện YouTube Monitor; kiểm tra đường link video có tồn tại công khai hay không.\n- Khi nào cần liên hệ hỗ trợ: Khi link video mở xem bình thường trên web nhưng phần mềm không tải được.",
+                "text": "5. Không tải được video từ YouTube:\n- Dấu hiệu: Bấm tải nhưng báo lỗi hoặc tiến trình dừng lại.\n- Cách xử lý: Bấm nút 'Cập nhật yt-dlp' trên giao diện YouTube Studio; kiểm tra đường link video có tồn tại công khai hay không.\n- Khi nào cần liên hệ hỗ trợ: Khi link video mở xem bình thường trên web nhưng phần mềm không tải được.",
             },
             {
                 "kind": "bullet",
@@ -362,7 +462,15 @@ GUIDE_SECTIONS: List[Dict[str, Any]] = [
             },
             {
                 "kind": "bullet",
-                "text": "7. Không nhận được thông báo video mới từ YouTube:\n- Dấu hiệu: Kênh YouTube đã đăng video mới nhưng phần mềm chưa tự động nhận.\n- Cách xử lý: Kiểm tra trạng thái YouTube Monitor xem đã bấm 'Bắt Đầu' chưa; đảm bảo máy tính có kết nối mạng ổn định.\n- Khi nào cần liên hệ hỗ trợ: Khi monitor đang chạy bình thường nhưng quá 30 phút vẫn chưa nhận video mới.",
+                "text": "7. Chuyển từ API sang Trình duyệt (Browser Fallback):\n- Dấu hiệu: Tiến trình báo 'API Upload chưa hoàn tất, chuyển sang Browser Fallback'.\n- Cách xử lý: Đây là cơ chế dự phòng tự động an toàn của hệ thống khi TikTok yêu cầu xác minh captcha. Bạn không cần làm gì, phần mềm sẽ tự mở trình duyệt ngầm để hoàn tất đăng bài.\n- Khi nào cần liên hệ hỗ trợ: Khi cả trình duyệt dự phòng cũng báo lỗi không thể vượt qua xác minh.",
+            },
+            {
+                "kind": "bullet",
+                "text": "8. Video bị gắn cờ trùng lặp hoặc dính gậy 611:\n- Dấu hiệu: Video đăng lên bị 0 lượt xem hoặc Watchdog phát hiện video trùng khớp với video gốc.\n- Cách xử lý: Bật tính năng Dedup Watchdog ở chế độ 'Tự động Ẩn Private' để gỡ video khỏi trang công khai; giãn cách thời gian giữa các lần đăng bài.\n- Khi nào cần liên hệ hỗ trợ: Khi toàn bộ video mới đều bị TikTok từ chối dù nội dung đã chỉnh sửa.",
+            },
+            {
+                "kind": "bullet",
+                "text": "9. Không nhận được thông báo video mới từ YouTube:\n- Dấu hiệu: Kênh YouTube đã đăng video mới nhưng phần mềm chưa tự động nhận.\n- Cách xử lý: Kiểm tra trạng thái YouTube Studio xem đã bấm 'Bắt Đầu' chưa; đảm bảo máy tính có kết nối mạng ổn định.\n- Khi nào cần liên hệ hỗ trợ: Khi monitor đang chạy bình thường nhưng quá 30 phút vẫn chưa nhận video mới.",
             },
             {
                 "kind": "note",
@@ -794,7 +902,7 @@ def build_guide_workspace(
 
     ctk.CTkLabel(
         text_container,
-        text="Cẩm nang hướng dẫn thao tác từng bước: thêm tài khoản, đăng video tự động, đồng bộ YouTube và theo dõi thu nhập.",
+        text="Cẩm nang hướng dẫn thao tác từng bước: thêm tài khoản, đăng video tự động qua API, tải YouTube, giám sát gậy bản quyền và theo dõi thu nhập.",
         font=UIThemeTokens.FONT_SUBTITLE,
         text_color=UIThemeTokens.TEXT_MUTED,
         anchor="w",
@@ -805,7 +913,7 @@ def build_guide_workspace(
     search_entry = ctk.CTkEntry(
         intro_header,
         textvariable=search_var,
-        placeholder_text="🔍 Tìm hướng dẫn, ví dụ: đăng nhập, proxy, YouTube, KYC, video...",
+        placeholder_text="🔍 Tìm hướng dẫn, ví dụ: đăng nhập, proxy, YouTube, KYC, thống kê, quét trùng, API, lỗi...",
         height=32,
         corner_radius=8,
         font=("Segoe UI", 11),
