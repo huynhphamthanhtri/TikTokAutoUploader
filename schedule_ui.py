@@ -209,7 +209,7 @@ class BulkScheduleModal(SafeCTkToplevel):
         toplevel_parent = parent.winfo_toplevel() if hasattr(parent, "winfo_toplevel") else parent
         super().__init__(toplevel_parent)
         self.title("Lên Lịch Đăng TikTok Tự Động")
-        fit_and_center_dialog(self, 680, 680, parent=toplevel_parent, min_w=580, min_h=550)
+        fit_and_center_dialog(self, 720, 780, parent=toplevel_parent, min_w=580, min_h=520)
         self.transient(toplevel_parent)
         self.grab_set()
 
@@ -240,15 +240,64 @@ class BulkScheduleModal(SafeCTkToplevel):
         container = ctk.CTkFrame(self, fg_color="transparent")
         container.pack(fill="both", expand=True, padx=16, pady=12)
 
+        # Fixed bottom bar: Luôn ghim cố định ở đáy cửa sổ để nút bấm luôn luôn hiển thị
+        bottom_bar = ctk.CTkFrame(container, fg_color="transparent")
+        bottom_bar.pack(side="bottom", fill="x", pady=(6, 0))
+
+        info_row = ctk.CTkFrame(bottom_bar, fg_color="transparent")
+        info_row.pack(fill="x", pady=(0, 4))
+
+        self.lbl_status = ctk.CTkLabel(
+            info_row,
+            textvariable=self.status_info_var,
+            font=UIThemeTokens.FONT_BADGE,
+            text_color=UIThemeTokens.STATUS_WARN,
+            anchor="w",
+        )
+        self.lbl_status.pack(side="left")
+
+        btn_row = ctk.CTkFrame(bottom_bar, fg_color="transparent")
+        btn_row.pack(fill="x")
+
+        ctk.CTkButton(
+            btn_row,
+            text="Hủy (Esc)",
+            font=UIThemeTokens.FONT_BUTTON,
+            height=34,
+            width=100,
+            fg_color=UIThemeTokens.BG_HOVER,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+            hover_color=UIThemeTokens.BORDER_LIGHT,
+            command=self._cancel,
+        ).pack(side="left")
+
+        self.btn_submit = ctk.CTkButton(
+            btn_row,
+            text="🚀 1-Click Lên Lịch Tự Động",
+            font=UIThemeTokens.FONT_BUTTON,
+            height=34,
+            width=200,
+            fg_color=UIThemeTokens.ACCENT_PRIMARY,
+            hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
+            text_color="#FFFFFF",
+            command=self._do_schedule,
+        )
+        self.btn_submit.pack(side="right")
+
+        # Scrollable content area: Chứa toàn bộ các thẻ cấu hình
+        scroll = ctk.CTkScrollableFrame(container, fg_color="transparent")
+        scroll.pack(fill="both", expand=True)
+        self.scroll = scroll
+
         # 1. Header & Profiles Selected Card
         header_card = ctk.CTkFrame(
-            container,
+            scroll,
             corner_radius=8,
             fg_color=UIThemeTokens.BG_CARD,
             border_width=1,
             border_color=UIThemeTokens.BORDER_LIGHT,
         )
-        header_card.pack(fill="x", pady=(0, 8))
+        header_card.pack(fill="x", pady=(0, 6))
 
         h_inner = ctk.CTkFrame(header_card, fg_color="transparent")
         h_inner.pack(fill="x", padx=12, pady=10)
@@ -278,13 +327,13 @@ class BulkScheduleModal(SafeCTkToplevel):
 
         # 2. Nạp Video Card
         video_card = ctk.CTkFrame(
-            container,
+            scroll,
             corner_radius=8,
             fg_color=UIThemeTokens.BG_CARD,
             border_width=1,
             border_color=UIThemeTokens.BORDER_LIGHT,
         )
-        video_card.pack(fill="x", pady=(0, 8))
+        video_card.pack(fill="x", pady=(0, 6))
 
         v_inner = ctk.CTkFrame(video_card, fg_color="transparent")
         v_inner.pack(fill="x", padx=12, pady=10)
@@ -334,13 +383,13 @@ class BulkScheduleModal(SafeCTkToplevel):
 
         # 3. Cấu hình Công thức Tiêu đề
         formula_card = ctk.CTkFrame(
-            container,
+            scroll,
             corner_radius=8,
             fg_color=UIThemeTokens.BG_CARD,
             border_width=1,
             border_color=UIThemeTokens.BORDER_LIGHT,
         )
-        formula_card.pack(fill="x", pady=(0, 8))
+        formula_card.pack(fill="x", pady=(0, 6))
 
         f_inner = ctk.CTkFrame(formula_card, fg_color="transparent")
         f_inner.pack(fill="x", padx=12, pady=10)
@@ -378,13 +427,13 @@ class BulkScheduleModal(SafeCTkToplevel):
 
         # 4. Cấu hình Khung Giờ & Tần Suất
         schedule_card = ctk.CTkFrame(
-            container,
+            scroll,
             corner_radius=8,
             fg_color=UIThemeTokens.BG_CARD,
             border_width=1,
             border_color=UIThemeTokens.BORDER_LIGHT,
         )
-        schedule_card.pack(fill="x", pady=(0, 8))
+        schedule_card.pack(fill="x", pady=(0, 6))
 
         s_inner = ctk.CTkFrame(schedule_card, fg_color="transparent")
         s_inner.pack(fill="x", padx=12, pady=10)
@@ -426,13 +475,13 @@ class BulkScheduleModal(SafeCTkToplevel):
 
         # 5. Phương Thức Thực Thi (Server-Side vs Local-Queue)
         exec_card = ctk.CTkFrame(
-            container,
+            scroll,
             corner_radius=8,
             fg_color=UIThemeTokens.BG_CARD,
             border_width=1,
             border_color=UIThemeTokens.BORDER_LIGHT,
         )
-        exec_card.pack(fill="x", pady=(0, 8))
+        exec_card.pack(fill="x", pady=(0, 6))
 
         e_inner = ctk.CTkFrame(exec_card, fg_color="transparent")
         e_inner.pack(fill="x", padx=12, pady=10)
@@ -470,47 +519,6 @@ class BulkScheduleModal(SafeCTkToplevel):
             font=UIThemeTokens.FONT_BADGE,
             text_color=UIThemeTokens.TEXT_MUTED,
         ).pack(anchor="w", pady=(0, 2))
-
-        # Status & Action Buttons
-        info_row = ctk.CTkFrame(container, fg_color="transparent")
-        info_row.pack(fill="x", pady=(0, 4))
-
-        self.lbl_status = ctk.CTkLabel(
-            info_row,
-            textvariable=self.status_info_var,
-            font=UIThemeTokens.FONT_BADGE,
-            text_color=UIThemeTokens.STATUS_WARN,
-            anchor="w",
-        )
-        self.lbl_status.pack(side="left")
-
-        btn_row = ctk.CTkFrame(container, fg_color="transparent")
-        btn_row.pack(fill="x", pady=(4, 0))
-
-        ctk.CTkButton(
-            btn_row,
-            text="Hủy (Esc)",
-            font=UIThemeTokens.FONT_BUTTON,
-            height=34,
-            width=100,
-            fg_color=UIThemeTokens.BG_HOVER,
-            text_color=UIThemeTokens.TEXT_PRIMARY,
-            hover_color=UIThemeTokens.BORDER_LIGHT,
-            command=self._cancel,
-        ).pack(side="left")
-
-        self.btn_submit = ctk.CTkButton(
-            btn_row,
-            text="🚀 1-Click Lên Lịch Tự Động",
-            font=UIThemeTokens.FONT_BUTTON,
-            height=34,
-            width=200,
-            fg_color=UIThemeTokens.ACCENT_PRIMARY,
-            hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
-            text_color="#FFFFFF",
-            command=self._do_schedule,
-        )
-        self.btn_submit.pack(side="right")
 
     def _update_preview(self):
         f = self.formula_var.get()
@@ -1078,6 +1086,14 @@ class AutoScheduleView(ctk.CTkFrame):
             messagebox.showinfo("Thông báo", f"Đã gửi yêu cầu đăng ngay {len(selected)} video.")
         self._refresh_data()
 
+    def _notify_change(self):
+        handler = self.handlers.get("on_change_handler")
+        if callable(handler):
+            try:
+                handler()
+            except Exception:
+                pass
+
     def _do_retry(self):
         selected = self._get_selected_task_ids()
         if not selected:
@@ -1085,6 +1101,7 @@ class AutoScheduleView(ctk.CTkFrame):
             return
         retried = self.schedule_manager.retry_tasks(selected)
         self._refresh_data()
+        self._notify_change()
         messagebox.showinfo("Thành công", f"Đã đưa {retried} tác vụ về hàng đợi chờ đăng.")
 
     def _do_cancel(self):
@@ -1095,6 +1112,7 @@ class AutoScheduleView(ctk.CTkFrame):
         if messagebox.askyesno("Xác nhận", f"Bạn có chắc muốn hủy {len(selected)} tác vụ đang chọn?"):
             cancelled = self.schedule_manager.cancel_tasks(selected)
             self._refresh_data()
+            self._notify_change()
             messagebox.showinfo("Thành công", f"Đã hủy thành công {cancelled} tác vụ.")
 
     def _do_delete(self):
@@ -1105,11 +1123,13 @@ class AutoScheduleView(ctk.CTkFrame):
         if messagebox.askyesno("Xác nhận", f"Bạn có chắc muốn xóa vĩnh viễn {len(selected)} bản ghi này khỏi lịch?"):
             deleted = self.schedule_manager.delete_tasks(selected)
             self._refresh_data()
+            self._notify_change()
             messagebox.showinfo("Thành công", f"Đã xóa {deleted} bản ghi.")
 
     def _do_clear_finished(self):
         cleared = self.schedule_manager.clear_finished_tasks()
         self._refresh_data()
+        self._notify_change()
         messagebox.showinfo("Dọn dẹp", f"Đã dọn dẹp {cleared} bản ghi đã hoàn thành hoặc đã hủy.")
 
     def _on_double_click_row(self, _event):

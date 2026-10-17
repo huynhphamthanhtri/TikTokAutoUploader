@@ -565,7 +565,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     tree.column('monetization', width=130, minwidth=100, anchor='center', stretch=False)
     tree.column('analytics', width=165, minwidth=130, anchor='center', stretch=False)
     tree.column('proxy_region', width=140, minwidth=100, anchor='center', stretch=False)
-    tree.column('upload', width=115, minwidth=95, anchor='center', stretch=False)
+    tree.column('upload', width=145, minwidth=110, anchor='center', stretch=False)
     tree.column('folder', width=130, minwidth=80, stretch=False)
     tree.column('last_error', width=170, minwidth=100, stretch=True)
 
@@ -596,7 +596,10 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
         command=lambda val: handlers.get("change_page_size", lambda v: None)(val),
     )
     page_size_menu.pack(side="left")
-    page_size_menu.set("10 / trang")
+    default_page_size = "50 / trang"
+    if "page_size_var" in state and hasattr(state["page_size_var"], "get"):
+        default_page_size = state["page_size_var"].get() or "50 / trang"
+    page_size_menu.set(default_page_size)
     widgets["pagination_page_size_menu"] = page_size_menu
 
     # Right: Pagination navigation buttons & label

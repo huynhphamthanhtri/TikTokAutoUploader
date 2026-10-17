@@ -327,6 +327,59 @@ class ScheduleManager:
 
         return conflicts
 
+    def get_schedule_summary_map(self) -> Dict[str, Dict[str, Any]]:
+        """Quét và trả về map tóm tắt lịch đăng của tất cả profile đang có bài chờ đăng.
+        
+        Trả về dict:
+        {
+            'Profile_A': {
+                'pending_count': 3,
+                'latest_scheduled_time': datetime,
+                'latest_date_str': '20/10',
+                'badge': '📅 Đến 20/10 (3 clip)'
+            }
+        }
+        """
+        with _FILE_LOCK:
+            tasks = self._read_data_unlocked()
+
+        summary: Dict[str, Dict[str, Any]] = {}
+        for t in tasks:
+            prof = t.get("profile_name")
+            status = t.get("status")
+            if not prof or status not in ("PENDING", "SERVER_SCHEDULED", "QUEUED", "MISSED_RESCHEDULED"):
+                continue
+
+            prof = str(prof).strip()
+            info = summary.setdefault(prof, {
+                "pending_count": 0,
+                "latest_scheduled_time": None,
+                "latest_date_str": "",
+                "badge": "",
+            })
+            info["pending_count"] += 1
+
+            sched_str = t.get("scheduled_time")
+            if sched_str:
+                try:
+                    dt = datetime.datetime.fromisoformat(sched_str)
+                    if info["latest_scheduled_time"] is None or dt > info["latest_scheduled_time"]:
+                        info["latest_scheduled_time"] = dt
+                except Exception:
+                    pass
+
+        for prof, info in summary.items():
+            dt = info["latest_scheduled_time"]
+            count = info["pending_count"]
+            if dt:
+                date_str = dt.strftime("%d/%m")
+                info["latest_date_str"] = date_str
+                info["badge"] = f"📅 Đến {date_str} ({count} clip)"
+            else:
+                info["badge"] = f"📅 ({count} clip)"
+
+        return summary
+
     def apply_conflict_resolution(
         self,
         resolution_mode: str,  # 'APPEND' | 'OVERWRITE' | 'SKIP'

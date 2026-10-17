@@ -112,6 +112,7 @@ class TestAppUIContract(unittest.TestCase):
             self.assertIn(key, widgets, f"Missing required widget key: {key}")
 
         self.assertNotIn("selection_action_bar", widgets)
+        self.assertEqual(widgets["pagination_page_size_menu"].get(), "50 / trang")
         self.assertTrue(widgets["log_drawer"].is_expanded)
         self.assertTrue(widgets["log_drawer"].content_frame.winfo_manager())
 

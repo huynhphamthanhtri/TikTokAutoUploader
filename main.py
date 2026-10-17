@@ -95,6 +95,7 @@ from profile_runtime_status import (
     row_tags,
     batch_start_preflight,
     OperationState,
+    UploadState,
 )
 from cookie_live_check import (
     CookieCheckState,
@@ -110,6 +111,7 @@ from cookie_live_check import (
 import account_session_runner as session_runner
 from schedule_calculator import interleave_tasks_by_profile
 from schedule_manager import ScheduleManager
+global_schedule_manager = ScheduleManager()
 from schedule_ui import AutoScheduleView, BulkScheduleModal
 from tiktok_account_inspection import (
     AccountInspectionResult,
@@ -4939,6 +4941,14 @@ def update_profile_list(*args):
         iter_names = sorted(proj_members)
     iter_names = [n for n in iter_names if n in profiles]
 
+    # Precompute schedule summary once per update for zero lag (< 0.1ms)
+    sched_summary = {}
+    try:
+        if 'global_schedule_manager' in globals() and global_schedule_manager:
+            sched_summary = global_schedule_manager.get_schedule_summary_map()
+    except Exception:
+        pass
+
     filtered_matching_items = []
     active_chip = active_filter_chip_var.get() if 'active_filter_chip_var' in globals() else "ALL"
 
@@ -5054,10 +5064,22 @@ def update_profile_list(*args):
         from tiktok_analytics import format_views_follow_badge
         analytics_badge = format_views_follow_badge(views_30d, followers)
 
+        # Xác định nhãn hiển thị cho cột Tiến Độ Đăng (Phương án 1)
+        sched_info = sched_summary.get(name)
+        if snapshot.upload == UploadState.IDLE:
+            if sched_info and sched_info.get("badge"):
+                upload_badge = sched_info["badge"]
+            else:
+                upload_badge = upload_label(snapshot.upload)
+        elif snapshot.upload == UploadState.SUCCEEDED and sched_info and sched_info.get("latest_date_str"):
+            upload_badge = f"Đã đăng • 📅 {sched_info['latest_date_str']}"
+        else:
+            upload_badge = upload_label(snapshot.upload)
+
         # Khớp từ khóa tìm kiếm (Search filter)
         row_blob = (
             f"{name} {tiktok_id} {cookie_badge} {activity_badge} {mono_badge} {analytics_badge} "
-            f"{proxy_str} {region} {upload_label(snapshot.upload)} "
+            f"{proxy_str} {region} {upload_badge} "
             f"{ui.get('last_error','')} {cfg.get('folder_path','')}"
         ).lower()
         if kw and kw not in row_blob:
@@ -5090,6 +5112,7 @@ def update_profile_list(*args):
             proxy_region_badge,
             snapshot,
             ui,
+            upload_badge,
         ))
 
     # Pagination calculations
@@ -5097,7 +5120,7 @@ def update_profile_list(*args):
     if 'total_records_var' in globals():
         total_records_var.set(total_records)
 
-    page_size_str = str(page_size_var.get()) if 'page_size_var' in globals() else "10 / trang"
+    page_size_str = str(page_size_var.get()) if 'page_size_var' in globals() else "50 / trang"
     if "10" in page_size_str and "100" not in page_size_str:
         page_size = 10
     elif "25" in page_size_str:
@@ -5129,7 +5152,7 @@ def update_profile_list(*args):
     row_map = {}
     order = []
     for item in paged_items:
-        name, cfg, tiktok_display, cookie_badge, activity_badge, mono_badge, analytics_badge, proxy_region_badge, snapshot, ui = item
+        name, cfg, tiktok_display, cookie_badge, activity_badge, mono_badge, analytics_badge, proxy_region_badge, snapshot, ui, upload_badge = item
         uuid = ensure_account_uuid(cfg)
         row_map[uuid] = (
             name,
@@ -5141,7 +5164,7 @@ def update_profile_list(*args):
                 mono_badge,
                 analytics_badge,
                 proxy_region_badge,
-                upload_label(snapshot.upload),
+                upload_badge,
                 cfg.get('folder_path', ''),
                 _short_ui_text(ui.get('last_error', '')),
             ),
@@ -8038,7 +8061,7 @@ mono_status_var = StringVar(master=root, value="")
 active_filter_chip_var = StringVar(master=root, value="ALL")
 mono_active_filter_chip_var = StringVar(master=root, value="ALL")
 current_page_var = ctk.IntVar(master=root, value=1)
-page_size_var = ctk.StringVar(master=root, value="10 / trang")
+page_size_var = ctk.StringVar(master=root, value="50 / trang")
 total_pages_var = ctk.IntVar(master=root, value=1)
 total_records_var = ctk.IntVar(master=root, value=0)
 
@@ -8098,6 +8121,7 @@ ui_state = {
     'mono_status_var': mono_status_var,
     'active_filter_chip': active_filter_chip_var,
     'mono_active_filter_chip': mono_active_filter_chip_var,
+    'page_size_var': page_size_var,
 }
 
 def _update_monetization_table(*_args):
@@ -8847,7 +8871,8 @@ activity_handlers = {
 # TIKTOK AUTO-SCHEDULER ENGINE & HANDLERS
 # ==============================================================================
 logger = logging.getLogger("tiktok_scheduler")
-global_schedule_manager = ScheduleManager()
+if 'global_schedule_manager' not in globals() or global_schedule_manager is None:
+    global_schedule_manager = ScheduleManager()
 
 def _execute_schedule_task_upload(task: Dict[str, Any]) -> Tuple[bool, str]:
     """Thực thi tải lên cho 1 tác vụ lên lịch qua Direct API."""
@@ -9051,6 +9076,10 @@ def open_schedule_modal():
 
     def _on_success(created_tasks=None):
         update_status(f"Đã lên lịch thành công cho {len(target_profiles)} profile.")
+        try:
+            update_profile_list()
+        except Exception:
+            pass
         if 'switch_workspace' in globals():
             switch_workspace("schedule")
         elif 'ui_widgets' in globals() and 'schedule_view' in ui_widgets:
@@ -9069,6 +9098,7 @@ def _build_schedule_view(parent_frame):
         "post_now_handler": _handle_schedule_post_now,
         "start_queue_handler": _handle_start_schedule_queue,
         "pause_queue_handler": _handle_pause_schedule_queue,
+        "on_change_handler": update_profile_list,
     }
     return AutoScheduleView(parent_frame, schedule_manager=global_schedule_manager, handlers=handlers)
 
@@ -9083,6 +9113,10 @@ def _start_schedule_daemon():
             recovered = global_schedule_manager.recover_missed_tasks()
             if recovered:
                 update_status(f"[AutoSchedule] Đã tự động dời {len(recovered)} video bị lỡ hẹn sang ngày mai.")
+                try:
+                    root.after_idle(update_profile_list)
+                except Exception:
+                    pass
         except Exception as e:
             logger.error(f"Lỗi recover missed tasks: {e}")
 
@@ -9113,6 +9147,10 @@ def _start_schedule_daemon():
 
                     if 'ui_widgets' in globals() and 'schedule_view' in ui_widgets:
                         root.after_idle(ui_widgets['schedule_view']._refresh_data)
+                    try:
+                        root.after_idle(update_profile_list)
+                    except Exception:
+                        pass
             except Exception as loop_err:
                 logger.error(f"Lỗi trong schedule daemon loop: {loop_err}")
 

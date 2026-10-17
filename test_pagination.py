@@ -113,6 +113,10 @@ class TestPagination(unittest.TestCase):
         self.assertEqual(calculate_pagination(100, "100 / trang", 1)[2], 100)
         self.assertEqual(calculate_pagination(100, "200 / trang", 1)[2], 200)
 
+    def test_default_page_size_is_50(self):
+        """Default application pagination should parse to 50 items per page."""
+        self.assertEqual(calculate_pagination(100, "50 / trang", 1)[2], 50)
+
 
 if __name__ == "__main__":
     unittest.main()

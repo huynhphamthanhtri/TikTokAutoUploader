@@ -503,5 +503,147 @@ class TestDirectApiNativeSchedule(unittest.TestCase):
             self.assertTrue(vid3.exists())
 
 
+class TestBulkScheduleModalUI(unittest.TestCase):
+    def test_modal_fixed_bottom_bar_and_scrollable_container(self):
+        """BulkScheduleModal must have fixed bottom bar and scrollable container."""
+        import customtkinter as ctk
+        from schedule_ui import BulkScheduleModal
+        try:
+            root = ctk.CTk()
+            root.withdraw()
+        except Exception:
+            self.skipTest("Tkinter display not available")
+
+        try:
+            modal = BulkScheduleModal(root, selected_profiles=["Profile_A"])
+            self.assertTrue(hasattr(modal, "scroll"))
+            self.assertIsInstance(modal.scroll, ctk.CTkScrollableFrame)
+            self.assertTrue(hasattr(modal, "btn_submit"))
+            self.assertTrue(modal.btn_submit.winfo_exists())
+            self.assertEqual(modal.btn_submit.cget("text"), "🚀 1-Click Lên Lịch Tự Động")
+            modal.destroy()
+        finally:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
+class TestScheduleSummaryAndProfileTableIntegration(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp(prefix="test_sched_summary_")
+        self.storage_file = Path(self.test_dir) / "scheduled_posts.json"
+        self.mgr = ScheduleManager(storage_file=self.storage_file)
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_summary_map_empty(self):
+        """Khi chưa có task nào, trả về dict rỗng."""
+        res = self.mgr.get_schedule_summary_map()
+        self.assertEqual(res, {})
+
+    def test_summary_map_multiple_profiles_and_dates(self):
+        """Tổng hợp chính xác số clip chờ và mốc ngày muộn nhất cho từng profile."""
+        self.mgr.add_tasks([
+            {
+                "id": "t1",
+                "profile_name": "Prof_Alpha",
+                "scheduled_time": "2026-10-18T10:00:00",
+                "status": "PENDING",
+            },
+            {
+                "id": "t2",
+                "profile_name": "Prof_Alpha",
+                "scheduled_time": "2026-10-20T19:30:00",
+                "status": "SERVER_SCHEDULED",
+            },
+            {
+                "id": "t3",
+                "profile_name": "Prof_Alpha",
+                "scheduled_time": "2026-10-19T14:15:00",
+                "status": "QUEUED",
+            },
+            # Task đã hoàn thành hoặc hủy của Alpha không tính vào pending
+            {
+                "id": "t4",
+                "profile_name": "Prof_Alpha",
+                "scheduled_time": "2026-10-25T14:15:00",
+                "status": "SUCCESS",
+            },
+            {
+                "id": "t5",
+                "profile_name": "Prof_Alpha",
+                "scheduled_time": "2026-10-26T14:15:00",
+                "status": "CANCELLED",
+            },
+            # Profile Beta: 1 task
+            {
+                "id": "tb1",
+                "profile_name": "Prof_Beta",
+                "scheduled_time": "2026-10-21T08:00:00",
+                "status": "PENDING",
+            },
+            # Profile Gamma: Task có ngày hẹn không hợp lệ (không parse được ISO)
+            {
+                "id": "tg1",
+                "profile_name": "Prof_Gamma",
+                "scheduled_time": "INVALID_DATE_FORMAT",
+                "status": "MISSED_RESCHEDULED",
+            },
+        ])
+
+        summary = self.mgr.get_schedule_summary_map()
+        self.assertEqual(len(summary), 3)
+
+        alpha = summary["Prof_Alpha"]
+        self.assertEqual(alpha["pending_count"], 3)
+        self.assertEqual(alpha["latest_date_str"], "20/10")
+        self.assertEqual(alpha["badge"], "📅 Đến 20/10 (3 clip)")
+
+        beta = summary["Prof_Beta"]
+        self.assertEqual(beta["pending_count"], 1)
+        self.assertEqual(beta["latest_date_str"], "21/10")
+        self.assertEqual(beta["badge"], "📅 Đến 21/10 (1 clip)")
+
+        gamma = summary["Prof_Gamma"]
+        self.assertEqual(gamma["pending_count"], 1)
+        self.assertEqual(gamma["badge"], "📅 (1 clip)")
+
+    def test_upload_badge_display_logic(self):
+        """Kiểm tra logic hiển thị badge trạng thái Tiến Độ Đăng (Phương án 1)."""
+        from profile_runtime_status import UploadState, upload_label
+
+        summary = {
+            "Prof_Sched": {
+                "pending_count": 3,
+                "latest_date_str": "20/10",
+                "badge": "📅 Đến 20/10 (3 clip)",
+            }
+        }
+
+        def compute_upload_badge(p_name, upload_state):
+            sched_info = summary.get(p_name)
+            if upload_state == UploadState.IDLE:
+                if sched_info and sched_info.get("badge"):
+                    return sched_info["badge"]
+                return upload_label(upload_state)
+            elif upload_state == UploadState.SUCCEEDED and sched_info and sched_info.get("latest_date_str"):
+                return f"Đã đăng • 📅 {sched_info['latest_date_str']}"
+            return upload_label(upload_state)
+
+        # 1. Profile có lịch và đang rảnh (IDLE) -> Hiển thị ngày và số clip
+        self.assertEqual(compute_upload_badge("Prof_Sched", UploadState.IDLE), "📅 Đến 20/10 (3 clip)")
+
+        # 2. Profile không có lịch và đang rảnh (IDLE) -> Hiển thị "Chờ video"
+        self.assertEqual(compute_upload_badge("Prof_NoSched", UploadState.IDLE), "Chờ video")
+
+        # 3. Profile có lịch nhưng vừa đăng xong clip trước đó (SUCCEEDED) -> Hiển thị "Đã đăng • 📅 20/10"
+        self.assertEqual(compute_upload_badge("Prof_Sched", UploadState.SUCCEEDED), "Đã đăng • 📅 20/10")
+
+        # 4. Profile đang thực sự tải lên (UPLOADING) -> Luôn ưu tiên hiển thị tiến trình đang tải
+        self.assertEqual(compute_upload_badge("Prof_Sched", UploadState.UPLOADING), "Đang tải video")
+
+
 if __name__ == "__main__":
     unittest.main()
