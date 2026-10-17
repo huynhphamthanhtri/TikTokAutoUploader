@@ -2506,6 +2506,69 @@ def check_license_online_or_cache(key):
 
     return False, {}, msg
 
+def verify_license_cache(key: str) -> tuple[bool, dict, str]:
+    """Xác thực nhanh license từ cache offline (trong thời gian ân hạn 3 ngày).
+    Thời gian thực thi < 1ms, không gọi mạng để UI khởi động tức thì.
+    """
+    if not key:
+        return False, {}, "Thiếu license key."
+    cache = _load_license_cache()
+    if not cache or not isinstance(cache, dict):
+        return False, {}, "Chưa có cache license."
+    device_id = _device_fingerprint()
+    if cache.get("key") != key or cache.get("device_id") != device_id:
+        return False, {}, "Cache không khớp thiết bị hoặc key."
+    now_epoch = int(time.time())
+    last_ok = int(cache.get("last_ok", 0))
+    within_grace = (now_epoch - last_ok) <= LICENSE_GRACE_SECONDS
+    if not within_grace:
+        return False, {}, "Cache đã quá hạn ân hạn offline (3 ngày)."
+    if cache.get("expiry_epoch"):
+        if now_epoch > int(cache["expiry_epoch"]):
+            return False, {}, "License đã hết hạn sử dụng."
+    info = {
+        "status": "CACHED",
+        "key": key,
+        "device_id": device_id,
+        "last_ok": last_ok,
+        "expiry_epoch": cache.get("expiry_epoch"),
+    }
+    return True, info, "Dùng cache offline hợp lệ."
+
+def _background_license_sync(key: str):
+    """Đồng bộ trạng thái License với Google Sheets ngầm trong background thread."""
+    try:
+        device_id = _device_fingerprint()
+        ok, info, msg = _validate_against_sheet(key, device_id)
+        if ok:
+            exp_dt = _parse_date_yyyy_mm_dd(info.get("expiry", ""))
+            exp_epoch = int(exp_dt.timestamp()) if exp_dt else None
+            cache = {
+                "key": key,
+                "device_id": device_id,
+                "last_ok": int(time.time()),
+                "expiry_epoch": exp_epoch,
+            }
+            _save_license_cache(cache)
+        else:
+            status = str(info.get("status", "")).strip().upper()
+            if status in ("BANNED", "EXPIRED", "REVOKED") or "không tồn tại" in msg.lower():
+                def _on_revoked():
+                    global LICENSE_OK
+                    LICENSE_OK = False
+                    stop_all_in_project()
+                    _set_ui_enabled(False)
+                    update_status(f"License mất hiệu lực ({msg}).")
+                    _license_dialog(
+                        on_success=lambda: _set_ui_enabled(True),
+                        is_first_run=True,
+                        initial_message=f"License mất hiệu lực: {msg}",
+                    )
+                if 'root' in globals() and root.winfo_exists():
+                    root.after(0, _on_revoked)
+    except Exception as e:
+        logger.debug(f"Background license sync error (offline/mạng chậm): {e}")
+
 def _license_dialog(on_success, is_first_run=True, initial_message=""):
     from ui_dialogs import LicenseModal
     cache = _load_license_cache() or {}
@@ -2582,24 +2645,35 @@ def require_license_then_boot():
     def _after_ok():
         _set_ui_enabled(True)
         load_configs()
-        update_profile_list()
+        # Loại bỏ lượt render update_profile_list() trùng lặp vì load_configs() đã render rồi
         update_status("License OK. Hệ thống sẵn sàng.")
         _start_youtube_monitor_safe()
         threading.Thread(target=_license_watchdog, daemon=True).start()
-        root.after(500, _first_run_download_check)
+        threading.Thread(target=_first_run_download_check_worker, daemon=True).start()
         root.after(5000, _run_background_update_check)
 
-    # 1. Thử xác thực ngầm nếu đã có License Key lưu trong cache
+    # 1. Thử xác thực Cache-First (< 1ms) nếu đã có License Key lưu trong cache và còn hạn
     cache = _load_license_cache()
     saved_key = str(cache.get("key", "")).strip() if isinstance(cache, dict) else ""
     if saved_key:
+        cache_ok, cache_info, _ = verify_license_cache(saved_key)
+        if cache_ok:
+            LICENSE_OK = True
+            LICENSE_KEY = saved_key
+            LICENSE_INFO = cache_info
+            root.after(0, _after_ok)
+            # Luồng đồng bộ Google Sheets chạy ngầm trong background, không block UI
+            threading.Thread(target=_background_license_sync, args=(saved_key,), daemon=True).start()
+            return
+
+        # Nếu cache không hợp lệ (hết hạn ân hạn 3 ngày), thử xác thực trực tiếp qua Google Sheets
         try:
             ok, info, _msg = check_license_online_or_cache(saved_key)
             if ok:
                 LICENSE_OK = True
                 LICENSE_KEY = saved_key
                 LICENSE_INFO = info
-                root.after(50, _after_ok)
+                root.after(0, _after_ok)
                 return
         except Exception:
             pass
@@ -4152,6 +4226,47 @@ def _refresh_status_bar():
             )
     except Exception:
         pass
+
+def _first_run_download_check_worker():
+    """Kiểm tra tài nguyên ngầm trong Background Thread để không làm đơ giao diện."""
+    try:
+        from version import RESOURCE_ASSETS
+        import youtube_monitor.ffmpeg_helper as fh
+        import youtube_monitor.ngrok_helper as nh
+
+        missing = {}
+        for local_name, info in RESOURCE_ASSETS.items():
+            path = app_base_dir() / local_name
+            if not path.exists():
+                missing[local_name] = info
+
+        browser_info = RESOURCE_ASSETS.get("Browser") or {}
+        from browser_engine_manager import verify_installed_engine_compatibility, clean_legacy_browser_engines
+        is_engine_compat, _ = verify_installed_engine_compatibility(app_base_dir())
+        if "Browser" not in missing:
+            if not is_engine_compat:
+                clean_legacy_browser_engines(app_base_dir(), remove_primary=True)
+                missing["Browser"] = browser_info
+            elif browser_info.get("validate"):
+                if any(not (app_base_dir() / p).exists() for p in browser_info["validate"]):
+                    clean_legacy_browser_engines(app_base_dir(), remove_primary=True)
+                    missing["Browser"] = browser_info
+
+        ffmpeg_ok, _, _ = fh.check_ffmpeg()
+        ffmpeg_needed = not ffmpeg_ok
+
+        ngrok_ok, _, _ = nh.check_ngrok()
+        ngrok_needed = not ngrok_ok
+
+        # Nếu đã đủ tài nguyên (trường hợp thông thường), kết thúc ngay, UI không bị block 1 miligiây nào
+        if not missing and not ffmpeg_needed and not ngrok_needed:
+            return
+
+        # Nếu thiếu tài nguyên, chuyển về main thread hiển thị hộp thoại hỏi tải
+        if 'root' in globals() and root.winfo_exists():
+            root.after(0, _first_run_download_check)
+    except Exception as e:
+        logger.debug(f"Lỗi kiểm tra tài nguyên lần đầu ngầm: {e}")
 
 def _first_run_download_check():
     """Kiểm tra và tải tài nguyên thiếu (Browser, FFmpeg, ngrok.exe)."""
@@ -9199,7 +9314,7 @@ root.after(1000, _tick)
 root.after(100, _drain_update_ui_queue)
 
 if __name__ == "__main__":
-    require_license_then_boot()
+    root.after(0, require_license_then_boot)
     _run_auto6_watcher_test_from_env()
     _run_single_upload_test_from_env()
     _run_live_verify_from_env()

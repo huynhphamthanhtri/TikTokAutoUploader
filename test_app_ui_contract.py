@@ -106,13 +106,12 @@ class TestAppUIContract(unittest.TestCase):
             "guide_view",
             "stats_workspace",
             "stats_view",
-            "selection_action_bar",
         ]
 
         for key in required_keys:
             self.assertIn(key, widgets, f"Missing required widget key: {key}")
 
-        self.assertFalse(widgets["selection_action_bar"].winfo_ismapped())
+        self.assertNotIn("selection_action_bar", widgets)
         self.assertTrue(widgets["log_drawer"].is_expanded)
         self.assertTrue(widgets["log_drawer"].content_frame.winfo_manager())
 

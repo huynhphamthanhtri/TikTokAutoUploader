@@ -20,7 +20,6 @@ from typing import Any, Callable, Dict
 from ui_components import (
     CollapsibleLogDrawer,
     ProjectList,
-    SelectionActionBar,
     SidebarButton,
     SummaryCard,
     UIThemeTokens,
@@ -311,87 +310,23 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     main_area = ctk.CTkFrame(app_shell, fg_color=UIThemeTokens.BG_ROOT, corner_radius=0)
     main_area.pack(side="left", fill="both", expand=True)
 
-    # Top Header Bar
-    header_bar = ctk.CTkFrame(main_area, height=48, corner_radius=0, fg_color=UIThemeTokens.BG_HEADER, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
-    header_bar.pack(fill="x", side="top")
-
-    # Current Project Label
-    header_proj_lbl = ctk.CTkLabel(
-        header_bar,
-        textvariable=state.get("header_project_label", state["selected_project_var"]),
-        font=("Segoe UI Semibold", 13),
-        text_color=UIThemeTokens.TEXT_PRIMARY,
-    )
-    header_proj_lbl.pack(side="left", padx=16)
-
-    # Search Bar in Header
-    search_frame = ctk.CTkFrame(header_bar, corner_radius=8, fg_color="#f8fafc", border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
-    search_frame.pack(side="left", fill="x", expand=True, padx=16, pady=7)
-    ctk.CTkEntry(
-        search_frame,
-        textvariable=state["filter_var"],
-        height=28,
-        font=UIThemeTokens.FONT_BODY,
-        placeholder_text="🔍 Tìm kiếm hồ sơ, TikTok ID, proxy, trạng thái, khu vực...",
-        border_width=0,
-        fg_color="transparent",
-    ).pack(fill="x", padx=6)
-
-    # Zoom / Theme / Hidden Compatibility Dropdown Frame
-    compat_frame = ctk.CTkFrame(header_bar, fg_color="transparent")
-    compat_frame.pack(side="right", padx=12)
-
-    ctk.CTkLabel(compat_frame, text="Zoom:", font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_MUTED).pack(side="left", padx=(0, 4))
-    zoom_box = ctk.CTkComboBox(compat_frame, values=["90%", "100%", "110%"], variable=state["scale_var"], width=82, height=28, font=UIThemeTokens.FONT_BODY)
-    zoom_box.pack(side="left")
-
-    # Compatibility project dropdown (hidden frame for main.py contract preservation)
-    hidden_compat_frame = ctk.CTkFrame(header_bar, fg_color="transparent")
+    # Compatibility project dropdown (hidden unmapped frame for main.py contract preservation)
+    hidden_compat_frame = ctk.CTkFrame(main_area, fg_color="transparent")
     project_dropdown = ctk.CTkComboBox(hidden_compat_frame, variable=state["selected_project_var"], width=10)
     widgets["project_dropdown"] = project_dropdown
 
     # Workspace View Container (Frame Stacking)
     workspace_container = ctk.CTkFrame(main_area, fg_color="transparent", corner_radius=0)
-    workspace_container.pack(fill="both", expand=True, padx=10, pady=(8, 0))
+    workspace_container.pack(fill="both", expand=True, padx=10, pady=(10, 0))
     workspace_container.grid_rowconfigure(0, weight=1)
     workspace_container.grid_columnconfigure(0, weight=1)
     widgets["workspace_container"] = workspace_container
 
     # --------------------------------------------------------------------------
-    # WORKSPACE 1: PROFILES WORKSPACE
+    # WORKSPACE 1: PROFILES WORKSPACE (Streamlined Top)
     # --------------------------------------------------------------------------
     profiles_workspace = ctk.CTkFrame(workspace_container, fg_color="transparent")
     profiles_workspace.grid(row=0, column=0, sticky="nsew")
-
-    # Summary Cards Row (4 Cards)
-    summary_row = ctk.CTkFrame(profiles_workspace, fg_color="transparent")
-    summary_row.pack(fill="x", pady=(0, 8))
-    summary_row.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="stat")
-
-    # Summary state variables
-    summary_total_var = state.get("header_total_label", ctk.StringVar(value="0"))
-    summary_running_var = state.get("header_running_label", ctk.StringVar(value="0"))
-    summary_cookie_var = state.get("summary_cookie_var", ctk.StringVar(value="0"))
-    summary_error_var = state.get("summary_error_var", ctk.StringVar(value="0"))
-
-    card_total = SummaryCard(summary_row, title="Tổng Hồ Sơ", value_var=summary_total_var, accent_color=UIThemeTokens.ACCENT_PRIMARY)
-    card_total.grid(row=0, column=0, padx=(0, 4), sticky="nsew")
-
-    card_running = SummaryCard(summary_row, title="Đang Chạy", value_var=summary_running_var, accent_color=UIThemeTokens.STATUS_RUNNING)
-    card_running.grid(row=0, column=1, padx=4, sticky="nsew")
-
-    card_cookie = SummaryCard(summary_row, title="Cookie Live", value_var=summary_cookie_var, accent_color=UIThemeTokens.STATUS_LIVE)
-    card_cookie.grid(row=0, column=2, padx=4, sticky="nsew")
-
-    card_error = SummaryCard(summary_row, title="Lỗi / Die", value_var=summary_error_var, accent_color=UIThemeTokens.STATUS_ERROR)
-    card_error.grid(row=0, column=3, padx=(4, 0), sticky="nsew")
-
-    widgets["summary_cards"] = {
-        "total": card_total,
-        "running": card_running,
-        "cookie": card_cookie,
-        "error": card_error,
-    }
 
     # Action Toolbar (Top Toolbar for Profiles)
     topbar = ctk.CTkFrame(profiles_workspace, corner_radius=10, fg_color=UIThemeTokens.BG_CARD, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
@@ -642,15 +577,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
     widgets["tree"] = tree
 
-    # Selection Action Bar (Thanh thao tác khi chọn 1..N hồ sơ)
-    action_bar_handlers = {
-        "start_selected": handlers.get("start_selected", lambda: None),
-        "stop_selected": handlers.get("stop_selected", lambda: None),
-        "check_cookie": handlers.get("check_cookie_live", lambda: None),
-        "assign_to_project": handlers.get("assign_to_project", lambda: None),
-    }
-    selection_action_bar = SelectionActionBar(table_card, handlers=action_bar_handlers)
-    widgets["selection_action_bar"] = selection_action_bar
+
 
     # Pagination Bar (Dưới đáy bảng hồ sơ)
     pagination_bar = ctk.CTkFrame(table_card, fg_color="transparent", height=32)
