@@ -74,6 +74,14 @@ class ManualCloseMainFlowTests(unittest.TestCase):
         self.assertIn("token.quit()", glue_source)
         self.assertIn("cancel_session(token.handle, timeout=10)", glue_source)
 
+    def test_open_browser_default_url_is_tiktok_studio_content(self):
+        manual_flow = self.source[
+            self.source.index("def open_browser()"):
+            self.source.index("def _capture_after_manual_close")
+        ]
+        self.assertIn("target_url = TIKTOK_STUDIO_CONTENT_URL", manual_flow)
+        self.assertIn('TIKTOK_STUDIO_CONTENT_URL = "https://www.tiktok.com/tiktokstudio/content"', self.source)
+
     def test_open_browser_injects_cookies_when_available(self):
         manual_flow = self.source[
             self.source.index("def open_browser()"):

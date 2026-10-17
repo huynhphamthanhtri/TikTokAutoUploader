@@ -94,13 +94,17 @@ class TikTokVodUploader:
             raise VodUploadError("Tiến trình upload video đã bị hủy bỏ bởi người dùng.")
 
     def _get_common_headers(self) -> Dict[str, str]:
-        return {
+        raw = {
             "User-Agent": self.user_agent,
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "en-US,en;q=0.9",
             "Referer": "https://www.tiktok.com/tiktokstudio/upload?from=webapp",
             "Origin": "https://www.tiktok.com",
             "Cookie": cookies_to_header_str(self.session_cookies),
+        }
+        return {
+            str(k).encode("latin-1", "ignore").decode("latin-1"): str(v).encode("latin-1", "ignore").decode("latin-1")
+            for k, v in raw.items()
         }
 
     # =========================================================================

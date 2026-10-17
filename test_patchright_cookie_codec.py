@@ -30,6 +30,15 @@ class PatchrightCookieCodecTests(unittest.TestCase):
         self.assertTrue(converted["httpOnly"])
         self.assertNotIn("expiry", converted)
 
+    def test_selenium_to_patchright_supports_expiration_aliases(self):
+        # Supports expires alias
+        c1 = {"name": "sid", "value": "x", "domain": ".tiktok.com", "expires": 2_000_000_000}
+        self.assertEqual(selenium_cookie_to_patchright(c1)["expires"], 2_000_000_000.0)
+
+        # Supports Chrome extension expirationDate
+        c2 = {"name": "sid", "value": "x", "domain": ".tiktok.com", "expirationDate": 2_000_000_000}
+        self.assertEqual(selenium_cookie_to_patchright(c2)["expires"], 2_000_000_000.0)
+
     def test_patchright_to_selenium_renames_expiration(self):
         converted = patchright_cookie_to_selenium({
             "name": "token", "value": "x", "domain": ".example.com",

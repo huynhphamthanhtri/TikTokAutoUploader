@@ -312,6 +312,22 @@ class PatchrightBrowserTests(unittest.TestCase):
         tiktok = [c for c in context.added_cookies if "tiktok.com" in str(c.get("domain", ""))]
         self.assertEqual(len(tiktok), 2)
 
+    def test_import_sanitizes_expired_cookies_so_chromium_retains_them(self):
+        import time
+        now_ts = time.time()
+        session = self.open()
+        report = self.browser.import_cookies(
+            session.handle,
+            [
+                {"name": "sessionid", "value": "sess", "domain": ".tiktok.com", "path": "/", "expires": 1700000000.0},
+            ],
+        ).result(2).value
+        self.assertEqual(report.auth_accepted, 1)
+        context = self.playwright.chromium.contexts[0]
+        added = [c for c in context.added_cookies if c.get("name") == "sessionid"]
+        self.assertEqual(len(added), 1)
+        self.assertGreater(added[0]["expires"], now_ts)
+
     def test_import_rolls_back_tiktok_cookies_on_add_failure(self):
         session = self.open()
         context = self.playwright.chromium.contexts[0]

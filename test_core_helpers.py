@@ -12,6 +12,25 @@ from core_helpers import (
 
 
 class CoreHelperTests(unittest.TestCase):
+    def test_parse_cookie_refreshes_past_expiry_and_supports_chrome_format(self):
+        import time
+        now = time.time()
+        # Cookie with past expiry (e.g. year 2023 or August 2026)
+        past_json = '[{"name":"sessionid","value":"xyz","domain":".tiktok.com","expiry":1700000000}]'
+        parsed = parse_cookie(past_json)
+        self.assertGreater(parsed[0]['expiry'], now)
+
+        # Cookie with Chrome extension expirationDate in past
+        chrome_json = '[{"name":"sessionid","value":"xyz","domain":".tiktok.com","expirationDate":1700000000}]'
+        parsed_chrome = parse_cookie(chrome_json)
+        self.assertGreater(parsed_chrome[0]['expiry'], now)
+
+        # Cookie with future expiry preserved
+        future_ts = now + 999999
+        future_json = f'[{{"name":"sessionid","value":"xyz","domain":".tiktok.com","expiry":{future_ts}}}]'
+        parsed_future = parse_cookie(future_json)
+        self.assertAlmostEqual(parsed_future[0]['expiry'], future_ts, delta=1)
+
     def test_parse_cookie_supports_json_and_cookie_header(self):
         self.assertEqual(
             parse_cookie('[{"name":"sid","value":"abc","domain":".tiktok.com"}]')[0]['domain'],

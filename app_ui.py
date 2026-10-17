@@ -191,6 +191,16 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     btn_nav_profiles.pack(fill="x", pady=2)
     sidebar_buttons["profiles"] = btn_nav_profiles
 
+    btn_nav_schedule = SidebarButton(
+        nav_container,
+        text="Lịch Đăng",
+        icon_text="📅",
+    )
+    btn_nav_schedule.pack(fill="x", pady=2)
+    sidebar_buttons["schedule"] = btn_nav_schedule
+    sidebar_buttons["scheduler"] = btn_nav_schedule
+    sidebar_buttons["auto_schedule"] = btn_nav_schedule
+
     btn_nav_youtube = SidebarButton(
         nav_container,
         text="YouTube Studio",
@@ -446,6 +456,19 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     btn_check_post.pack(side="left", padx=3)
     widgets["btn_check_post"] = btn_check_post
 
+    btn_schedule = ctk.CTkButton(
+        manage_left,
+        text="📅 Lên Lịch",
+        width=95,
+        height=32,
+        font=UIThemeTokens.FONT_BUTTON,
+        fg_color=("#059669", "#047857"),
+        hover_color=("#047857", "#065f46"),
+        command=handlers.get('open_schedule_modal', lambda: None),
+    )
+    btn_schedule.pack(side="left", padx=3)
+    widgets["btn_schedule"] = btn_schedule
+
     overflow_actions = [
         ("🔁 Check Post (Trùng/Shadow)", handlers.get('check_profile_posts_dialog', lambda: None)),
         ("Sửa", handlers['edit_profile']),
@@ -691,6 +714,20 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     )
     btn_last.pack(side="left", padx=2)
     widgets["pagination_btn_last"] = btn_last
+
+    # --------------------------------------------------------------------------
+    # WORKSPACE SCHEDULE: AUTO SCHEDULE WORKSPACE (LỊCH ĐĂNG TỰ ĐỘNG)
+    # --------------------------------------------------------------------------
+    schedule_workspace = ctk.CTkFrame(workspace_container, fg_color="transparent")
+    schedule_workspace.grid(row=0, column=0, sticky="nsew")
+    schedule_workspace.grid_remove()
+    schedule_workspace.grid_rowconfigure(0, weight=1)
+    schedule_workspace.grid_columnconfigure(0, weight=1)
+
+    if "schedule_view_builder" in handlers and callable(handlers["schedule_view_builder"]):
+        schedule_view = handlers["schedule_view_builder"](schedule_workspace)
+        schedule_view.pack(fill="both", expand=True)
+        widgets["schedule_view"] = schedule_view
 
     # --------------------------------------------------------------------------
     # WORKSPACE 2: YOUTUBE STUDIO (UNIFIED WORKSPACE WITH 3 SUB-TABS)
@@ -1041,7 +1078,14 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
 
     def switch_workspace(target_name: str) -> None:
         # Route subtabs if needed
-        if target_name in ("youtube", "monitor"):
+        if target_name in ("schedule", "scheduler", "auto_schedule"):
+            target_key = "schedule"
+            if "schedule_view" in widgets and hasattr(widgets["schedule_view"], "_refresh_data"):
+                try:
+                    widgets["schedule_view"]._refresh_data()
+                except Exception:
+                    pass
+        elif target_name in ("youtube", "monitor"):
             _switch_youtube_subtab("monitor")
             target_key = "youtube"
         elif target_name == "batch":
@@ -1070,6 +1114,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
 
         primary_workspaces = {
             "profiles": (profiles_workspace, btn_nav_profiles),
+            "schedule": (schedule_workspace, btn_nav_schedule),
             "youtube": (youtube_workspace, btn_nav_youtube),
             "monetization": (monetization_workspace, btn_nav_monetization),
             "statistics": (stats_workspace, btn_nav_statistics),
@@ -1102,6 +1147,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
         widgets["dedup_view"] = dedup_view
 
     btn_nav_profiles.configure(command=lambda: switch_workspace("profiles"))
+    btn_nav_schedule.configure(command=lambda: switch_workspace("schedule"))
     btn_nav_youtube.configure(command=lambda: switch_workspace("youtube_studio"))
     btn_nav_monetization.configure(command=lambda: switch_workspace("monetization"))
     btn_nav_statistics.configure(command=lambda: switch_workspace("statistics"))
@@ -1179,6 +1225,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     # Super Context Menu for Profiles Tree
     ctx_menu = Menu(root, tearoff=0)
     ctx_menu.add_command(label="🌐 Login / Mở trình duyệt", command=handlers['open_browser'])
+    ctx_menu.add_command(label="📅 Lên lịch đăng bài tự động...", command=handlers.get('open_schedule_modal', lambda: None))
     ctx_menu.add_command(label="🔁 Kiểm tra bài đăng (Check Post / Check Trùng)", command=handlers.get('check_profile_posts_dialog', lambda: None))
     ctx_menu.add_command(label="Kiểm tra Cookie (Đã chọn)", command=handlers['check_cookie_live'])
     ctx_menu.add_command(label="Kiểm tra thông tin TikTok", command=handlers['inspect_tiktok_account'])

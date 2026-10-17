@@ -7,6 +7,7 @@ import json
 import os
 import re
 import threading
+import time
 import uuid
 from concurrent.futures import Future
 from dataclasses import dataclass, field, fields, is_dataclass, replace
@@ -402,11 +403,25 @@ class PatchrightBrowser:
         session = self._get_session(handle)
         before = await session.context.cookies()
         tiktok_before = [cookie for cookie in before if _is_tiktok_cookie(cookie)]
+        now_ts = time.time()
+        expiry_future = now_ts + 30 * 86400
+        sanitized_cookies = []
+        for cookie in cookies:
+            c = dict(cookie)
+            exp = c.get("expires")
+            if exp is not None:
+                try:
+                    exp_val = float(exp)
+                    if exp_val > 0 and exp_val <= now_ts:
+                        c["expires"] = expiry_future
+                except (ValueError, TypeError):
+                    c["expires"] = expiry_future
+            sanitized_cookies.append(c)
         try:
             await session.context.clear_cookies(domain=_TIKTOK_DOMAIN_PATTERN)
-            await session.context.add_cookies(cookies)
+            await session.context.add_cookies(sanitized_cookies)
             after = await session.context.cookies()
-            report = _build_import_report(cookies, after)
+            report = _build_import_report(sanitized_cookies, after)
             if report.auth_requested > 0 and report.auth_accepted == 0:
                 raise RuntimeError("Chromium did not retain any requested TikTok auth cookie")
         except Exception:

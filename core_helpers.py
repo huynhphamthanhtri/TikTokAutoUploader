@@ -33,13 +33,34 @@ def _normalize_cookie_domain(domain):
 def parse_cookie(cookie_str):
     if not cookie_str:
         return None
+    now_ts = datetime.now().timestamp()
+    expiry_future = int(now_ts) + 30 * 86400
     try:
         cookies = json.loads(cookie_str)
         if not isinstance(cookies, list):
             raise ValueError("Cookie JSON phải là danh sách")
         for cookie in cookies:
+            if not isinstance(cookie, dict):
+                continue
             if 'domain' in cookie:
                 cookie['domain'] = _normalize_cookie_domain(cookie['domain'])
+            raw_exp = cookie.get('expiry')
+            if raw_exp is None:
+                raw_exp = cookie.get('expires')
+            if raw_exp is None:
+                raw_exp = cookie.get('expirationDate')
+
+            if raw_exp is not None:
+                try:
+                    exp_float = float(raw_exp)
+                    if exp_float <= now_ts:
+                        cookie['expiry'] = expiry_future
+                    else:
+                        cookie['expiry'] = exp_float
+                except (ValueError, TypeError):
+                    cookie['expiry'] = expiry_future
+            else:
+                cookie['expiry'] = expiry_future
         return cookies
     except json.JSONDecodeError:
         cookies = []

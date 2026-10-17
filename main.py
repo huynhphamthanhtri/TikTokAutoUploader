@@ -108,6 +108,9 @@ from cookie_live_check import (
     check_cookie_fast_http,
 )
 import account_session_runner as session_runner
+from schedule_calculator import interleave_tasks_by_profile
+from schedule_manager import ScheduleManager
+from schedule_ui import AutoScheduleView, BulkScheduleModal
 from tiktok_account_inspection import (
     AccountInspectionResult,
     InspectionState,
@@ -212,6 +215,7 @@ MAX_STATUS_LOG_LINES = 1000
 MAX_IMPORTANT_LOG_LINES = 300
 TIKTOK_BASE_URL = "https://www.tiktok.com"
 TIKTOK_UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center&tab=video"
+TIKTOK_STUDIO_CONTENT_URL = "https://www.tiktok.com/tiktokstudio/content"
 FAILED_UPLOADS_LOG = app_base_dir() / "failed_uploads.log"
 UPLOAD_BENCHMARK_LOG = app_base_dir() / "upload_benchmarks.jsonl"
 
@@ -7321,14 +7325,39 @@ def open_browser():
 
             # Cookie-First Injection: Ưu tiên nạp Cookie đã lưu vào phiên làm việc
             cookies = parse_cookie(cfg.get('cookie_str', ''))
+            # Nếu config không có cookie_str hoặc thiếu auth cookie, fallback đọc trực tiếp từ SQLite của Profile
+            if not cookies or not any(c.get('name') in ('sessionid', 'sessionid_ss', 'sid_tt') for c in cookies if isinstance(c, dict)):
+                try:
+                    from tiktok_cookie_extractor import get_profile_tiktok_cookies
+                    sqlite_cookies = get_profile_tiktok_cookies(cfg)
+                    if sqlite_cookies and any(k in sqlite_cookies for k in ('sessionid', 'sessionid_ss', 'sid_tt')):
+                        now_ts = datetime.now().timestamp()
+                        expiry_future = int(now_ts) + 30 * 86400
+                        extracted_list = [
+                            {
+                                'name': k,
+                                'value': v,
+                                'domain': '.tiktok.com',
+                                'path': '/',
+                                'expiry': expiry_future,
+                            }
+                            for k, v in sqlite_cookies.items()
+                        ]
+                        cookies = extracted_list
+                        update_status(f"[{nm}] Đã trích xuất {len(cookies)} cookie từ SQLite của profile.")
+                except Exception as extract_err:
+                    logger.debug(f"[{nm}] Không thể trích xuất cookie từ SQLite: {extract_err}")
+
+            target_url = TIKTOK_STUDIO_CONTENT_URL
             if cookies:
                 try:
-                    browser_glue.import_cookies_report(token, cookies)
+                    report = browser_glue.import_cookies_report(token, cookies)
+                    if report.auth_accepted > 0:
+                        update_status(f"[{nm}] Nạp thành công {report.accepted} cookie (Auth: {report.auth_accepted})")
+                    else:
+                        update_status(f"[{nm}] [WARN] Đã nạp {report.accepted} cookie nhưng chưa có auth cookie")
                 except Exception as e:
                     update_status(f"[{nm}] [WARN] Không thể nạp cookie sẵn: {e}")
-                target_url = TIKTOK_BASE_URL
-            else:
-                target_url = "https://www.tiktok.com/login"
 
             browser_glue.navigate(token, target_url)
 
@@ -8699,6 +8728,281 @@ activity_handlers = {
     'get_profiles': _youtube_profile_names,
 }
 
+# ==============================================================================
+# TIKTOK AUTO-SCHEDULER ENGINE & HANDLERS
+# ==============================================================================
+logger = logging.getLogger("tiktok_scheduler")
+global_schedule_manager = ScheduleManager()
+
+def _execute_schedule_task_upload(task: Dict[str, Any]) -> Tuple[bool, str]:
+    """Thực thi tải lên cho 1 tác vụ lên lịch qua Direct API."""
+    p_name = task.get("profile_name", "")
+    prof_cfg = profiles.get(p_name, {}).get("config", {}) if p_name in profiles else {}
+    v_path = task.get("video_path", "")
+    caption = task.get("title") or Path(v_path).stem
+    exec_mode = task.get("execution_mode", "SERVER_SCHEDULE")
+    sched_epoch = task.get("scheduled_epoch") if exec_mode == "SERVER_SCHEDULE" else None
+
+    update_status(f"[AutoSchedule][{p_name}] Bắt đầu tải lên: {Path(v_path).name}")
+    try:
+        res = run_direct_upload(
+            profile_name=p_name,
+            profile_config=prof_cfg,
+            video_path=v_path,
+            caption=caption,
+            status_callback=lambda msg: update_status(f"[AutoSchedule][{p_name}] {msg}"),
+            stop_before_post=os.environ.get('UPLOAD_TEST_STOP_BEFORE_POST') == '1',
+            workspace_dir=Path(os.path.dirname(os.path.abspath(__file__))),
+            schedule_time=sched_epoch,
+        )
+        if res.outcome in ('posted', 'prepared'):
+            new_status = "SERVER_SCHEDULED" if sched_epoch else "SUCCESS"
+            item_id = str(res.details.get("item_id") or "")
+            task_updates: Dict[str, Any] = {
+                "status": new_status,
+                "completed_at": datetime.now().isoformat(),
+                "tiktok_item_id": item_id,
+                "error_message": "",
+            }
+
+            # Tự động xóa file video gốc nếu delete_source_after_post bật
+            if task.get("delete_source_after_post", True):
+                try:
+                    if os.path.isfile(v_path):
+                        os.remove(v_path)
+                        task_updates["source_deleted"] = True
+                        update_status(f"[AutoSchedule][{p_name}] Đã xóa video gốc: {Path(v_path).name}")
+                        logger.info(f"[AutoSchedule] Đã xóa video gốc an toàn: {v_path}")
+                except Exception as del_err:
+                    logger.warning(f"Không thể xóa file nguồn {v_path}: {del_err}")
+
+            global_schedule_manager.update_task(task["id"], task_updates)
+            update_status(f"[AutoSchedule][{p_name}] Hoàn tất xuất sắc! Link: {res.details.get('video_url', '')}")
+            return True, res.message
+        else:
+            err_msg = res.message or "Tải lên không thành công"
+            global_schedule_manager.update_task(
+                task["id"],
+                {
+                    "status": "FAILED",
+                    "error_message": err_msg,
+                }
+            )
+            update_status(f"[AutoSchedule][{p_name}] Thất bại: {err_msg}")
+            return False, err_msg
+    except Exception as e:
+        err_msg = str(e)
+        global_schedule_manager.update_task(
+            task["id"],
+            {
+                "status": "FAILED",
+                "error_message": err_msg,
+            }
+        )
+        update_status(f"[AutoSchedule][{p_name}] Ngoại lệ khi đăng: {err_msg}")
+        return False, err_msg
+
+_schedule_queue_running = False
+_schedule_queue_paused = False
+_last_profile_upload_time: Dict[str, float] = {}
+
+def _handle_start_schedule_queue(task_ids: Optional[List[str]] = None):
+    """Bắt đầu chạy hàng đợi theo thuật toán xoay vòng Round-Robin chéo tài khoản kèm cooldown an toàn."""
+    global _schedule_queue_running, _schedule_queue_paused
+    if _schedule_queue_running:
+        messagebox.showinfo("Thông báo", "Hàng đợi đang chạy!")
+        return
+
+    if task_ids:
+        raw_tasks = [global_schedule_manager.get_task_by_id(tid) for tid in task_ids]
+        target_tasks = [t for t in raw_tasks if t and t.get("status") in ("PENDING", "FAILED", "MISSED_RESCHEDULED")]
+    else:
+        target_tasks = global_schedule_manager.get_all_tasks(filter_status="PENDING")
+
+    if not target_tasks:
+        messagebox.showinfo("Thông báo", "Không có tác vụ nào đang chờ thực thi!")
+        return
+
+    # Sắp xếp xoay vòng chéo tài khoản: P1(V1) -> P2(V1) -> P1(V2) -> P2(V2)...
+    ordered_tasks = interleave_tasks_by_profile(target_tasks)
+    _schedule_queue_running = True
+    _schedule_queue_paused = False
+
+    def _worker():
+        global _schedule_queue_running, _schedule_queue_paused
+        import random
+        total = len(ordered_tasks)
+        update_status(f"[AutoSchedule] Bắt đầu chạy hàng đợi {total} video (Xoay vòng đa tài khoản)...")
+
+        for idx, t in enumerate(ordered_tasks, 1):
+            if _shutting_down or not _schedule_queue_running:
+                break
+
+            # Kiểm tra trạng thái tạm dừng
+            while _schedule_queue_paused and not _shutting_down and _schedule_queue_running:
+                update_status("[AutoSchedule] Hàng đợi đang tạm dừng...")
+                time.sleep(1)
+
+            if _shutting_down or not _schedule_queue_running:
+                break
+
+            p_name = t.get("profile_name", "")
+            # Cooldown an toàn cho cùng 1 tài khoản (tối thiểu 60s)
+            last_p_time = _last_profile_upload_time.get(p_name, 0)
+            elapsed = time.time() - last_p_time
+            if elapsed < 60 and last_p_time > 0:
+                wait_sec = int(60 - elapsed)
+                update_status(f"[AutoSchedule][{p_name}] Chờ cooldown an toàn tài khoản: còn {wait_sec}s...")
+                for _ in range(wait_sec):
+                    if _shutting_down or not _schedule_queue_running:
+                        break
+                    time.sleep(1)
+
+            if _shutting_down or not _schedule_queue_running:
+                break
+
+            try:
+                global_schedule_manager.update_task(t["id"], {"status": "UPLOADING"})
+                if 'ui_widgets' in globals() and 'schedule_view' in ui_widgets:
+                    root.after_idle(ui_widgets['schedule_view']._refresh_data)
+
+                _execute_schedule_task_upload(t)
+                _last_profile_upload_time[p_name] = time.time()
+            except Exception as e:
+                global_schedule_manager.update_task(t["id"], {"status": "FAILED", "error_message": str(e)})
+
+            if 'ui_widgets' in globals() and 'schedule_view' in ui_widgets:
+                root.after_idle(ui_widgets['schedule_view']._refresh_data)
+
+            # Giãn cách an toàn ngẫu nhiên giữa 2 lượt upload liên tiếp (30s - 60s)
+            if idx < total and _schedule_queue_running and not _shutting_down:
+                cooldown_sec = random.randint(30, 60)
+                update_status(f"[AutoSchedule] Hoàn tất ({idx}/{total}). Giãn cách an toàn {cooldown_sec}s trước lượt tiếp theo...")
+                for _ in range(cooldown_sec):
+                    if _shutting_down or not _schedule_queue_running:
+                        break
+                    time.sleep(1)
+
+        _schedule_queue_running = False
+        _schedule_queue_paused = False
+        update_status("[AutoSchedule] Đã kết thúc phiên xử lý hàng đợi lịch đăng.")
+        if 'ui_widgets' in globals() and 'schedule_view' in ui_widgets:
+            root.after_idle(ui_widgets['schedule_view']._refresh_data)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+def _handle_pause_schedule_queue():
+    """Tạm dừng hoặc tiếp tục hàng đợi đang chạy."""
+    global _schedule_queue_paused, _schedule_queue_running
+    if not _schedule_queue_running:
+        messagebox.showinfo("Thông báo", "Hàng đợi hiện không có tiến trình nào đang chạy.")
+        return
+    _schedule_queue_paused = not _schedule_queue_paused
+    state_str = "TẠM DỪNG" if _schedule_queue_paused else "TIẾP TỤC"
+    update_status(f"[AutoSchedule] Hàng đợi đã được {state_str}.")
+    messagebox.showinfo("Thông báo", f"Đã {state_str} hàng đợi lịch đăng.")
+
+def _handle_schedule_post_now(task_ids: List[str]):
+    """Xử lý yêu cầu Đăng Ngay Lập Tức cho danh sách task."""
+    def _worker():
+        raw_tasks = [global_schedule_manager.get_task_by_id(tid) for tid in task_ids]
+        tasks = [t for t in raw_tasks if t]
+        ordered = interleave_tasks_by_profile(tasks) if len(tasks) > 1 else tasks
+        for t in ordered:
+            if _shutting_down:
+                break
+            global_schedule_manager.update_task(t["id"], {"status": "UPLOADING"})
+            if 'ui_widgets' in globals() and 'schedule_view' in ui_widgets:
+                root.after_idle(ui_widgets['schedule_view']._refresh_data)
+            _execute_schedule_task_upload(t)
+            time.sleep(5)
+        if 'ui_widgets' in globals() and 'schedule_view' in ui_widgets:
+            root.after_idle(ui_widgets['schedule_view']._refresh_data)
+    threading.Thread(target=_worker, daemon=True).start()
+
+def open_schedule_modal():
+    """Mở modal 1-Click to Schedule cho các profile đang chọn trên bảng Profile."""
+    selected = tree.selection() if 'tree' in globals() else ()
+    if selected:
+        target_profiles = [tree.item(i)['values'][0] for i in selected if i in tree.get_children('')]
+    else:
+        target_profiles = sorted(profiles.keys())
+    
+    if not target_profiles:
+        messagebox.showwarning("Thông báo", "Chưa có profile nào trong hệ thống!")
+        return
+
+    prof_configs = {p: profiles[p].get("config", {}) for p in target_profiles if p in profiles}
+
+    def _on_success(created_tasks=None):
+        update_status(f"Đã lên lịch thành công cho {len(target_profiles)} profile.")
+        if 'switch_workspace' in globals():
+            switch_workspace("schedule")
+        elif 'ui_widgets' in globals() and 'schedule_view' in ui_widgets:
+            ui_widgets['schedule_view']._refresh_data()
+
+    BulkScheduleModal(
+        parent=root,
+        selected_profiles=target_profiles,
+        profile_configs=prof_configs,
+        schedule_manager=global_schedule_manager,
+        on_success=_on_success,
+    )
+
+def _build_schedule_view(parent_frame):
+    handlers = {
+        "post_now_handler": _handle_schedule_post_now,
+        "start_queue_handler": _handle_start_schedule_queue,
+        "pause_queue_handler": _handle_pause_schedule_queue,
+    }
+    return AutoScheduleView(parent_frame, schedule_manager=global_schedule_manager, handlers=handlers)
+
+def _start_schedule_daemon():
+    """Khởi động Background Scheduler Daemon Worker kiểm tra các task đến giờ."""
+    if os.environ.get("CI", "").lower() == "true":
+        return
+
+    def _daemon_loop():
+        # 1. Quét phục hồi task lỡ hẹn do tắt máy
+        try:
+            recovered = global_schedule_manager.recover_missed_tasks()
+            if recovered:
+                update_status(f"[AutoSchedule] Đã tự động dời {len(recovered)} video bị lỡ hẹn sang ngày mai.")
+        except Exception as e:
+            logger.error(f"Lỗi recover missed tasks: {e}")
+
+        # 2. Vòng lặp định kỳ 30 giây
+        while not _shutting_down:
+            for _ in range(30):
+                if _shutting_down:
+                    return
+                time.sleep(1)
+
+            try:
+                now_epoch = int(datetime.now().timestamp())
+                pending_tasks = global_schedule_manager.get_all_tasks(filter_status="PENDING")
+                due_tasks = [
+                    t for t in pending_tasks
+                    if t.get("execution_mode") == "LOCAL_QUEUE" and int(t.get("scheduled_epoch", 0)) <= now_epoch
+                ]
+
+                if due_tasks:
+                    # Giới hạn xử lý tối đa 2 task cùng lúc
+                    batch_to_run = due_tasks[:2]
+                    for task in batch_to_run:
+                        if _shutting_down:
+                            return
+                        global_schedule_manager.update_task(task["id"], {"status": "UPLOADING"})
+                        _execute_schedule_task_upload(task)
+                        time.sleep(2)
+
+                    if 'ui_widgets' in globals() and 'schedule_view' in ui_widgets:
+                        root.after_idle(ui_widgets['schedule_view']._refresh_data)
+            except Exception as loop_err:
+                logger.error(f"Lỗi trong schedule daemon loop: {loop_err}")
+
+    threading.Thread(target=_daemon_loop, daemon=True).start()
+
 ui_handlers = {
     'create_project': create_project,
     'delete_project': delete_project,
@@ -8753,8 +9057,11 @@ ui_handlers = {
     'clear_stats': clear_activity_log,
     'get_mtime': get_activity_mtime,
     'dedup_view_builder': _build_dedup_view,
+    'open_schedule_modal': open_schedule_modal,
+    'schedule_view_builder': _build_schedule_view,
 }
 ui_widgets = build_dashboard(root, ui_state, ui_handlers)
+_start_schedule_daemon()
 
 # Bind double-click & right-click on monetization tree
 if 'monetization_tree' in ui_widgets:

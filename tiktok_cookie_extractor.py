@@ -143,16 +143,27 @@ def parse_cookie_string(cookie_str: str) -> Dict[str, str]:
     return cookies
 
 
+def sanitize_latin1(s: str) -> str:
+    """Loại bỏ các ký tự ngoài bảng mã latin-1 (ord > 255) để tránh lỗi HTTP header encoding."""
+    if not s:
+        return ""
+    return str(s).encode("latin-1", "ignore").decode("latin-1")
+
+
 def cookies_to_header_str(cookies: Dict[str, str]) -> str:
     """Chuyển dict cookie thành chuỗi Cookie header HTTP hợp lệ và sạch sẽ."""
     parts = []
     for k, v in cookies.items():
         if not k or not v:
             continue
-        # Bỏ qua các key rác
-        if any(ch in k for ch in '[]{}":;, \t\r\n'):
+        clean_k = sanitize_latin1(str(k))
+        clean_v = sanitize_latin1(str(v))
+        if not clean_k or not clean_v:
             continue
-        parts.append(f"{k}={v}")
+        # Bỏ qua các key rác
+        if any(ch in clean_k for ch in '[]{}":;, \t\r\n'):
+            continue
+        parts.append(f"{clean_k}={clean_v}")
     return "; ".join(parts)
 
 
@@ -230,12 +241,17 @@ def get_profile_tiktok_cookies(profile_config: Dict[str, Any], workspace_dir: Op
     """
     cookies: Dict[str, str] = {}
     profile_path_str = str(profile_config.get("browser_profile_path") or "").strip()
+    chrome_profile_str = str(profile_config.get("chrome_profile") or "").strip()
     profile_name = str(profile_config.get("profile_name") or "").strip()
 
     candidate_dirs: List[Path] = []
     if profile_path_str:
         candidate_dirs.append(Path(profile_path_str))
+    if chrome_profile_str:
+        candidate_dirs.append(Path(chrome_profile_str))
     if workspace_dir and profile_name:
+        candidate_dirs.append(workspace_dir / "Auto_Data" / profile_name / "Profile-Patchright")
+        candidate_dirs.append(workspace_dir / "Auto_Data" / profile_name / "Profile")
         candidate_dirs.append(workspace_dir / "profiles" / profile_name)
         candidate_dirs.append(workspace_dir / "profile" / profile_name)
 

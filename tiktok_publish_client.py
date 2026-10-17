@@ -132,9 +132,11 @@ class TikTokPublishClient:
         allow_content_reuse: bool = True,
         poster_delay_ms: int = 1000,
         playlist_id: str = "",
+        schedule_time: Optional[int] = None,
     ) -> PublishResult:
-        """Gửi request Bước 5 xuất bản bài đăng chính thức lên trang cá nhân TikTok."""
-        self._log("Bước 5/5 (API): Đang ký chữ ký số và xuất bản bài đăng...")
+        """Gửi request Bước 5 xuất bản bài đăng chính thức lên trang cá nhân TikTok (hỗ trợ hẹn giờ trực tiếp)."""
+        action_desc = "lên lịch đăng bài" if schedule_time else "xuất bản bài đăng"
+        self._log(f"Bước 5/5 (API): Đang ký chữ ký số và {action_desc}...")
 
         width = int(video_meta.get("Width") or 1080)
         height = int(video_meta.get("Height") or 1920)
@@ -146,35 +148,38 @@ class TikTokPublishClient:
 
         # 1. Chuẩn bị payload JSON theo đúng chuẩn Ground Truth TikTok Studio
         creation_id = str(uuid.uuid4()).replace("-", "")[:21]
+        feature_item: Dict[str, Any] = {
+            "geofencing_regions": [],
+            "playlist_name": "",
+            "playlist_id": str(playlist_id or ""),
+            "tcm_params": '{"commerce_toggle_info":{}}',
+            "sound_exemption": 0,
+            "anchors": [],
+            "vedit_common_info": {
+                "draft": "",
+                "video_id": vid,
+            },
+            "privacy_setting_info": {
+                "visibility_type": int(visibility_type),
+                "allow_duet": 1 if allow_duet else 0,
+                "allow_stitch": 1 if allow_stitch else 0,
+                "allow_comment": 1 if allow_comment else 0,
+                "allow_content_reuse": 1 if allow_content_reuse else 0,
+                "allow_ai_remix": 2,
+            },
+            "content_check_id": "",
+        }
+        if schedule_time and int(schedule_time) > 0:
+            feature_item["schedule_time"] = int(schedule_time)
+            self._log(f"  -> Đã gán tham số schedule_time vào TikTok API: {int(schedule_time)}")
+
         payload = {
             "post_common_info": {
                 "creation_id": creation_id,
                 "enter_post_page_from": 2,
                 "post_type": 3,
             },
-            "feature_common_info_list": [
-                {
-                    "geofencing_regions": [],
-                    "playlist_name": "",
-                    "playlist_id": str(playlist_id or ""),
-                    "tcm_params": '{"commerce_toggle_info":{}}',
-                    "sound_exemption": 0,
-                    "anchors": [],
-                    "vedit_common_info": {
-                        "draft": "",
-                        "video_id": vid,
-                    },
-                    "privacy_setting_info": {
-                        "visibility_type": int(visibility_type),
-                        "allow_duet": 1 if allow_duet else 0,
-                        "allow_stitch": 1 if allow_stitch else 0,
-                        "allow_comment": 1 if allow_comment else 0,
-                        "allow_content_reuse": 1 if allow_content_reuse else 0,
-                        "allow_ai_remix": 2,
-                    },
-                    "content_check_id": "",
-                }
-            ],
+            "feature_common_info_list": [feature_item],
             "single_post_req_list": [
                 {
                     "batch_index": 0,
@@ -245,7 +250,7 @@ class TikTokPublishClient:
         final_url = f"{POST_API_BASE}?{urllib.parse.urlencode(final_params)}"
 
         headers = {
-            "User-Agent": self.user_agent,
+            "User-Agent": str(self.user_agent).encode("latin-1", "ignore").decode("latin-1"),
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "en-US,en;q=0.9",
             "Referer": "https://www.tiktok.com/tiktokstudio/upload?from=creator_center&tab=video",

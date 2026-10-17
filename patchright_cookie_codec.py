@@ -102,8 +102,13 @@ def selenium_cookie_to_patchright(cookie):
     result = _common_cookie(cookie)
     if result is None:
         return None
+    raw_exp = cookie.get("expiry")
+    if raw_exp is None:
+        raw_exp = cookie.get("expires")
+    if raw_exp is None:
+        raw_exp = cookie.get("expirationDate")
     try:
-        expires = _expiration(cookie.get("expiry"))
+        expires = _expiration(raw_exp)
     except ValueError:
         return None
     if expires is not None:

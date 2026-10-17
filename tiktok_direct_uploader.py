@@ -58,6 +58,7 @@ def run_direct_upload(
     stop_before_post: bool = False,
     cancellation_event: Any = None,
     workspace_dir: Optional[Path] = None,
+    schedule_time: Optional[int] = None,
 ) -> UploadResult:
     """Thực thi quy trình đăng bài trực tiếp qua API (Engine 1).
     
@@ -166,11 +167,15 @@ def run_direct_upload(
             allow_content_reuse=allow_content_reuse,
             poster_delay_ms=poster_delay_ms,
             playlist_id=playlist_id,
+            schedule_time=schedule_time,
         )
+
+        is_sched = bool(schedule_time and int(schedule_time) > 0)
+        msg_action = "Đã lên lịch đăng thành công lên TikTok" if is_sched else "Đã đăng thành công lên TikTok"
 
         return UploadResult(
             outcome="posted",
-            message=f"Đã đăng thành công lên TikTok: {pub_res.video_url}",
+            message=f"{msg_action}: {pub_res.video_url}",
             post_dispatched=True,
             confirmation="api",
             details={
@@ -178,6 +183,8 @@ def run_direct_upload(
                 "video_url": pub_res.video_url,
                 "vid": vod_res.vid,
                 "engine": "api_direct",
+                "is_scheduled": is_sched,
+                "schedule_time": schedule_time if is_sched else None,
             },
         )
 
