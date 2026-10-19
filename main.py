@@ -87,6 +87,7 @@ from browser_patchright_glue import (
 )
 from upload_preparation import UploadPreparationCoordinator
 from profile_runtime_status import (
+    AutomationState,
     RuntimeSignals,
     build_runtime_snapshot,
     automation_label,
@@ -561,13 +562,13 @@ def _watchdog_enqueue_callback(profile_name, file_path, generation):
         logging.warning(f"[{profile_name}] Watchdog enqueue lỗi: {e}")
 
 
-def _reconcile_startup_folder(profile_name, folder, generation):
+def _reconcile_startup_folder(profile_name, folder, generation, skip_waiting=False):
     """Startup scan: adopt only videos that must be resumed for THIS profile.
 
     A file is adopted when either:
     - it is genuinely new (mtime after watch_started_at) and has a known origin, or
     - it has an existing delivery record for this profile that is reclaimable
-      (e.g. WAITING_PROFILE queued while the profile was down).
+      (e.g. WAITING_PROFILE queued while the profile was down) and skip_waiting is False.
 
     Files that already existed before watching started are never adopted on metadata
     alone: the download-index basename fallback is disabled here so a video belonging to
@@ -599,7 +600,7 @@ def _reconcile_startup_folder(profile_name, folder, generation):
             # Delivery belongs to another profile; never adopt for this one.
             skipped_old += 1
             continue
-        is_waiting = rec is not None and rec.state == DeliveryState.WAITING_PROFILE
+        is_waiting = (not skip_waiting) and rec is not None and rec.state == DeliveryState.WAITING_PROFILE
         is_new_file = _mtime > watch_started_at
         if not is_new_file and not is_waiting:
             # File predates watching: only a matching WAITING_PROFILE record may resume it.
@@ -2633,6 +2634,7 @@ def require_license_then_boot():
         _set_ui_enabled(True)
         update_status("AUTO_TEST_MODE: bỏ qua nhập license để test tự động.")
         _start_youtube_monitor_safe()
+        root.after(2000, reconcile_daily_resumes)
         return
 
     if not LICENSE_REQUIRED:
@@ -2640,6 +2642,7 @@ def require_license_then_boot():
         update_profile_list()
         _set_ui_enabled(True)
         _start_youtube_monitor_safe()
+        root.after(2000, reconcile_daily_resumes)
         root.after(5000, _run_background_update_check)
         return
 
@@ -2652,6 +2655,7 @@ def require_license_then_boot():
         _start_youtube_monitor_safe()
         threading.Thread(target=_license_watchdog, daemon=True).start()
         threading.Thread(target=_first_run_download_check_worker, daemon=True).start()
+        root.after(2000, reconcile_daily_resumes)
         root.after(5000, _run_background_update_check)
 
     # 1. Thử xác thực Cache-First (< 1ms) nếu đã có License Key lưu trong cache và còn hạn
@@ -3139,13 +3143,12 @@ class VideoFolderHandler(FileSystemEventHandler):
             return
         try:
             config = profiles[self.profile_name]['config']
-            if config.get('open_only_when_video', False):
-                watch_started_at = profiles[self.profile_name].get('watch_started_at', 0)
-                file_mtime = os.path.getmtime(file_path)
-                if file_mtime <= watch_started_at:
-                    update_status(f"[{self.profile_name}] Bỏ qua video cũ: {Path(file_path).name}")
-                    _release_video_path(file_path)
-                    return
+            watch_started_at = profiles[self.profile_name].get('watch_started_at', 0)
+            file_mtime = os.path.getmtime(file_path)
+            if watch_started_at > 0 and file_mtime <= watch_started_at:
+                update_status(f"[{self.profile_name}] Bỏ qua video cũ: {Path(file_path).name}")
+                _release_video_path(file_path)
+                return
         except Exception:
             pass
         if FAST_MODE: logging.warning(f"[{self.profile_name}] Phát hiện video mới.")
@@ -3728,10 +3731,10 @@ def process_video_queue_thread(profile_name):
 
             limit = profiles[profile_name]['config'].get('max_uploads_per_day', 0)
             if limit > 0 and profiles[profile_name]['uploads_today_count'] >= limit:
-                update_status(f"[{profile_name}] Đã đạt giới hạn {limit} video/ngày. Profile sẽ tự dừng.")
-                _set_profile_ui(profile_name, upload='Đạt giới hạn', last_error=f'Đã đạt {limit} video/ngày')
+                update_status(f"[{profile_name}] Đã đạt giới hạn {limit} video/ngày. Profile chuyển sang chờ ngày mới (Chờ 00:00).")
+                _release_queued_items(profile_name)
                 time.sleep(LIMIT_REACHED_SHUTDOWN_DELAY)
-                stop_profile(profile_name)
+                stop_profile(profile_name, reason="DAILY_LIMIT")
                 break
 
             try:
@@ -4049,11 +4052,17 @@ def _profile_ui(name):
     if name not in profiles:
         return {}
     ui = profiles[name].setdefault('ui', {})
-    ui.setdefault('status', 'Đang chạy' if profiles[name].get('running') else 'Đã dừng')
+    is_waiting_daily = bool(profiles[name].get('auto_daily_resume'))
+    default_status = 'Đang chạy' if profiles[name].get('running') else ('Chờ ngày mới' if is_waiting_daily else 'Đã dừng')
+    ui.setdefault('status', default_status)
     ui.setdefault('login', 'Chưa kiểm tra')
     ui.setdefault('proxy', 'Tắt' if not profiles[name].get('config', {}).get('use_proxy') else 'Chưa kiểm tra')
     ui.setdefault('browser', 'Chưa mở')
-    ui.setdefault('upload', 'Chờ video')
+    if is_waiting_daily:
+        limit = profiles[name].get('config', {}).get('max_uploads_per_day', 0)
+        ui.setdefault('upload', f'Chờ 00:00 (Đã đạt {limit}/{limit})' if limit > 0 else 'Chờ ngày mới')
+    else:
+        ui.setdefault('upload', 'Chờ video')
     ui.setdefault('last_error', '')
     return ui
 
@@ -4180,7 +4189,7 @@ def _profile_row_tag(ui, running):
         return ('tag_error',)
 
     processing_values = (
-        status in ('đang khởi động', 'đang dừng')
+        status in ('đang khởi động', 'đang dừng', 'chờ ngày mới')
         or any(x in upload for x in ('đang', 'chờ', 'đã chọn', 'đã gửi'))
         or any(x in browser for x in ('đang mở', 'đang cấu hình', 'đang đóng'))
         or any(x in login for x in ('đang nạp', 'chưa kiểm tra'))
@@ -5039,6 +5048,8 @@ def update_profile_list(*args):
 
         if is_running:
             activity_badge = "⚡ Đang chạy"
+        elif snapshot.automation == AutomationState.WAITING_DAILY_LIMIT or profiles[name].get('auto_daily_resume'):
+            activity_badge = "⏳ Chờ ngày mới"
         elif driver_alive or manual_driver_alive:
             activity_badge = "🌐 Đang mở"
         else:
@@ -5397,7 +5408,7 @@ def stop_all_in_project():
 # =========================
 # Single Profile Actions
 # =========================
-def start_profile(name=None):
+def start_profile(name=None, skip_waiting_startup=False):
     if not _license_guard(): return
     if name is None:
         sel = tree.selection()
@@ -5408,6 +5419,9 @@ def start_profile(name=None):
     
     if name not in profiles or profiles[name]['running']:
         return
+    profiles[name]['auto_daily_resume'] = False
+    if 'auto_daily_resume' in profiles[name].get('config', {}):
+        profiles[name]['config']['auto_daily_resume'] = False
     if profiles[name].get('session_busy') or _browser_session_valid(profiles[name].get('manual_driver')):
         update_status(f"[{name}] Không thể Start khi browser thủ công hoặc thao tác session đang hoạt động.")
         _set_profile_ui(name, status='Lỗi', last_error='Profile đang được sử dụng bởi thao tác session khác')
@@ -5488,7 +5502,7 @@ def start_profile(name=None):
                         stop_profile(name)
                         return
                     profiles[name]['watch_started_at'] = time.time()
-                    adopted = _reconcile_startup_folder(name, config["folder_path"], start_gen)
+                    adopted = _reconcile_startup_folder(name, config["folder_path"], start_gen, skip_waiting=skip_waiting_startup)
                     if adopted:
                         update_status(f"[{name}] Đã tiếp nhận {adopted} video có sẵn trong thư mục.")
                 except Exception as e:
@@ -5543,7 +5557,7 @@ def start_profile(name=None):
                         stop_profile(name)
                         return
                     profiles[name]['watch_started_at'] = time.time()
-                    adopted = _reconcile_startup_folder(name, config["folder_path"], start_gen)
+                    adopted = _reconcile_startup_folder(name, config["folder_path"], start_gen, skip_waiting=skip_waiting_startup)
                     if adopted:
                         update_status(f"[{name}] Đã tiếp nhận {adopted} video có sẵn trong thư mục.")
                 except Exception as e:
@@ -5636,7 +5650,7 @@ def close_profile_browser(name):
     _set_profile_ui(name, browser=browser_lbl, upload='Chờ video mới')
     update_status(f"[{name}] Hết video mới trong hàng chờ, đã đóng trình duyệt để tiết kiệm tài nguyên.")
 
-def stop_profile(selected_name=None):
+def stop_profile(selected_name=None, reason="MANUAL"):
     if not _license_guard(): return
     if selected_name: name = selected_name
     else:
@@ -5645,6 +5659,8 @@ def stop_profile(selected_name=None):
         name = tree.item(sel[0])['values'][0]
 
     if name not in profiles: return
+
+    is_daily_limit = (reason == "DAILY_LIMIT")
 
     lc = get_lifecycle(name)
     has_any_driver = (
@@ -5656,14 +5672,90 @@ def stop_profile(selected_name=None):
     if not has_any_driver:
         profiles[name]['running'] = False
         running_profiles.discard(name)
+        if not is_daily_limit and profiles[name].get('auto_daily_resume'):
+            # Người dùng bấm dừng thủ công khi profile đang chờ ngày mới -> Hủy chờ
+            profiles[name]['auto_daily_resume'] = False
+            profiles[name]['config']['auto_daily_resume'] = False
+            save_configs()
+            _set_profile_ui(name, status='Đã dừng', browser='Chưa mở', upload='Chờ video')
+            update_status(f"[{name}] Đã hủy chế độ chờ ngày mới. Profile đã dừng hoàn toàn.")
+            root.after(0, request_profile_refresh)
         return
 
-    _set_profile_ui(name, status='Đang dừng', browser='Đang đóng', upload='Đang dừng')
-    _stop_profile_driver(name)
+    if is_daily_limit:
+        profiles[name]['auto_daily_resume'] = True
+        profiles[name]['config']['auto_daily_resume'] = True
+        save_configs()
+        _set_profile_ui(name, status='Đang dừng', browser='Đang đóng', upload='Đạt giới hạn')
+        _stop_profile_driver(name)
+        limit = profiles[name]['config'].get('max_uploads_per_day', 0)
+        _set_profile_ui(name, status='Chờ ngày mới', browser='Chưa mở', upload=f'Chờ 00:00 (Đã đạt {limit}/{limit})')
+        update_status(f"[{name}] Đã chuyển sang trạng thái Chờ ngày mới (Tự chạy lại khi sang ngày mới).")
+    else:
+        profiles[name]['auto_daily_resume'] = False
+        profiles[name]['config']['auto_daily_resume'] = False
+        save_configs()
+        _set_profile_ui(name, status='Đang dừng', browser='Đang đóng', upload='Đang dừng')
+        _stop_profile_driver(name)
+        _set_profile_ui(name, status='Đã dừng', browser='Chưa mở', upload='Chờ video')
+        update_status(f"[{name}] Đã dừng.")
 
-    _set_profile_ui(name, status='Đã dừng', browser='Chưa mở', upload='Chờ video')
-    update_status(f"[{name}] Đã dừng.")
     root.after(0, request_profile_refresh)
+
+
+def reconcile_daily_resumes():
+    """
+    Đối soát và tự động khởi động lại các profile đang ở trạng thái 'Chờ ngày mới'
+    (auto_daily_resume == True) khi đã sang ngày mới hoặc quota cho phép.
+    Khởi động tuần tự (staggered delay) để tránh quá tải tài nguyên.
+    """
+    if not _license_guard():
+        return
+
+    current_date_str = datetime.now().strftime('%Y-%m-%d')
+    to_resume = []
+
+    for name, prof in list(profiles.items()):
+        if not prof.get('auto_daily_resume'):
+            continue
+
+        if prof.get('uploads_today_date') != current_date_str:
+            prof['uploads_yesterday_count'] = prof.get('uploads_today_count', 0)
+            prof['uploads_today_count'] = 0
+            prof['uploads_today_date'] = current_date_str
+
+        limit = prof.get('config', {}).get('max_uploads_per_day', 0)
+        today_count = prof.get('uploads_today_count', 0)
+
+        if limit == 0 or today_count < limit:
+            if not prof.get('running', False):
+                to_resume.append(name)
+
+    if not to_resume:
+        return
+
+    update_status(f"[Auto-Resume] Phát hiện {len(to_resume)} profile đang chờ ngày mới: {', '.join(to_resume)}.")
+
+    def _staggered_start():
+        for i, name in enumerate(to_resume):
+            try:
+                if name not in profiles:
+                    continue
+                prof = profiles[name]
+                if prof.get('running', False):
+                    continue
+                prof['auto_daily_resume'] = False
+                prof['config']['auto_daily_resume'] = False
+                save_configs()
+                update_status(f"[{name}] [Auto-Resume] Tự động khởi động lại cho ngày mới (Bỏ qua video cũ)...")
+                start_profile(name, skip_waiting_startup=True)
+            except Exception as e:
+                update_status(f"[{name}] [Auto-Resume Lỗi]: {e}")
+            if i < len(to_resume) - 1:
+                time.sleep(1.5)
+
+    threading.Thread(target=_staggered_start, daemon=True).start()
+
 
 # =========================
 # CRUD Actions & Project Management
@@ -7074,6 +7166,7 @@ def edit_profile(selected_name=None):
             seed=nm + str(cfg.get('account_uuid', '')),
         )
         save_configs()
+        root.after(200, reconcile_daily_resumes)
         dlg.destroy()
         if env_comparison is not None:
             decision = env_comparison.get('decision')
@@ -8905,16 +8998,20 @@ def _execute_schedule_task_upload(task: Dict[str, Any]) -> Tuple[bool, str]:
                 "error_message": "",
             }
 
-            # Tự động xóa file video gốc nếu delete_source_after_post bật
+            # Tự động xóa file video gốc nếu delete_source_after_post bật và không còn task nào dùng chung
             if task.get("delete_source_after_post", True):
-                try:
-                    if os.path.isfile(v_path):
-                        os.remove(v_path)
-                        task_updates["source_deleted"] = True
-                        update_status(f"[AutoSchedule][{p_name}] Đã xóa video gốc: {Path(v_path).name}")
-                        logger.info(f"[AutoSchedule] Đã xóa video gốc an toàn: {v_path}")
-                except Exception as del_err:
-                    logger.warning(f"Không thể xóa file nguồn {v_path}: {del_err}")
+                if global_schedule_manager.is_video_referenced_by_pending_tasks(v_path, exclude_task_id=task.get("id", "")):
+                    update_status(f"[AutoSchedule][{p_name}] Bảo lưu video gốc (đang dùng chung cho bài khác): {Path(v_path).name}")
+                    logger.info(f"[AutoSchedule] Bảo lưu file nguồn {v_path} vì vẫn còn tác vụ khác tham chiếu.")
+                else:
+                    try:
+                        if os.path.isfile(v_path):
+                            os.remove(v_path)
+                            task_updates["source_deleted"] = True
+                            update_status(f"[AutoSchedule][{p_name}] Đã xóa video gốc: {Path(v_path).name}")
+                            logger.info(f"[AutoSchedule] Đã xóa video gốc an toàn: {v_path}")
+                    except Exception as del_err:
+                        logger.warning(f"Không thể xóa file nguồn {v_path}: {del_err}")
 
             global_schedule_manager.update_task(task["id"], task_updates)
             update_status(f"[AutoSchedule][{p_name}] Hoàn tất xuất sắc! Link: {res.details.get('video_url', '')}")
@@ -9002,7 +9099,16 @@ def _handle_start_schedule_queue(task_ids: Optional[List[str]] = None):
                 break
 
             try:
-                global_schedule_manager.update_task(t["id"], {"status": "UPLOADING"})
+                # Khóa và nhận việc nguyên tử chống tranh chấp với Daemon Loop
+                claimed = global_schedule_manager.claim_task_for_execution(
+                    t["id"],
+                    worker_id=f"queue_{p_name}",
+                    lease_seconds=300
+                )
+                if not claimed:
+                    logger.info(f"[AutoSchedule] Bỏ qua task {t['id']} vì đã được tiến trình khác nhận xử lý.")
+                    continue
+
                 if 'ui_widgets' in globals() and 'schedule_view' in ui_widgets:
                     root.after_idle(ui_widgets['schedule_view']._refresh_data)
 
@@ -9051,7 +9157,16 @@ def _handle_schedule_post_now(task_ids: List[str]):
         for t in ordered:
             if _shutting_down:
                 break
-            global_schedule_manager.update_task(t["id"], {"status": "UPLOADING"})
+            # Khóa và nhận việc nguyên tử trước khi đăng ngay
+            claimed = global_schedule_manager.claim_task_for_execution(
+                t["id"],
+                worker_id="post_now",
+                lease_seconds=300
+            )
+            if not claimed:
+                update_status(f"[AutoSchedule] Bỏ qua bài đăng vì đang được tiến trình khác xử lý: {t.get('title')}")
+                continue
+
             if 'ui_widgets' in globals() and 'schedule_view' in ui_widgets:
                 root.after_idle(ui_widgets['schedule_view']._refresh_data)
             _execute_schedule_task_upload(t)
@@ -9112,7 +9227,7 @@ def _start_schedule_daemon():
         try:
             recovered = global_schedule_manager.recover_missed_tasks()
             if recovered:
-                update_status(f"[AutoSchedule] Đã tự động dời {len(recovered)} video bị lỡ hẹn sang ngày mai.")
+                update_status(f"[AutoSchedule] Đã tự động dời lịch thông minh {len(recovered)} video bị lỡ hẹn.")
                 try:
                     root.after_idle(update_profile_list)
                 except Exception:
@@ -9128,20 +9243,13 @@ def _start_schedule_daemon():
                 time.sleep(1)
 
             try:
-                now_epoch = int(datetime.now().timestamp())
-                pending_tasks = global_schedule_manager.get_all_tasks(filter_status="PENDING")
-                due_tasks = [
-                    t for t in pending_tasks
-                    if t.get("execution_mode") == "LOCAL_QUEUE" and int(t.get("scheduled_epoch", 0)) <= now_epoch
-                ]
+                # Khóa và nhận việc nguyên tử (Atomic Claim) các task LOCAL_QUEUE đến hạn
+                due_tasks = global_schedule_manager.claim_due_tasks(worker_id="daemon_loop", limit=2, lease_seconds=300)
 
                 if due_tasks:
-                    # Giới hạn xử lý tối đa 2 task cùng lúc
-                    batch_to_run = due_tasks[:2]
-                    for task in batch_to_run:
+                    for task in due_tasks:
                         if _shutting_down:
                             return
-                        global_schedule_manager.update_task(task["id"], {"status": "UPLOADING"})
                         _execute_schedule_task_upload(task)
                         time.sleep(2)
 
@@ -9344,6 +9452,7 @@ def _tick():
     if need_save:
         save_configs()
         update_status("Đã tự động reset bộ đếm ngày mới (Midnight Reset).")
+        root.after(500, reconcile_daily_resumes)
     # ------------------------------------------------
     
     root.after(1000, _tick)

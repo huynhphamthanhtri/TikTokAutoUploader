@@ -63,6 +63,7 @@ def build_configs_payload(profiles, projects):
         config['stats_today'] = prof.get('uploads_today_count', 0)
         config['stats_yesterday'] = prof.get('uploads_yesterday_count', 0)
         config['stats_date'] = prof.get('uploads_today_date', '')
+        config['auto_daily_resume'] = bool(prof.get('auto_daily_resume', False))
         config['project'] = prof.get('project', 'Mặc định')
         export_profiles[name] = config
 
@@ -219,6 +220,7 @@ def build_runtime_profiles(loaded_profiles):
         project = prof_config.pop('project', 'Mặc định')
         headless = prof_config.pop('headless', True)
         max_uploads = prof_config.pop('max_uploads_per_day', 0)
+        auto_daily_resume = bool(prof_config.pop('auto_daily_resume', False))
         use_proxy = prof_config.pop('use_proxy', False)
         proxy_string = prof_config.pop('proxy_string', "")
         prof_config.pop('proxy_username', None)
@@ -258,7 +260,8 @@ def build_runtime_profiles(loaded_profiles):
                 'proxy_string': proxy_string,
                 'stats_today': final_today,
                 'stats_yesterday': final_yesterday,
-                'stats_date': current_date_str
+                'stats_date': current_date_str,
+                'auto_daily_resume': auto_daily_resume,
             },
             'queue': None,
             'observer': None,
@@ -274,7 +277,8 @@ def build_runtime_profiles(loaded_profiles):
             'project': project,
             'uploads_today_count': final_today,
             'uploads_yesterday_count': final_yesterday,
-            'uploads_today_date': current_date_str
+            'uploads_today_date': current_date_str,
+            'auto_daily_resume': auto_daily_resume,
         }
 
     return runtime_profiles

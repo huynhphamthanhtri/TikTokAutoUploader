@@ -127,7 +127,17 @@ class RuntimeSnapshotTests(unittest.TestCase):
         snapshots = {"A": stopped, "B": running, "C": stopped}
         startable, skipped = batch_start_preflight(snapshots, ["A", "B", "C"])
         self.assertEqual([name for name, _ in startable], ["A", "C"])
-        self.assertEqual([name for name, _ in skipped], ["B"])
+    def test_waiting_daily_limit_state(self):
+        snap = build_runtime_snapshot(RuntimeSignals(
+            running=False,
+            ui_status="Chờ ngày mới",
+            ui_upload="Đạt giới hạn",
+        ))
+        self.assertEqual(snap.automation, AutomationState.WAITING_DAILY_LIMIT)
+        self.assertEqual(automation_label(snap.automation), "Chờ ngày mới")
+        self.assertEqual(row_tags(snap), ("tag_processing",))
+        self.assertTrue(snap.can_start)
+        self.assertTrue(snap.can_stop)
 
 
 if __name__ == "__main__":

@@ -103,7 +103,12 @@ class ScheduleConflictModal(SafeCTkToplevel):
         for p_name, info in conflicts.items():
             latest = info.get("latest_scheduled_time")
             latest_str = latest.strftime("%H:%M  %d/%m/%Y") if isinstance(latest, datetime.datetime) else "Chưa rõ"
-            tree.insert("", "end", values=(p_name, f"⏳ {info.get('pending_count', 0)}", latest_str))
+            server_cnt = info.get("server_scheduled_count", 0)
+            pending_cnt = info.get("pending_count", 0)
+            cnt_str = f"⏳ {pending_cnt}"
+            if server_cnt > 0:
+                cnt_str += f" ({server_cnt} trên server)"
+            tree.insert("", "end", values=(p_name, cnt_str, latest_str))
 
         tree.pack(fill="both", expand=True, padx=6, pady=6)
 
@@ -173,6 +178,21 @@ class ScheduleConflictModal(SafeCTkToplevel):
         ).pack(side="right")
 
     def _select_mode(self, mode: str):
+        if mode == "OVERWRITE":
+            server_scheduled_total = sum(v.get("server_scheduled_count", 0) for v in self.conflicts.values())
+            if server_scheduled_total > 0:
+                from tkinter import messagebox
+                confirmed = messagebox.askyesno(
+                    "Cảnh Báo Ghi Đè Lịch Server",
+                    f"CẢNH BÁO: Đang có {server_scheduled_total} video ĐÃ ĐƯỢC NẠP LÊN MÁY CHỦ TIKTOK (SERVER_SCHEDULED).\n\n"
+                    "Việc 'Ghi Đè' trên phần mềm CHỈ HỦY ĐƯỢC LỊCH LƯU TRÊN MÁY TÍNH CỦA BẠN.\n"
+                    "Máy chủ TikTok vẫn sẽ tự động phát hành các video đã nạp trước đó!\n\n"
+                    "Bạn có chắc chắn muốn tiếp tục ghi đè lịch cục bộ không?",
+                    parent=self,
+                )
+                if not confirmed:
+                    return
+
         self.resolved_mode = mode
         try:
             self.grab_release()

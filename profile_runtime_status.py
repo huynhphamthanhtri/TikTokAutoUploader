@@ -16,6 +16,7 @@ class AutomationState(str, Enum):
     RUNNING = "RUNNING"
     STOPPING = "STOPPING"
     FAILED = "FAILED"
+    WAITING_DAILY_LIMIT = "WAITING_DAILY_LIMIT"
 
 
 class BrowserState(str, Enum):
@@ -113,6 +114,8 @@ def build_runtime_snapshot(signals: RuntimeSignals) -> ProfileRuntimeSnapshot:
         automation = AutomationState.STOPPING
     elif ui_status == "lỗi" or signals.has_error:
         automation = AutomationState.FAILED
+    elif ui_status in ("chờ ngày mới", "tạm ngưng (chờ ngày mới)", "chờ quota"):
+        automation = AutomationState.WAITING_DAILY_LIMIT
     elif signals.running:
         if (
             signals.observer_active
@@ -248,7 +251,7 @@ def _action_capabilities(
         if not reason:
             reason = "Đang xử lý upload"
 
-    if automation in (AutomationState.RUNNING, AutomationState.WATCHING, AutomationState.STARTING):
+    if automation in (AutomationState.RUNNING, AutomationState.WATCHING, AutomationState.STARTING, AutomationState.WAITING_DAILY_LIMIT):
         can_stop = True
     if signals.manual_driver_alive or signals.driver_alive:
         can_stop = True
@@ -271,6 +274,7 @@ AUTOMATION_LABELS = {
     AutomationState.RUNNING: "Đang chạy",
     AutomationState.STOPPING: "Đang dừng",
     AutomationState.FAILED: "Lỗi",
+    AutomationState.WAITING_DAILY_LIMIT: "Chờ ngày mới",
 }
 
 BROWSER_LABELS = {
@@ -331,6 +335,7 @@ def row_tags(snapshot):
     if snapshot.automation in (
         AutomationState.STARTING,
         AutomationState.STOPPING,
+        AutomationState.WAITING_DAILY_LIMIT,
     ) or snapshot.operation != OperationState.IDLE:
         return ("tag_processing",)
     if snapshot.automation in (AutomationState.RUNNING, AutomationState.WATCHING):

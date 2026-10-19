@@ -42,6 +42,7 @@ class ConfigStoreTests(unittest.TestCase):
             'uploads_today_count': 2,
             'uploads_yesterday_count': 1,
             'uploads_today_date': '2026-08-13',
+            'auto_daily_resume': True,
             'project': 'Project A',
         }
         original = copy.deepcopy(profile)
@@ -54,8 +55,13 @@ class ConfigStoreTests(unittest.TestCase):
         self.assertEqual(saved['stats_today'], 2)
         self.assertEqual(saved['stats_yesterday'], 1)
         self.assertEqual(saved['stats_date'], '2026-08-13')
+        self.assertTrue(saved['auto_daily_resume'])
         self.assertEqual(saved['project'], 'Project A')
         self.assertEqual(profile, original)
+
+        reloaded = build_runtime_profiles({'existing': saved})['existing']
+        self.assertTrue(reloaded['auto_daily_resume'])
+        self.assertTrue(reloaded['config']['auto_daily_resume'])
 
     def test_old_config_migrates_account_fields_to_defaults(self):
         loaded = {
