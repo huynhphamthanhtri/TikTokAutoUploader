@@ -31,6 +31,14 @@ from youtube_monitor.batch_view import BatchDownloadView
 from youtube_monitor.ui import YouTubeMonitorView
 
 
+TABLE_PRESETS = {
+    "Vận hành (Mặc định)": ('name', 'tiktok', 'cookie_st', 'activity', 'proxy_region', 'upload'),
+    "Hiệu suất / Kênh": ('name', 'tiktok', 'analytics', 'upload', 'cookie_st', 'activity'),
+    "Kiếm tiền / Thuế": ('name', 'tiktok', 'monetization', 'cookie_st', 'activity', 'proxy_region'),
+    "Tất cả cột": ('name', 'tiktok', 'cookie_st', 'activity', 'monetization', 'analytics', 'proxy_region', 'upload', 'folder', 'last_error'),
+}
+
+
 def configure_ttk_styles() -> None:
     style = ttk.Style()
     try:
@@ -378,6 +386,19 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     btn_check_cookie.pack(side="left", padx=3)
     widgets["btn_check_cookie"] = btn_check_cookie
 
+    btn_check_info = ctk.CTkButton(
+        manage_left,
+        text="🔍 Check Thông Tin",
+        width=125,
+        height=32,
+        font=UIThemeTokens.FONT_BUTTON,
+        fg_color=("#2563eb", "#1d4ed8"),
+        hover_color=("#1d4ed8", "#1e40af"),
+        command=handlers.get('batch_check_tiktok_info', lambda: None),
+    )
+    btn_check_info.pack(side="left", padx=3)
+    widgets["btn_check_info"] = btn_check_info
+
     btn_check_post = ctk.CTkButton(
         manage_left,
         text="🔁 Check Post",
@@ -405,7 +426,11 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     widgets["btn_schedule"] = btn_schedule
 
     overflow_actions = [
+        ("🔍 Check Thông Tin (Offline)", handlers.get('batch_check_tiktok_info', lambda: None)),
         ("🔁 Check Post (Trùng/Shadow)", handlers.get('check_profile_posts_dialog', lambda: None)),
+        ("👤 Check User (Đổi tên/Cooldown)", handlers.get('open_check_user_dialog', lambda: None)),
+        ("🎯 Check Thưởng VPCS (CRP)", handlers.get('open_video_rank_dialog', lambda: None)),
+        ("🔎 Check Trùng Kênh Công Khai", handlers.get('open_check_dup_dialog', lambda: None)),
         ("Sửa", handlers['edit_profile']),
         ("Chi tiết", handlers['view_profile_details']),
         ("Đổi tên", handlers['rename_profile']),
@@ -429,6 +454,51 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
         command=lambda: _open_overflow_menu(more_btn, overflow_actions),
     )
     more_btn.pack(side="left", padx=3)
+
+    # Search Box on Profiles Toolbar
+    search_var = state.get("filter_var")
+    search_entry = ctk.CTkEntry(
+        manage_left,
+        textvariable=search_var,
+        placeholder_text="🔍 Tìm hồ sơ, @tiktok, proxy...",
+        width=190,
+        height=32,
+        font=UIThemeTokens.FONT_BODY,
+        corner_radius=6,
+    )
+    search_entry.pack(side="left", padx=(8, 2))
+    widgets["search_entry"] = search_entry
+
+    btn_clear_search = ctk.CTkButton(
+        manage_left,
+        text="✕",
+        width=26,
+        height=32,
+        font=UIThemeTokens.FONT_BADGE,
+        fg_color="#cbd5e1",
+        hover_color="#94a3b8",
+        text_color="#1e293b",
+        command=lambda: search_var.set("") if search_var else None,
+    )
+    btn_clear_search.pack(side="left", padx=(0, 6))
+
+    # View Preset Selector via Treeview displaycolumns
+    def _apply_table_preset(preset_name: str) -> None:
+        if "tree" in widgets:
+            t = widgets["tree"]
+            cols = TABLE_PRESETS.get(preset_name, TABLE_PRESETS["Vận hành (Mặc định)"])
+            t["displaycolumns"] = cols
+
+    preset_menu = ctk.CTkOptionMenu(
+        manage_left,
+        values=list(TABLE_PRESETS.keys()),
+        width=150,
+        height=32,
+        font=UIThemeTokens.FONT_BADGE,
+        command=_apply_table_preset,
+    )
+    preset_menu.pack(side="left", padx=(0, 4))
+    widgets["preset_menu"] = preset_menu
 
     control_frame = ctk.CTkFrame(topbar_inner, fg_color="transparent")
     control_frame.pack(side="right")
@@ -503,6 +573,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
         ("TAX_OK", "🟢 Đã Khai Thuế"),
         ("TKTBM", "🔴 TKTBM (Bảo Mật)"),
         ("RUNNING", "⚡ Đang Chạy"),
+        ("NEEDS_ATTENTION", "⚠️ Cần Xử Lý"),
     ]
 
     def _select_filter_chip(chip_key: str) -> None:
@@ -531,6 +602,116 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
         chip_buttons[key] = btn
     widgets["filter_chip_buttons"] = chip_buttons
 
+    def update_filter_chip_badges(counts: Dict[str, int]) -> None:
+        chip_labels = {
+            "ALL": f"Tất Cả ({counts.get('ALL', 0)})",
+            "COOKIE_LIVE": f"🟢 Cookie Sống ({counts.get('COOKIE_LIVE', 0)})",
+            "COOKIE_DIE": f"🔴 Cookie Die ({counts.get('COOKIE_DIE', 0)})",
+            "NO_COOKIE": f"⚪ Chưa Có ({counts.get('NO_COOKIE', 0)})",
+            "KYC_OK": f"🟢 Đã KYC ({counts.get('KYC_OK', 0)})",
+            "TAX_OK": f"🟢 Đã Thuế ({counts.get('TAX_OK', 0)})",
+            "TKTBM": f"🔴 TKTBM ({counts.get('TKTBM', 0)})",
+            "RUNNING": f"⚡ Đang Chạy ({counts.get('RUNNING', 0)})",
+            "NEEDS_ATTENTION": f"⚠️ Cần Xử Lý ({counts.get('NEEDS_ATTENTION', 0)})",
+        }
+        for k, btn in chip_buttons.items():
+            if k in chip_labels:
+                btn.configure(text=chip_labels[k])
+    widgets["update_filter_chip_badges"] = update_filter_chip_badges
+
+    # Contextual Bulk Action Bar (Hiển thị khi chọn >= 1 hồ sơ)
+    bulk_action_bar = ctk.CTkFrame(
+        profiles_workspace,
+        corner_radius=8,
+        fg_color="#1e293b",
+        height=38,
+        border_width=1,
+        border_color="#334155",
+    )
+    widgets["bulk_action_bar"] = bulk_action_bar
+
+    lbl_bulk_selected = ctk.CTkLabel(
+        bulk_action_bar,
+        text="Đã chọn: 0 hồ sơ",
+        font=UIThemeTokens.FONT_BUTTON,
+        text_color="#38bdf8",
+    )
+    lbl_bulk_selected.pack(side="left", padx=(12, 10))
+    widgets["lbl_bulk_selected"] = lbl_bulk_selected
+
+    ctk.CTkButton(
+        bulk_action_bar,
+        text="▶ Bắt đầu",
+        width=78,
+        height=28,
+        font=UIThemeTokens.FONT_BADGE,
+        fg_color="#16a34a",
+        hover_color="#15803d",
+        command=handlers['start_selected_batch'],
+    ).pack(side="left", padx=2)
+
+    ctk.CTkButton(
+        bulk_action_bar,
+        text="■ Dừng",
+        width=70,
+        height=28,
+        font=UIThemeTokens.FONT_BADGE,
+        fg_color="#ef4444",
+        hover_color="#dc2626",
+        command=handlers['stop_selected_batch'],
+    ).pack(side="left", padx=2)
+
+    ctk.CTkButton(
+        bulk_action_bar,
+        text="🌐 Browser",
+        width=85,
+        height=28,
+        font=UIThemeTokens.FONT_BADGE,
+        fg_color="#475569",
+        hover_color="#334155",
+        command=handlers['open_browser'],
+    ).pack(side="left", padx=2)
+
+    ctk.CTkButton(
+        bulk_action_bar,
+        text="🔍 Check Cookie",
+        width=100,
+        height=28,
+        font=UIThemeTokens.FONT_BADGE,
+        fg_color="#7c3aed",
+        hover_color="#6d28d9",
+        command=handlers['check_cookie_live'],
+    ).pack(side="left", padx=2)
+
+    ctk.CTkButton(
+        bulk_action_bar,
+        text="📅 Lên Lịch",
+        width=80,
+        height=28,
+        font=UIThemeTokens.FONT_BADGE,
+        fg_color="#059669",
+        hover_color="#047857",
+        command=handlers.get('open_schedule_modal', lambda: None),
+    ).pack(side="left", padx=2)
+
+    def _clear_tree_selection():
+        if "tree" in widgets:
+            t = widgets["tree"]
+            t.selection_remove(t.selection())
+            _update_bulk_action_bar()
+
+    ctk.CTkButton(
+        bulk_action_bar,
+        text="✕ Bỏ chọn",
+        width=75,
+        height=28,
+        font=UIThemeTokens.FONT_BADGE,
+        fg_color="transparent",
+        text_color="#94a3b8",
+        hover_color="#334155",
+        command=_clear_tree_selection,
+    ).pack(side="right", padx=(0, 10))
+
     # Profile Treeview Table Card (layout weight=78, weight=22)
     table_card = build_card(profiles_workspace, "Danh sách hồ sơ")
     table_card.pack(fill="both", expand=True, pady=(0, 6))
@@ -539,6 +720,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     table_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
     table_frame.grid_rowconfigure(0, weight=1)
     table_frame.grid_columnconfigure(0, weight=1)
+    table_frame.grid_columnconfigure(2, weight=0)
 
     tree = ttk.Treeview(
         table_frame,
@@ -569,6 +751,9 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     tree.column('folder', width=130, minwidth=80, stretch=False)
     tree.column('last_error', width=170, minwidth=100, stretch=True)
 
+    # Đặt mặc định 6 cột cốt lõi (~810px) cho Chế độ Vận hành
+    tree["displaycolumns"] = TABLE_PRESETS["Vận hành (Mặc định)"]
+
     tree.grid(row=0, column=0, sticky="nsew")
     vsb = ttk.Scrollbar(table_frame, style='Vertical.TScrollbar', orient='vertical', command=tree.yview)
     vsb.grid(row=0, column=1, sticky='ns')
@@ -577,7 +762,183 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
     widgets["tree"] = tree
 
+    # Side Detail Drawer (Slide-out panel cạnh phải bảng)
+    drawer_frame = ctk.CTkFrame(
+        table_frame,
+        width=340,
+        corner_radius=10,
+        fg_color=UIThemeTokens.BG_CARD,
+        border_width=1,
+        border_color=UIThemeTokens.BORDER_LIGHT,
+    )
+    drawer_frame.grid(row=0, column=2, rowspan=2, sticky="nsew", padx=(8, 0))
+    drawer_frame.grid_propagate(False)
+    drawer_frame.grid_remove()  # Ẩn ban đầu
+    widgets["drawer_frame"] = drawer_frame
 
+    # Header của Drawer
+    d_header = ctk.CTkFrame(drawer_frame, fg_color="transparent")
+    d_header.pack(fill="x", padx=10, pady=(8, 4))
+    d_title_lbl = ctk.CTkLabel(d_header, text="Chi Tiết Hồ Sơ", font=("Segoe UI Semibold", 13), text_color=UIThemeTokens.TEXT_PRIMARY)
+    d_title_lbl.pack(side="left")
+    d_close_btn = ctk.CTkButton(
+        d_header, text="✕", width=26, height=26, font=UIThemeTokens.FONT_BADGE,
+        fg_color="transparent", text_color="#64748b", hover_color="#cbd5e1",
+        command=lambda: drawer_frame.grid_remove()
+    )
+    d_close_btn.pack(side="right")
+
+    # Nội dung cuộn của Drawer
+    d_scroll = ctk.CTkScrollableFrame(drawer_frame, fg_color="transparent")
+    d_scroll.pack(fill="both", expand=True, padx=6, pady=4)
+
+    d_tiktok_lbl = ctk.CTkLabel(d_scroll, text="TikTok ID: --", font=UIThemeTokens.FONT_BODY, text_color="#2563eb", anchor="w")
+    d_tiktok_lbl.pack(fill="x", padx=4, pady=(2, 6))
+
+    # Card Trạng Thái
+    d_card_status = ctk.CTkFrame(d_scroll, fg_color="#f8fafc", corner_radius=6, border_width=1, border_color="#e2e8f0")
+    d_card_status.pack(fill="x", pady=4)
+    d_badge_cookie = ctk.CTkLabel(d_card_status, text="Cookie: --", font=UIThemeTokens.FONT_SUBTITLE, anchor="w")
+    d_badge_cookie.pack(fill="x", padx=8, pady=(4, 2))
+    d_badge_act = ctk.CTkLabel(d_card_status, text="Trạng thái: --", font=UIThemeTokens.FONT_SUBTITLE, anchor="w")
+    d_badge_act.pack(fill="x", padx=8, pady=2)
+    d_badge_mono = ctk.CTkLabel(d_card_status, text="Kiếm tiền: --", font=UIThemeTokens.FONT_SUBTITLE, anchor="w")
+    d_badge_mono.pack(fill="x", padx=8, pady=(2, 4))
+
+    # Card Video Folder
+    d_card_folder = ctk.CTkFrame(d_scroll, fg_color="#f8fafc", corner_radius=6, border_width=1, border_color="#e2e8f0")
+    d_card_folder.pack(fill="x", pady=4)
+    ctk.CTkLabel(d_card_folder, text="📁 Thư Mục Video:", font=("Segoe UI Semibold", 10), text_color="#334155", anchor="w").pack(fill="x", padx=8, pady=(6, 2))
+    d_folder_lbl = ctk.CTkLabel(d_card_folder, text="--", font=UIThemeTokens.FONT_BADGE, text_color="#64748b", wraplength=300, justify="left", anchor="w")
+    d_folder_lbl.pack(fill="x", padx=8, pady=(0, 6))
+    ctk.CTkButton(
+        d_card_folder, text="📂 Mở Thư Mục Video", height=26, font=UIThemeTokens.FONT_BADGE,
+        fg_color="#0284c7", hover_color="#0369a1",
+        command=lambda: handlers.get('open_video_folder', lambda: None)()
+    ).pack(fill="x", padx=8, pady=(0, 6))
+
+    # Card Lỗi Gần Nhất
+    d_card_err = ctk.CTkFrame(d_scroll, fg_color="#f8fafc", corner_radius=6, border_width=1, border_color="#e2e8f0")
+    d_card_err.pack(fill="x", pady=4)
+    ctk.CTkLabel(d_card_err, text="⚠️ Chi Tiết Lỗi:", font=("Segoe UI Semibold", 10), text_color="#dc2626", anchor="w").pack(fill="x", padx=8, pady=(6, 2))
+    d_err_text = ScrolledText(d_card_err, height=4, font=("Segoe UI", 9), relief="flat", borderwidth=0, wrap="word", bg="#f1f5f9", fg="#0f172a")
+    d_err_text.pack(fill="x", padx=8, pady=(0, 6))
+
+    # Card Proxy & Mạng
+    d_card_net = ctk.CTkFrame(d_scroll, fg_color="#f8fafc", corner_radius=6, border_width=1, border_color="#e2e8f0")
+    d_card_net.pack(fill="x", pady=4)
+    d_proxy_lbl = ctk.CTkLabel(d_card_net, text="Proxy: --", font=UIThemeTokens.FONT_SUBTITLE, anchor="w")
+    d_proxy_lbl.pack(fill="x", padx=8, pady=(6, 4))
+    d_net_btns = ctk.CTkFrame(d_card_net, fg_color="transparent")
+    d_net_btns.pack(fill="x", padx=8, pady=(0, 6))
+    ctk.CTkButton(
+        d_net_btns, text="📋 Copy Proxy", height=24, font=UIThemeTokens.FONT_BADGE,
+        fg_color="#475569", hover_color="#334155",
+        command=lambda: handlers.get('copy_proxy_string', lambda: None)()
+    ).pack(side="left", expand=True, fill="x", padx=(0, 2))
+    ctk.CTkButton(
+        d_net_btns, text="📋 Copy UID", height=24, font=UIThemeTokens.FONT_BADGE,
+        fg_color="#475569", hover_color="#334155",
+        command=lambda: handlers.get('copy_tiktok_uid', lambda: None)()
+    ).pack(side="left", expand=True, fill="x", padx=(2, 0))
+
+    # Quick Actions cuối Drawer
+    d_act_frame = ctk.CTkFrame(drawer_frame, fg_color="transparent")
+    d_act_frame.pack(fill="x", padx=10, pady=(4, 8))
+    ctk.CTkButton(
+        d_act_frame, text="🌐 Mở Trình Duyệt", height=28, font=UIThemeTokens.FONT_BADGE,
+        fg_color="#0284c7", hover_color="#0369a1", command=handlers['open_browser']
+    ).pack(side="left", expand=True, fill="x", padx=(0, 2))
+    ctk.CTkButton(
+        d_act_frame, text="⚙️ Cấu Hình", height=28, font=UIThemeTokens.FONT_BADGE,
+        fg_color="#475569", hover_color="#334155", command=handlers['edit_profile']
+    ).pack(side="left", expand=True, fill="x", padx=(2, 0))
+
+    def _show_drawer_for_profile(p_name: str) -> None:
+        if not p_name:
+            return
+        info = handlers.get('get_profile_drawer_info', lambda p: {})(p_name)
+        if not info:
+            info = {"name": p_name, "tiktok_id": "", "folder_path": "", "last_error": "", "cookie_badge": "", "activity_badge": "", "mono_badge": "", "proxy_badge": ""}
+
+        d_title_lbl.configure(text=f"👤 {p_name}")
+        d_tiktok_lbl.configure(text=f"TikTok ID: {info.get('tiktok_id', '')}")
+        d_badge_cookie.configure(text=f"Cookie: {info.get('cookie_badge', '')}")
+        d_badge_act.configure(text=f"Trạng thái: {info.get('activity_badge', '')}")
+        d_badge_mono.configure(text=f"Kiếm tiền: {info.get('mono_badge', '')}")
+        d_proxy_lbl.configure(text=f"Proxy: {info.get('proxy_badge', '')}")
+
+        folder = info.get('folder_path', '')
+        d_folder_lbl.configure(text=folder if folder else "Chưa chọn thư mục video")
+
+        err = info.get('last_error', '')
+        d_err_text.configure(state="normal")
+        d_err_text.delete("1.0", "end")
+        d_err_text.insert("1.0", err if err else "Không có lỗi nào.")
+        d_err_text.configure(state="disabled")
+
+        drawer_frame.grid()
+
+    widgets["show_drawer_for_profile"] = _show_drawer_for_profile
+
+    # Đồng bộ Bulk Action Bar và Drawer khi người dùng chọn dòng
+    def _update_bulk_action_bar(event=None):
+        sel = tree.selection()
+        count = len(sel)
+        if count > 0:
+            lbl_bulk_selected.configure(text=f"Đã chọn: {count} hồ sơ")
+            if not bulk_action_bar.winfo_ismapped():
+                bulk_action_bar.pack(fill="x", pady=(0, 6), after=filter_chips_frame)
+            if count == 1 and drawer_frame.winfo_ismapped():
+                try:
+                    p_name = tree.item(sel[0], "values")[0]
+                    _show_drawer_for_profile(p_name)
+                except Exception:
+                    pass
+        else:
+            if bulk_action_bar.winfo_ismapped():
+                bulk_action_bar.pack_forget()
+
+    tree.bind("<<TreeviewSelect>>", _update_bulk_action_bar, add="+")
+
+    # Double-click và phím Enter mở Drawer chi tiết
+    def _on_tree_double_click(event):
+        sel = tree.selection()
+        if sel:
+            p_name = tree.item(sel[0], "values")[0]
+            _show_drawer_for_profile(p_name)
+
+    def _on_tree_enter(event):
+        sel = tree.selection()
+        if sel:
+            p_name = tree.item(sel[0], "values")[0]
+            _show_drawer_for_profile(p_name)
+        return "break"
+
+    tree.bind("<Double-1>", _on_tree_double_click, add="+")
+    tree.bind("<Return>", _on_tree_enter, add="+")
+    tree.bind("<KP_Enter>", _on_tree_enter, add="+")
+
+    # Phím tắt Ctrl+F đưa con trỏ vào ô tìm kiếm
+    def _focus_search(event=None):
+        if "search_entry" in widgets:
+            widgets["search_entry"].focus_set()
+            return "break"
+
+    root.bind("<Control-f>", _focus_search, add="+")
+    root.bind("<Control-F>", _focus_search, add="+")
+
+    # Phím tắt Escape đóng Drawer hoặc bỏ chọn hàng
+    def _on_escape(event=None):
+        if drawer_frame.winfo_ismapped():
+            drawer_frame.grid_remove()
+            return "break"
+        if tree.selection():
+            tree.selection_remove(tree.selection())
+            _update_bulk_action_bar()
+            return "break"
+
+    root.bind("<Escape>", _on_escape, add="+")
 
     # Pagination Bar (Dưới đáy bảng hồ sơ)
     pagination_bar = ctk.CTkFrame(table_card, fg_color="transparent", height=32)
@@ -1152,38 +1513,62 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     widgets['status_text'] = status_text
     log_drawer.set_expanded(True)
 
-    # Super Context Menu for Profiles Tree
+    # Super Context Menu for Profiles Tree (Cấu trúc 2 tầng phân cấp tinh gọn)
     ctx_menu = Menu(root, tearoff=0)
     ctx_menu.add_command(label="🌐 Login / Mở trình duyệt", command=handlers['open_browser'])
-    ctx_menu.add_command(label="📅 Lên lịch đăng bài tự động...", command=handlers.get('open_schedule_modal', lambda: None))
-    ctx_menu.add_command(label="🔁 Kiểm tra bài đăng (Check Post / Check Trùng)", command=handlers.get('check_profile_posts_dialog', lambda: None))
-    ctx_menu.add_command(label="Kiểm tra Cookie (Đã chọn)", command=handlers['check_cookie_live'])
-    ctx_menu.add_command(label="Kiểm tra thông tin TikTok", command=handlers['inspect_tiktok_account'])
-    ctx_menu.add_command(label="💰 Kiểm tra Thu nhập / KYC / CRP", command=handlers.get('check_monetization_selected', handlers.get('refresh_selected_monetization', lambda: None)))
-    ctx_menu.add_command(label="📊 Cập nhật Views & Follower", command=handlers.get('refresh_selected_analytics', lambda: None))
+    ctx_menu.add_command(label="▶ Khởi động (Đã chọn)", command=handlers['start_selected_batch'])
+    ctx_menu.add_command(label="■ Dừng (Đã chọn)", command=handlers['stop_selected_batch'])
     ctx_menu.add_separator()
-    ctx_menu.add_command(label="Sửa", command=handlers['edit_profile'])
-    ctx_menu.add_command(label="Xem chi tiết", command=handlers['view_profile_details'])
-    ctx_menu.add_command(label="📂 Mở thư mục Profile (User Data)", command=handlers.get('open_profile_folder', lambda: None))
-    ctx_menu.add_command(label="Copy Folder Video", command=handlers['copy_folder_path'])
-    ctx_menu.add_command(label="Copy Link Kênh", command=handlers['copy_channel_link'])
-    ctx_menu.add_command(label="📁 Gán vào dự án...", command=handlers['assign_to_project'])
-    ctx_menu.add_separator()
-    ctx_menu.add_command(label="📋 Sao chép TikTok UID", command=handlers.get('copy_tiktok_uid', lambda: None))
-    ctx_menu.add_command(label="📋 Sao chép Chuỗi Proxy", command=handlers.get('copy_proxy_string', lambda: None))
-    ctx_menu.add_command(label="Lấy Cookie TikTok", command=handlers['get_tiktok_cookies'])
-    ctx_menu.add_separator()
-    ctx_menu.add_command(label="Khởi động (Đã chọn)", command=handlers['start_selected_batch'])
-    ctx_menu.add_command(label="Dừng (Đã chọn)", command=handlers['stop_selected_batch'])
-    ctx_menu.add_separator()
-    ctx_menu.add_command(label="Reset Browser", command=handlers['clean_browser'])
-    ctx_menu.add_command(label="Export tài khoản", command=handlers['export_profiles'])
-    ctx_menu.add_command(label="Xoá", command=handlers['delete_profile'])
+
+    # Submenu: Kiểm tra
+    menu_check = Menu(ctx_menu, tearoff=0)
+    menu_check.add_command(label="🔍 Check Thông Tin (Lấy Cookie & 3-Tier)", command=handlers.get('batch_check_tiktok_info', lambda: None))
+    menu_check.add_command(label="Kiểm tra Cookie (Đã chọn)", command=handlers['check_cookie_live'])
+    menu_check.add_command(label="🔁 Kiểm tra bài đăng (Check Post / Check Trùng)", command=handlers.get('check_profile_posts_dialog', lambda: None))
+    menu_check.add_command(label="👤 Check Thông Tin Tài Khoản (Đổi Tên)", command=handlers.get('open_check_user_dialog', lambda: None))
+    menu_check.add_command(label="🎯 Check Điều Kiện Thưởng VPCS / Quỹ", command=handlers.get('open_video_rank_dialog', lambda: None))
+    menu_check.add_command(label="🔎 Check Video Trùng Kênh (Công Khai)", command=handlers.get('open_check_dup_dialog', lambda: None))
+    menu_check.add_command(label="Kiểm tra thông tin TikTok", command=handlers['inspect_tiktok_account'])
+    menu_check.add_command(label="💰 Kiểm tra Thu nhập / KYC / CRP", command=handlers.get('check_monetization_selected', handlers.get('refresh_selected_monetization', lambda: None)))
+    menu_check.add_command(label="📊 Cập nhật Views & Follower", command=handlers.get('refresh_selected_analytics', lambda: None))
+    ctx_menu.add_cascade(label="🔍 Kiểm Tra Tài Khoản ▸", menu=menu_check)
+
+    # Submenu: Lên lịch
+    menu_sched = Menu(ctx_menu, tearoff=0)
+    menu_sched.add_command(label="📅 Lên lịch đăng bài tự động...", command=handlers.get('open_schedule_modal', lambda: None))
+    ctx_menu.add_cascade(label="📅 Lên Lịch Đăng ▸", menu=menu_sched)
+
+    # Submenu: Sao chép
+    menu_copy = Menu(ctx_menu, tearoff=0)
+    menu_copy.add_command(label="📋 Sao chép TikTok UID", command=handlers.get('copy_tiktok_uid', lambda: None))
+    menu_copy.add_command(label="📋 Sao chép Chuỗi Proxy", command=handlers.get('copy_proxy_string', lambda: None))
+    menu_copy.add_command(label="Copy Folder Video", command=handlers['copy_folder_path'])
+    menu_copy.add_command(label="Copy Link Kênh", command=handlers['copy_channel_link'])
+    menu_copy.add_command(label="Lấy Cookie TikTok", command=handlers['get_tiktok_cookies'])
+    ctx_menu.add_cascade(label="📋 Sao Chép ▸", menu=menu_copy)
+
+    # Submenu: Quản lý hồ sơ
+    menu_manage = Menu(ctx_menu, tearoff=0)
+    menu_manage.add_command(label="Xem chi tiết", command=handlers['view_profile_details'])
+    menu_manage.add_command(label="Sửa", command=handlers['edit_profile'])
+    menu_manage.add_command(label="Đổi tên", command=handlers['rename_profile'])
+    menu_manage.add_command(label="📁 Gán vào dự án...", command=handlers['assign_to_project'])
+    menu_manage.add_command(label="📂 Mở thư mục Profile (User Data)", command=handlers.get('open_profile_folder', lambda: None))
+    menu_manage.add_separator()
+    menu_manage.add_command(label="Reset Browser", command=handlers['clean_browser'])
+    menu_manage.add_command(label="Export tài khoản", command=handlers['export_profiles'])
+    menu_manage.add_command(label="Xoá", command=handlers['delete_profile'])
+    ctx_menu.add_cascade(label="📁 Quản Lý Hồ Sơ ▸", menu=menu_manage)
+
     widgets['ctx_menu'] = ctx_menu
 
     # Super Context Menu for Monetization Tree
     mono_ctx_menu = Menu(root, tearoff=0)
+    mono_ctx_menu.add_command(label="🔍 Check Thông Tin (Lấy Cookie & 3-Tier)", command=handlers.get('batch_check_tiktok_info', lambda: None))
+    mono_ctx_menu.add_command(label="🎯 Check Thưởng VPCS / Gậy Quỹ", command=handlers.get('open_video_rank_dialog', lambda: None))
     mono_ctx_menu.add_command(label="🔁 Kiểm tra bài đăng (Check Post / Check Trùng)", command=handlers.get('check_profile_posts_dialog', lambda: None))
+    mono_ctx_menu.add_command(label="👤 Check Thông Tin Tài Khoản (Đổi Tên)", command=handlers.get('open_check_user_dialog', lambda: None))
+    mono_ctx_menu.add_command(label="🔎 Check Video Trùng Kênh (Công Khai)", command=handlers.get('open_check_dup_dialog', lambda: None))
     mono_ctx_menu.add_command(label="🔍 Xem Chi Tiết Toàn Diện (Monetization & KYC)", command=handlers.get('view_monetization_details', lambda: None))
     mono_ctx_menu.add_command(label="🔄 Kiểm Tra Lại Tài Khoản Này", command=handlers.get('refresh_selected_monetization', lambda: None))
     mono_ctx_menu.add_command(label="📊 Cập nhật Views & Follower", command=handlers.get('refresh_selected_analytics', lambda: None))

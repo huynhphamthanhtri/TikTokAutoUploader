@@ -107,12 +107,12 @@ class TestCheckPostDialog(unittest.TestCase):
         # Video trùng 1: aweme_id 7681997517537594646
         self.assertEqual(dup_rows[0][1], "7681997517537594646")
         self.assertEqual(dup_rows[0][2], "7681997048069115149")
-        self.assertIn("TRÙNG LẶP", dup_rows[0][8])
+        self.assertIn("TRÙNG", dup_rows[0][9])
 
         # Video trùng 2: aweme_id 7679460450093845782
         self.assertEqual(dup_rows[1][1], "7679460450093845782")
         self.assertEqual(dup_rows[1][2], "7679277164268768534")
-        self.assertIn("TRÙNG LẶP", dup_rows[1][8])
+        self.assertIn("TRÙNG", dup_rows[1][9])
 
         # Kiểm tra nhãn cảnh báo tổng kết
         self.assertIn("Phát hiện 2 bài viết trùng lặp", dialog.lbl_status_summary.cget("text"))

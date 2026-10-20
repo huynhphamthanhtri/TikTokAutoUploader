@@ -119,9 +119,21 @@ class TestAppUIContract(unittest.TestCase):
         dashboard_source = inspect.getsource(build_dashboard)
         self.assertIn('project_list_view.pack(fill="both", expand=True', dashboard_source)
 
-        # Check Context menu commands
+        # Check Context menu commands (including submenus/cascades)
         ctx = widgets["ctx_menu"]
-        ctx_labels = [ctx.entrycget(i, "label") for i in range(ctx.index("end") + 1) if ctx.type(i) == "command"]
+        def _get_all_menu_labels(m):
+            lbls = []
+            for i in range(m.index("end") + 1):
+                t = m.type(i)
+                if t == "command":
+                    lbls.append(m.entrycget(i, "label"))
+                elif t == "cascade":
+                    sub_name = m.entrycget(i, "menu")
+                    if sub_name:
+                        sub_m = m.nametowidget(sub_name)
+                        lbls.extend(_get_all_menu_labels(sub_m))
+            return lbls
+        ctx_labels = _get_all_menu_labels(ctx)
         self.assertIn("📁 Gán vào dự án...", ctx_labels)
 
         # Check Treeview columns

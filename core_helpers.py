@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import time
+import urllib.parse
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -105,6 +106,52 @@ def parse_proxy_string(proxy_str):
             'pass': parts[3]
         }
     return None
+
+
+def format_requests_proxy(proxy_input, scheme="http"):
+    """Chuẩn hóa proxy (string hoặc dict) thành format RFC 3986 cho requests.
+    
+    Hỗ trợ:
+    - "ip:port:user:pass" -> "http://user:pass@ip:port"
+    - "ip:port" -> "http://ip:port"
+    - "http://user:pass@host:port" -> giữ nguyên
+    - Dict {'ip': ..., 'port': ..., 'user': ..., 'pass': ...}
+    
+    Trả về: {"http": proxy_url, "https": proxy_url} hoặc None nếu proxy không hợp lệ / rỗng.
+    """
+    if not proxy_input:
+        return None
+        
+    if isinstance(proxy_input, dict):
+        ip = str(proxy_input.get("ip") or proxy_input.get("host") or "").strip()
+        port = str(proxy_input.get("port") or "").strip()
+        user = str(proxy_input.get("user") or proxy_input.get("username") or "").strip()
+        pwd = str(proxy_input.get("pass") or proxy_input.get("password") or "").strip()
+    else:
+        p_str = str(proxy_input).strip()
+        if not p_str:
+            return None
+        if "@" in p_str and any(p_str.startswith(s) for s in ("http://", "https://", "socks5://")):
+            return {"http": p_str, "https": p_str}
+        parsed = parse_proxy_string(p_str)
+        if not parsed:
+            return None
+        ip = str(parsed.get("ip") or "").strip()
+        port = str(parsed.get("port") or "").strip()
+        user = str(parsed.get("user") or "").strip()
+        pwd = str(parsed.get("pass") or "").strip()
+
+    if not ip or not port:
+        return None
+
+    if user and pwd:
+        u_enc = urllib.parse.quote(user, safe="")
+        p_enc = urllib.parse.quote(pwd, safe="")
+        proxy_url = f"{scheme}://{u_enc}:{p_enc}@{ip}:{port}"
+    else:
+        proxy_url = f"{scheme}://{ip}:{port}"
+
+    return {"http": proxy_url, "https": proxy_url}
 
 
 def _extract_ip_address(content):

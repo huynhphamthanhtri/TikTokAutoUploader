@@ -47,6 +47,7 @@ class DailyLimitStateAndConfigTests(unittest.TestCase):
 
     def test_config_store_preserves_auto_daily_resume_across_midnight(self):
         """Kiem chung config_store luu va phuc hoi auto_daily_resume sau khi qua ngay."""
+        yesterday_str = (datetime.date.today() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
         raw_config = {
             "chrome_profile": "C:/data/Profile",
             "browser_profile_path": "C:/data/Profile-Patchright",
@@ -55,13 +56,13 @@ class DailyLimitStateAndConfigTests(unittest.TestCase):
             "auto_daily_resume": True,
             "stats_today": 3,
             "stats_yesterday": 2,
-            "stats_date": "2026-10-18",
+            "stats_date": yesterday_str,
         }
         profile = {
             "config": raw_config,
             "uploads_today_count": 3,
             "uploads_yesterday_count": 2,
-            "uploads_today_date": "2026-10-18",
+            "uploads_today_date": yesterday_str,
             "auto_daily_resume": True,
             "project": "Default",
         }
@@ -71,7 +72,7 @@ class DailyLimitStateAndConfigTests(unittest.TestCase):
         saved_prof = exported["profiles"]["test_prof"]
         self.assertTrue(saved_prof["auto_daily_resume"])
 
-        # Gia lap mo app vao ngay 2026-10-19 (hom sau)
+        # Gia lap mo app vao ngay hom nay (hom sau cua yesterday)
         runtime = build_runtime_profiles({"test_prof": saved_prof})["test_prof"]
         self.assertTrue(runtime["auto_daily_resume"])
         self.assertTrue(runtime["config"]["auto_daily_resume"])

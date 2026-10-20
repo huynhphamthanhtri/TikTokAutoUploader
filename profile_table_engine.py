@@ -212,3 +212,64 @@ class ProfileTableEngine:
     def get_cached(self, profile_name: str) -> Optional[Dict[str, Any]]:
         with self._lock:
             return self._row_cache.get(profile_name)
+
+
+def calculate_filter_chip_counts(
+    profile_names: Sequence[str],
+    profiles: Dict[str, Any],
+    monetization_cache: Optional[Dict[str, Any]] = None,
+    engine: Optional[ProfileTableEngine] = None,
+    search_keyword: str = "",
+) -> Dict[str, int]:
+    """Tính toán số lượng profile tương ứng cho từng filter chip, hỗ trợ kết hợp từ khóa tìm kiếm."""
+    counts = {
+        "ALL": 0,
+        "COOKIE_LIVE": 0,
+        "COOKIE_DIE": 0,
+        "NO_COOKIE": 0,
+        "KYC_OK": 0,
+        "TAX_OK": 0,
+        "TKTBM": 0,
+        "RUNNING": 0,
+        "NEEDS_ATTENTION": 0,
+    }
+
+    kw = (search_keyword or "").strip().lower()
+
+    for name in profile_names:
+        prof = profiles.get(name)
+        if not prof:
+            continue
+
+        model = engine.get_cached(name) if engine else None
+        if not model:
+            model = build_row_model(name, prof, monetization_cache)
+            if engine:
+                engine.update_cache(name, model)
+
+        # Nếu có từ khóa tìm kiếm, kiểm tra search_blob
+        if kw and kw not in model.get("search_blob", ""):
+            continue
+
+        fk = model.get("filter_keys", {})
+        counts["ALL"] += 1
+        if fk.get("is_cookie_live"):
+            counts["COOKIE_LIVE"] += 1
+        if fk.get("is_cookie_die"):
+            counts["COOKIE_DIE"] += 1
+        if fk.get("is_no_cookie"):
+            counts["NO_COOKIE"] += 1
+        if fk.get("is_kyc_ok"):
+            counts["KYC_OK"] += 1
+        if fk.get("is_tax_ok"):
+            counts["TAX_OK"] += 1
+        if fk.get("is_tktbm"):
+            counts["TKTBM"] += 1
+        if fk.get("is_running"):
+            counts["RUNNING"] += 1
+
+        last_err = str(prof.get("ui", {}).get("last_error", ""))
+        if fk.get("is_cookie_die") or fk.get("is_tktbm") or last_err:
+            counts["NEEDS_ATTENTION"] += 1
+
+    return counts

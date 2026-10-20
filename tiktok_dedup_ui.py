@@ -32,6 +32,10 @@ from tiktok_dedup_engine import (
     analyze_tiktok_video,
     VideoItemAnalysis,
 )
+from concurrent.futures import ThreadPoolExecutor
+from check_features.clients.studio_post_client import TikTokStudioPostClient
+from check_features.services.video_downloader import download_video_no_watermark
+from check_features.ui.common_appeal_dialog import ManualAppealDialog
 
 logger = logging.getLogger("DedupUI")
 
@@ -944,12 +948,23 @@ class CheckPostDialog(ctk.CTkToplevel):
         self.profile = profile
         self.db = db
         self.client = TikTokDedupApiClient(profile)
+        self.profile_cfg = {
+            "cookie_str": profile.cookies,
+            "sec_uid": profile.sec_uid,
+            "tiktok_id": profile.tiktok_account,
+            "proxy_string": profile.proxy_string,
+        }
+        self.studio_client = TikTokStudioPostClient(self.profile_cfg)
         self._is_loading = False
+        self._current_cursor = 0
+        self._has_more = False
+        self._penalty_cache: Dict[str, Any] = {}
+        self._penalty_executor = ThreadPoolExecutor(max_workers=4)
 
         profile_display = profile.tiktok_account or profile.profile_id
         self.title(f"Kiểm tra bài đăng - {profile_display}")
-        self.geometry("1140x680")
-        self.minsize(960, 560)
+        self.geometry("1180x680")
+        self.minsize(980, 560)
 
         # Center on parent window
         try:
@@ -1014,7 +1029,20 @@ class CheckPostDialog(ctk.CTkToplevel):
             hover_color="#1e293b",
             command=self.load_posts,
         )
-        self.btn_refresh.pack(side="left", padx=(0, 8))
+        self.btn_refresh.pack(side="left", padx=(0, 6))
+
+        self.btn_load_more = ctk.CTkButton(
+            hdr_actions,
+            text="⬇ Tải Thêm",
+            font=("Segoe UI Semibold", 11),
+            width=95,
+            height=30,
+            fg_color="#0284c7",
+            hover_color="#0369a1",
+            command=self.load_more_posts,
+            state="disabled",
+        )
+        self.btn_load_more.pack(side="left", padx=(0, 6))
 
         self.btn_save_audit = ctk.CTkButton(
             hdr_actions,
@@ -1034,7 +1062,7 @@ class CheckPostDialog(ctk.CTkToplevel):
         table_container.grid_columnconfigure(0, weight=1)
         table_container.grid_rowconfigure(0, weight=1)
 
-        cols = ("idx", "aweme_id", "group_id", "desc", "views", "create_time", "source", "shadow", "dup_status", "visibility")
+        cols = ("idx", "aweme_id", "group_id", "desc", "views", "create_time", "source", "shadow", "penalty", "dup_status", "visibility")
         self.tree = ttk.Treeview(
             table_container,
             style="Modern.Treeview",
@@ -1050,19 +1078,21 @@ class CheckPostDialog(ctk.CTkToplevel):
         self.tree.heading("create_time", text="Ngày Đăng")
         self.tree.heading("source", text="Nguồn")
         self.tree.heading("shadow", text="Shadowban")
+        self.tree.heading("penalty", text="Án Phạt (Strike)")
         self.tree.heading("dup_status", text="Trạng Thái Trùng")
         self.tree.heading("visibility", text="Quyền Xem")
 
-        self.tree.column("idx", width=40, anchor="center")
-        self.tree.column("aweme_id", width=140, anchor="center")
-        self.tree.column("group_id", width=140, anchor="center")
-        self.tree.column("desc", width=260, anchor="w")
-        self.tree.column("views", width=75, anchor="center")
-        self.tree.column("create_time", width=110, anchor="center")
-        self.tree.column("source", width=90, anchor="center")
-        self.tree.column("shadow", width=130, anchor="center")
-        self.tree.column("dup_status", width=170, anchor="center")
-        self.tree.column("visibility", width=85, anchor="center")
+        self.tree.column("idx", width=35, anchor="center")
+        self.tree.column("aweme_id", width=135, anchor="center")
+        self.tree.column("group_id", width=135, anchor="center")
+        self.tree.column("desc", width=240, anchor="w")
+        self.tree.column("views", width=70, anchor="center")
+        self.tree.column("create_time", width=105, anchor="center")
+        self.tree.column("source", width=85, anchor="center")
+        self.tree.column("shadow", width=115, anchor="center")
+        self.tree.column("penalty", width=115, anchor="center")
+        self.tree.column("dup_status", width=155, anchor="center")
+        self.tree.column("visibility", width=80, anchor="center")
 
         self.tree.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
         vsb = ttk.Scrollbar(table_container, orient="vertical", command=self.tree.yview)
@@ -1072,6 +1102,7 @@ class CheckPostDialog(ctk.CTkToplevel):
         self.tree.tag_configure("dup", background="#fee2e2", foreground="#991b1b")
         self.tree.tag_configure("clean", background="#ffffff", foreground="#0f172a")
         self.tree.tag_configure("shadow", background="#fef3c7", foreground="#92400e")
+        self.tree.tag_configure("strike", background="#ffe4e6", foreground="#be123c")
         self.tree.bind("<Double-1>", lambda e: self._on_tree_double_click())
 
         # --- 3. BOTTOM ACTION BAR ---
@@ -1090,11 +1121,35 @@ class CheckPostDialog(ctk.CTkToplevel):
         btn_box = ctk.CTkFrame(action_bar, fg_color="transparent")
         btn_box.grid(row=0, column=1, sticky="e")
 
+        self.btn_appeal_strike = ctk.CTkButton(
+            btn_box,
+            text="⚖️ Kháng Strike",
+            font=("Segoe UI Semibold", 11),
+            width=120,
+            height=30,
+            fg_color="#ea580c",
+            hover_color="#c2410c",
+            command=self._appeal_selected_strike,
+        )
+        self.btn_appeal_strike.pack(side="left", padx=(0, 6))
+
+        self.btn_download_clean = ctk.CTkButton(
+            btn_box,
+            text="📥 Tải No-Logo",
+            font=("Segoe UI Semibold", 11),
+            width=115,
+            height=30,
+            fg_color="#0284c7",
+            hover_color="#0369a1",
+            command=self._download_selected_clean,
+        )
+        self.btn_download_clean.pack(side="left", padx=(0, 6))
+
         self.btn_open_original = ctk.CTkButton(
             btn_box,
-            text="🔗 Mở Video Gốc Đối Chiếu",
+            text="🔗 Mở Video Gốc",
             font=("Segoe UI Semibold", 11),
-            width=180,
+            width=135,
             height=30,
             fg_color="#dc2626",
             hover_color="#b91c1c",
@@ -1104,9 +1159,9 @@ class CheckPostDialog(ctk.CTkToplevel):
 
         self.btn_open_current = ctk.CTkButton(
             btn_box,
-            text="🌐 Mở Bài Đăng TikTok",
+            text="🌐 Mở Bài Đăng",
             font=("Segoe UI Semibold", 11),
-            width=150,
+            width=120,
             height=30,
             fg_color=UIThemeTokens.ACCENT_PRIMARY,
             hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
@@ -1116,9 +1171,9 @@ class CheckPostDialog(ctk.CTkToplevel):
 
         self.btn_hide_private = ctk.CTkButton(
             btn_box,
-            text="🔒 Ẩn Video (Chỉ Mình Xem)",
+            text="🔒 Ẩn Video",
             font=("Segoe UI Semibold", 11),
-            width=170,
+            width=100,
             height=30,
             fg_color="#475569",
             hover_color="#334155",
@@ -1128,9 +1183,9 @@ class CheckPostDialog(ctk.CTkToplevel):
 
         self.btn_delete_post = ctk.CTkButton(
             btn_box,
-            text="🗑️ Xóa Vĩnh Viễn",
+            text="🗑️ Xóa",
             font=("Segoe UI Semibold", 11),
-            width=130,
+            width=80,
             height=30,
             fg_color="#b91c1c",
             hover_color="#991b1b",
@@ -1151,17 +1206,53 @@ class CheckPostDialog(ctk.CTkToplevel):
         self.btn_copy_id.pack(side="left")
 
     def load_posts(self) -> None:
-        """Tải danh sách bài viết trong luồng phụ."""
+        """Tải trang bài viết đầu tiên (cursor = 0)."""
+        self._current_cursor = 0
+        self._posts_raw = []
+        self._analyzed_posts = []
+        self._fetch_posts_page(cursor=0, append=False)
+
+    def load_more_posts(self) -> None:
+        """Tải thêm trang bài viết tiếp theo sử dụng cursor."""
+        if not self._has_more:
+            messagebox.showinfo("Thông báo", "Đã tải hết toàn bộ bài viết của kênh.")
+            return
+        self._fetch_posts_page(cursor=self._current_cursor, append=True)
+
+    def _fetch_posts_page(self, cursor: int = 0, append: bool = False) -> None:
         if self._is_loading:
             return
         self._is_loading = True
         self.btn_refresh.configure(state="disabled", text="⏳ Đang tải...")
-        self.lbl_meta_sub.configure(text="Đang kết nối lấy dữ liệu bài viết từ TikTok...")
+        self.btn_load_more.configure(state="disabled")
+        self.lbl_meta_sub.configure(text=f"Đang kết nối lấy bài viết từ cursor {cursor}...")
 
         def _worker():
             try:
-                posts = self.client.fetch_profile_posts(count=50)
-                self.after(0, lambda: self._on_posts_loaded(posts))
+                # 1. Thử lấy qua studio_client trước
+                ok, studio_posts, next_cur, has_more, msg = self.studio_client.fetch_posts(count=20, max_cursor=cursor)
+                if ok and studio_posts:
+                    raw_dicts = []
+                    for sp in studio_posts:
+                        raw_dicts.append({
+                            "aweme_id": sp.aweme_id,
+                            "desc": sp.desc,
+                            "video": {"duration": sp.duration, "playAddr": {"url_list": [sp.download_url]}},
+                            "create_time": sp.create_time,
+                            "source": sp.source,
+                            "statistics": {"play_count": sp.play, "digg_count": sp.like, "comment_count": sp.comment},
+                            "group_id": sp.group_id,
+                            "risk_warn": sp.risk_warn,
+                            "warn_info": sp.penalty_flag,
+                            "penalty_flag": sp.penalty_flag,
+                            "download_url": sp.download_url,
+                        })
+                    self.after(0, lambda: self._on_posts_loaded(raw_dicts, next_cur, has_more, append))
+                    return
+
+                # 2. Fallback qua TikTokDedupApiClient
+                posts = self.client.fetch_profile_posts(count=35)
+                self.after(0, lambda: self._on_posts_loaded(posts, cursor + len(posts), False, append))
             except Exception as e:
                 logger.exception("Lỗi khi fetch profile posts")
                 self.after(0, lambda: self._on_posts_error(str(e)))
@@ -1171,24 +1262,37 @@ class CheckPostDialog(ctk.CTkToplevel):
     def _on_posts_error(self, err_msg: str) -> None:
         self._is_loading = False
         self.btn_refresh.configure(state="normal", text="🔄 Tải Lại")
+        self.btn_load_more.configure(state="normal" if self._has_more else "disabled")
         self.lbl_meta_sub.configure(text=f"Lỗi: {err_msg}")
         messagebox.showerror("Lỗi", f"Không thể lấy bài viết: {err_msg}")
 
-    def _on_posts_loaded(self, posts: List[Dict[str, Any]]) -> None:
+    def _on_posts_loaded(self, posts: List[Dict[str, Any]], next_cursor: int = 0, has_more: bool = False, append: bool = False) -> None:
         self._is_loading = False
         self.btn_refresh.configure(state="normal", text="🔄 Tải Lại")
-        self._posts_raw = posts
-        self._analyzed_posts = [analyze_tiktok_video(p) for p in posts]
+        self._current_cursor = next_cursor
+        self._has_more = has_more
+        self.btn_load_more.configure(state="normal" if has_more else "disabled")
 
-        # Xóa Treeview cũ
-        for row in self.tree.get_children():
-            self.tree.delete(row)
+        if not append:
+            self._posts_raw = posts
+            self._analyzed_posts = [analyze_tiktok_video(p) for p in posts]
+            for row in self.tree.get_children():
+                self.tree.delete(row)
+        else:
+            existing_ids = {str(p.aweme_id) for p in self._analyzed_posts}
+            new_analyzed = []
+            for p in posts:
+                an = analyze_tiktok_video(p)
+                if str(an.aweme_id) not in existing_ids:
+                    existing_ids.add(str(an.aweme_id))
+                    new_analyzed.append(an)
+            self._posts_raw.extend(posts)
+            self._analyzed_posts.extend(new_analyzed)
 
         dup_count = sum(1 for v in self._analyzed_posts if v.is_dup)
         shadow_count = sum(1 for v in self._analyzed_posts if v.is_shadow)
         total = len(self._analyzed_posts)
 
-        # Cập nhật thông tin tiêu đề
         if posts and isinstance(posts[0], dict):
             first_auth = posts[0].get("author") or {}
             if first_auth.get("unique_id"):
@@ -1197,49 +1301,21 @@ class CheckPostDialog(ctk.CTkToplevel):
                 self.lbl_profile_title.configure(text=f"🔁 Bài đăng Profile: {self.profile.profile_id} ({nickname} @{self._username})")
 
         self.lbl_meta_sub.configure(
-            text=f"Tổng video: {total} bài  |  Phát hiện: {dup_count} video trùng lặp  |  {shadow_count} video có dấu hiệu shadowban"
+            text=f"Đã tải: {total} video  |  Phát hiện: {dup_count} video trùng  |  {shadow_count} video nghi ngờ shadowban"
         )
 
-        # Chèn từng video vào Treeview
-        for idx, item in enumerate(self._analyzed_posts, start=1):
-            c_time_s = item.create_time
-            c_time_str = datetime.fromtimestamp(c_time_s).strftime("%d/%m/%Y %H:%M") if c_time_s else "—"
+        # Render Treeview
+        if not append:
+            for idx, item in enumerate(self._analyzed_posts, start=1):
+                self._insert_tree_row(idx, item)
+        else:
+            start_idx = len(self.tree.get_children()) + 1
+            for offset, item in enumerate(self._analyzed_posts[start_idx - 1:], start=0):
+                self._insert_tree_row(start_idx + offset, item)
 
-            if item.is_dup:
-                dup_text = f"🔴 TRÙNG LẶP (Gốc: {item.group_id})"
-                tag = "dup"
-            else:
-                dup_text = "🟢 BẢN GỐC"
-                tag = "clean"
+        # Khởi chạy tải Án phạt vi phạm (Batch 4 concurrent)
+        self._fetch_penalties_in_background(self._analyzed_posts)
 
-            if item.is_shadow:
-                shadow_text = f"⛔ {item.shadow_reason or 'Bị hạn chế'}"
-                if tag != "dup":
-                    tag = "shadow"
-            else:
-                shadow_text = "✅ Không"
-
-            vis_text = "Đã xoá" if item.is_delete else ("Riêng tư" if item.is_private else "Công khai")
-
-            self.tree.insert(
-                "",
-                "end",
-                values=(
-                    idx,
-                    item.aweme_id,
-                    item.group_id if item.is_dup else "—",
-                    (item.desc or "(không có mô tả)")[:50],
-                    f"{item.play_count:,}" if item.play_count else "0",
-                    c_time_str,
-                    item.source,
-                    shadow_text,
-                    dup_text,
-                    vis_text,
-                ),
-                tags=(tag,),
-            )
-
-        # Cập nhật thanh trạng thái dưới cùng
         if dup_count > 0:
             self.lbl_status_summary.configure(
                 text=f"⚠️ CẢNH BÁO: Phát hiện {dup_count} bài viết trùng lặp trên tài khoản này!",
@@ -1251,13 +1327,159 @@ class CheckPostDialog(ctk.CTkToplevel):
                 text_color="#16a34a",
             )
 
+    def _insert_tree_row(self, idx: int, item: VideoItemAnalysis) -> None:
+        c_time_s = item.create_time
+        c_time_str = datetime.fromtimestamp(c_time_s).strftime("%d/%m/%Y %H:%M") if c_time_s else "—"
+
+        if item.is_dup:
+            dup_text = f"🔴 TRÙNG (Gốc: {item.group_id})"
+            tag = "dup"
+        else:
+            dup_text = "🟢 BẢN GỐC"
+            tag = "clean"
+
+        if item.is_shadow:
+            shadow_text = f"⛔ {item.shadow_reason or 'Bị hạn chế'}"
+            if tag != "dup":
+                tag = "shadow"
+        else:
+            shadow_text = "✅ Không"
+
+        penalty_text = "Đang kiểm tra..." if getattr(item, "raw_dict", {}).get("penalty_flag") else "⚪ Sạch"
+        vis_text = "Đã xoá" if item.is_delete else ("Riêng tư" if item.is_private else "Công khai")
+
+        self.tree.insert(
+            "",
+            "end",
+            iid=str(item.aweme_id),
+            values=(
+                idx,
+                item.aweme_id,
+                item.group_id if item.is_dup else "—",
+                (item.desc or "(không có mô tả)")[:50],
+                f"{item.play_count:,}" if item.play_count else "0",
+                c_time_str,
+                item.source,
+                shadow_text,
+                penalty_text,
+                dup_text,
+                vis_text,
+            ),
+            tags=(tag,),
+        )
+
+    def _fetch_penalties_in_background(self, items: List[VideoItemAnalysis]) -> None:
+        """Dùng ThreadPoolExecutor(max_workers=4) tải chi tiết án phạt không đơ UI."""
+        targets = [it for it in items if str(it.aweme_id) not in self._penalty_cache]
+        for it in targets:
+            self._penalty_executor.submit(self._fetch_single_penalty, str(it.aweme_id), it.create_time)
+
+    def _fetch_single_penalty(self, aweme_id: str, create_time: int) -> None:
+        ok, p_info, _ = self.studio_client.get_penalty_details(aweme_id, create_time)
+        self._penalty_cache[aweme_id] = p_info
+
+        def _update_tree():
+            if not self.winfo_exists() or not self.tree.exists(aweme_id):
+                return
+            vals = list(self.tree.item(aweme_id, "values"))
+            if len(vals) >= 11:
+                if p_info.has_penalty:
+                    st_map = {0: "Chưa kháng", 1: "Chưa kháng", 2: "Đang xét duyệt", 3: "Thất bại", 4: "Hoàn tất"}
+                    st_str = st_map.get(p_info.appeal_status, "Có án phạt")
+                    vals[8] = f"⚠️ {st_str}"
+                    self.tree.item(aweme_id, values=vals, tags=("strike",))
+                else:
+                    vals[8] = "🟢 Không phạt"
+                    self.tree.item(aweme_id, values=vals)
+
+        try:
+            self.after(0, _update_tree)
+        except Exception:
+            pass
+
+    def _appeal_selected_strike(self) -> None:
+        """Mở ManualAppealDialog để người dùng tự nhập nội dung kháng Strike."""
+        item = self._get_selected_item()
+        if not item:
+            return
+
+        p_info = self._penalty_cache.get(str(item.aweme_id))
+        penalty_id = p_info.penalty_id if p_info else str(item.aweme_id)
+        reason = ", ".join(p_info.reason_codes) if (p_info and p_info.reason_codes) else (item.shadow_reason or "Vi phạm tiêu chuẩn cộng đồng")
+
+        def _submit_cb(appeal_text: str):
+            ok, msg = self.studio_client.submit_studio_appeal(
+                vid=str(item.aweme_id),
+                penalty_id=penalty_id,
+                reason_text=appeal_text,
+            )
+            if ok:
+                if p_info:
+                    p_info.appeal_status = 2
+                vals = list(self.tree.item(str(item.aweme_id), "values"))
+                if len(vals) >= 11:
+                    vals[8] = "⏳ Đang xét duyệt"
+                    self.tree.item(str(item.aweme_id), values=vals)
+            return ok, msg
+
+        ManualAppealDialog(
+            parent=self,
+            target_title=f"Bài đăng {item.aweme_id}",
+            item_id=str(item.aweme_id),
+            violation_reason=reason,
+            on_submit_callback=_submit_cb,
+        )
+
+    def _download_selected_clean(self) -> None:
+        """Tải video sạch không logo theo tiến độ."""
+        item = self._get_selected_item()
+        if not item:
+            return
+
+        # Tìm download URL
+        raw_d = getattr(item, "raw_dict", {}) or {}
+        dl_url = raw_d.get("download_url") or ""
+        if not dl_url:
+            v_obj = raw_d.get("video") or {}
+            p_addr = v_obj.get("playAddr") or v_obj.get("play_addr") or {}
+            urls = p_addr.get("url_list") or []
+            dl_url = urls[0] if urls else ""
+
+        if not dl_url:
+            messagebox.showwarning("Thông báo", "Không tìm thấy URL tải video chất lượng cao cho bài viết này.")
+            return
+
+        out_dir = filedialog.askdirectory(title="Chọn thư mục lưu video TikTok")
+        if not out_dir:
+            return
+
+        self.lbl_status_summary.configure(text=f"⏳ Đang tải video {item.aweme_id}...", text_color="#0284c7")
+
+        def _prog(cur, tot, pct):
+            self.lbl_status_summary.configure(text=f"⏳ Đang tải video {item.aweme_id}: {pct:.1f}% ({cur//1024} KB)")
+
+        def _worker():
+            ok, path, msg = download_video_no_watermark(dl_url, out_dir, str(item.aweme_id), progress_callback=_prog)
+            def _done():
+                if ok:
+                    self.lbl_status_summary.configure(text=f"✅ {msg}", text_color="#16a34a")
+                    messagebox.showinfo("Tải Thành Công", f"Đã lưu video không watermark tại:\n{path}")
+                else:
+                    self.lbl_status_summary.configure(text=f"❌ {msg}", text_color="#ef4444")
+                    messagebox.showerror("Lỗi Tải Video", msg)
+            try:
+                self.after(0, _done)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _get_selected_item(self) -> Optional[VideoItemAnalysis]:
         sel = self.tree.selection()
         if not sel:
             messagebox.showinfo("Thông báo", "Vui lòng chọn một dòng video trong bảng.")
             return None
-        vals = self.tree.item(sel[0], "values")
-        aweme_id = vals[1] if len(vals) > 1 else ""
+        aweme_id = sel[0]
         for item in self._analyzed_posts:
             if str(item.aweme_id) == str(aweme_id):
                 return item
@@ -1302,19 +1524,22 @@ class CheckPostDialog(ctk.CTkToplevel):
         if not confirm:
             return
 
-        ok = self.client.set_post_private(item.aweme_id)
+        ok, msg = self.studio_client.hide_studio_item(item.aweme_id)
+        if not ok:
+            ok = self.client.set_post_private(item.aweme_id)
+            msg = "Đã ẩn video thành công." if ok else "Lỗi kết nối khi ẩn video."
+
         if ok:
             messagebox.showinfo("Thành công", f"Đã chuyển video {item.aweme_id} sang trạng thái Riêng tư.")
             item.is_private = True
-            # Cập nhật UI Treeview
             sel = self.tree.selection()
             if sel:
                 vals = list(self.tree.item(sel[0], "values"))
-                if len(vals) >= 10:
-                    vals[9] = "Riêng tư"
+                if len(vals) >= 11:
+                    vals[10] = "Riêng tư"
                     self.tree.item(sel[0], values=vals)
         else:
-            messagebox.showerror("Thất bại", f"Không thể đổi quyền riêng tư video {item.aweme_id}. Kiểm tra lại Cookie/Proxy.")
+            messagebox.showerror("Thất bại", msg)
 
     def _delete_selected_post(self) -> None:
         item = self._get_selected_item()
@@ -1328,19 +1553,22 @@ class CheckPostDialog(ctk.CTkToplevel):
         if not confirm:
             return
 
-        ok = self.client.delete_post(item.aweme_id)
+        ok, msg = self.studio_client.delete_studio_item(item.aweme_id)
+        if not ok:
+            ok = self.client.delete_post(item.aweme_id)
+            msg = "Đã xóa video thành công." if ok else "Lỗi kết nối khi xóa video."
+
         if ok:
             messagebox.showinfo("Đã Xóa", f"Đã xóa vĩnh viễn video {item.aweme_id} khỏi kênh TikTok.")
             item.is_delete = True
-            # Cập nhật UI Treeview
             sel = self.tree.selection()
             if sel:
                 vals = list(self.tree.item(sel[0], "values"))
-                if len(vals) >= 10:
-                    vals[9] = "Đã xoá"
+                if len(vals) >= 11:
+                    vals[10] = "Đã xoá"
                     self.tree.item(sel[0], values=vals)
         else:
-            messagebox.showerror("Thất bại", f"Không thể xóa video {item.aweme_id}. Vui lòng kiểm tra lại phiên đăng nhập.")
+            messagebox.showerror("Thất bại", msg)
 
     def _copy_selected_id(self) -> None:
         item = self._get_selected_item()

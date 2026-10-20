@@ -44,6 +44,7 @@ class BrowserSessionConfig:
     account_uuid: str | None = None
     profile_name: str | None = None
     stealth_config: Mapping[str, Any] | None = None
+    user_agent: str | None = None
 
     def __post_init__(self) -> None:
         if not str(self.profile_path).strip():
@@ -308,6 +309,8 @@ class PatchrightBrowser:
             if config.proxy is not None:
                 kwargs["proxy"] = dict(config.proxy)
 
+            if config.user_agent is not None:
+                kwargs["user_agent"] = str(config.user_agent)
             context = await playwright.chromium.launch_persistent_context(**kwargs)
 
             # Prepare Anti-Detect configuration: write data.huynhthang for C++ HT Browser & inject JS stealth for standard Chrome

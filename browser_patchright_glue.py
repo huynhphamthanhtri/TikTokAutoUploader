@@ -427,9 +427,13 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profi
         kwargs["proxy"] = proxy
 
     fingerprint = config.get("fingerprint") or {}
-    user_agent = fingerprint.get("user_agent") or config.get("user_agent")
+    user_agent = (
+        fingerprint.get("user_agent")
+        or (fingerprint.get("navigator") or {}).get("userAgent")
+        or config.get("user_agent")
+    )
     if user_agent:
-        kwargs["user_agent"] = user_agent
+        kwargs["user_agent"] = str(user_agent)
     timezone_id = fingerprint.get("timezone")
     if timezone_id:
         kwargs["timezone_id"] = timezone_id
@@ -479,7 +483,7 @@ def build_session_config(config, mode=SessionMode.AUTOMATION, headed=None, profi
         account_uuid=account_uuid,
         proxy_info=proxy_info,
         geoip_info=geoip_info,
-        user_agent=config.get("user_agent"),
+        user_agent=user_agent,
         profile_name=resolved_profile_name,
     )
     if profile_path:

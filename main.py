@@ -4950,6 +4950,20 @@ def update_profile_list(*args):
         iter_names = sorted(proj_members)
     iter_names = [n for n in iter_names if n in profiles]
 
+    # Cập nhật số đếm động trên các Filter Chip theo project và từ khóa tìm kiếm
+    try:
+        from profile_table_engine import calculate_filter_chip_counts
+        if 'ui_widgets' in globals() and 'update_filter_chip_badges' in ui_widgets:
+            chip_counts = calculate_filter_chip_counts(
+                iter_names,
+                profiles,
+                monetization_cache,
+                search_keyword=kw,
+            )
+            ui_widgets['update_filter_chip_badges'](chip_counts)
+    except Exception as chip_err:
+        logger.debug(f"Lỗi cập nhật filter chip badges: {chip_err}")
+
     # Precompute schedule summary once per update for zero lag (< 0.1ms)
     sched_summary = {}
     try:
@@ -5110,6 +5124,8 @@ def update_profile_list(*args):
         elif active_chip == "TKTBM" and not is_tktbm:
             continue
         elif active_chip == "RUNNING" and not is_running:
+            continue
+        elif active_chip == "NEEDS_ATTENTION" and not (is_cookie_die or is_tktbm or bool(ui.get('last_error'))):
             continue
 
         filtered_matching_items.append((
@@ -8942,12 +8958,199 @@ def check_profile_posts_dialog(profile_name: Optional[str] = None):
             profile_id=target_name,
             tiktok_account=cfg.get('tiktok_id') or target_name,
             sec_uid=cfg.get('sec_uid') or "",
-            cookies=cfg.get('cookies') or cfg.get('cookie') or "",
+            cookies=cfg.get('cookies') or cfg.get('cookie') or cfg.get('cookie_str') or "",
             proxy_type=cfg.get('proxy_type') or "http",
             proxy_string=cfg.get('proxy_string') or "",
         )
 
     dlg = CheckPostDialog(root, profile=target_ctx, db=dedup_db)
+
+from check_features.ui import CheckUserDialog, VideoRankDialog, CheckDupDialog
+
+def open_check_user_dialog(profile_name: Optional[str] = None):
+    """Mở hộp thoại Check Thông Tin Tài Khoản & Đổi Nickname (F1 - CheckUserDialog)."""
+    target_name = profile_name
+    if not target_name:
+        if 'tree' in globals():
+            sel = tree.selection()
+            if sel:
+                target_name = tree.item(sel[0], 'values')[0]
+        if not target_name and 'ui_widgets' in globals() and 'monetization_tree' in ui_widgets:
+            mono_tree = ui_widgets['monetization_tree']
+            sel_m = mono_tree.selection()
+            if sel_m:
+                target_name = mono_tree.item(sel_m[0], 'values')[0]
+
+    if not target_name:
+        messagebox.showwarning("Check User", "Vui lòng chọn 1 profile trong danh sách để xem thông tin tài khoản.")
+        return
+
+    prof_data = profiles.get(target_name, {})
+    cfg = prof_data.get('config', {})
+    CheckUserDialog(root, profile_name=target_name, profile_config=cfg)
+
+def open_video_rank_dialog(profile_name: Optional[str] = None):
+    """Mở hộp thoại Kiểm tra Điều Kiện Thưởng VPCS & Gậy Vi Phạm Quỹ (F4 - VideoRankDialog)."""
+    target_name = profile_name
+    if not target_name:
+        if 'tree' in globals():
+            sel = tree.selection()
+            if sel:
+                target_name = tree.item(sel[0], 'values')[0]
+        if not target_name and 'ui_widgets' in globals() and 'monetization_tree' in ui_widgets:
+            mono_tree = ui_widgets['monetization_tree']
+            sel_m = mono_tree.selection()
+            if sel_m:
+                target_name = mono_tree.item(sel_m[0], 'values')[0]
+
+    if not target_name:
+        messagebox.showwarning("Check VPCS", "Vui lòng chọn 1 profile trong danh sách để kiểm tra quỹ thưởng VPCS.")
+        return
+
+    prof_data = profiles.get(target_name, {})
+    cfg = prof_data.get('config', {})
+    VideoRankDialog(root, profile_name=target_name, profile_config=cfg)
+
+def open_check_dup_dialog(channel_input: Optional[str] = None):
+    """Mở hộp thoại Check Video Trùng Theo Kênh Công Khai (F3 - CheckDupDialog)."""
+    init_ch = channel_input or ""
+    if not init_ch:
+        if 'tree' in globals():
+            sel = tree.selection()
+            if sel:
+                target_name = tree.item(sel[0], 'values')[0]
+                prof_data = profiles.get(target_name, {})
+                cfg = prof_data.get('config', {})
+                init_ch = cfg.get('tiktok_id') or cfg.get('tiktok_account') or ""
+    CheckDupDialog(root, initial_channel=init_ch)
+
+from check_features.services import CheckInfoBatchRunner, CheckInfoResult
+
+_global_check_info_runner = None
+
+def batch_check_tiktok_info(target_profiles=None):
+    """
+    Kích hoạt Check Thông Tin (Lấy Cookie offline + 3-Tier Waterfall) theo chuẩn TTM.
+    - Đọc cookie offline từ SQLite không bật browser.
+    - Đồng bộ Studio -> Setting -> Public Profile stats.
+    - Chạy Concurrency Pool 5 workers và cập nhật UI real-time.
+    """
+    global _global_check_info_runner
+    if not _license_guard():
+        return
+
+    targets = list(target_profiles) if target_profiles else []
+    if not targets:
+        if 'tree' in globals():
+            sel = tree.selection()
+            for iid in sel:
+                val = tree.item(iid, 'values')
+                if val:
+                    targets.append(val[0])
+
+    if not targets:
+        messagebox.showwarning("Check Thông Tin", "Vui lòng chọn ít nhất 1 profile để kiểm tra thông tin.")
+        return
+
+    if _global_check_info_runner and _global_check_info_runner.is_running:
+        messagebox.showinfo("Check Thông Tin", "Một đợt kiểm tra thông tin khác đang chạy. Vui lòng đợi hoàn tất.")
+        return
+
+    # Khởi tạo runner
+    def on_progress(p_name: str, status: str):
+        def _ui_update():
+            _set_profile_ui(p_name, login="Đang kiểm tra...", browser="Kiểm tra offline")
+            update_status(f"[{p_name}] Đang kiểm tra thông tin TikTok offline...")
+        if 'root' in globals() and root:
+            root.after(0, _ui_update)
+
+    def on_done(p_name: str, res: CheckInfoResult):
+        def _ui_done():
+            if res.success:
+                login_lbl = "Có cookie"
+            elif getattr(res, "auth_state", "") == "NOT_LOGGED_IN" or res.status == "NOT_LOGGED_IN":
+                login_lbl = "Chưa login"
+            elif getattr(res, "auth_state", "") == "EXPIRED" or res.status in ("COOKIE_EXPIRED", "SESSION_INVALID"):
+                login_lbl = "Cần login lại"
+            elif res.status == "PROXY_ERROR" or getattr(res, "error_code", "") == "PROXY_ERROR":
+                login_lbl = "Lỗi Proxy"
+            else:
+                login_lbl = "Lỗi kiểm tra"
+            _set_profile_ui(p_name, login=login_lbl, browser="Đã đóng")
+            try:
+                save_configs()
+            except Exception:
+                pass
+            try:
+                request_profile_refresh()
+            except Exception:
+                pass
+        if 'root' in globals() and root:
+            root.after(0, _ui_done)
+
+    def on_complete(summary):
+        def _ui_finish():
+            tot = summary.get("total", 0)
+            suc = summary.get("success", 0) + summary.get("partial", 0)
+            not_logged = summary.get("not_logged_in", 0)
+            exp = summary.get("expired", 0)
+            proxy_err = summary.get("proxy_error", 0)
+            err = summary.get("error", 0)
+            failed_items = summary.get("failed_items", [])
+            total_failed = len(failed_items)
+            update_status(f"Hoàn thành kiểm tra thông tin {tot} profile (Thành công: {suc}, Cần xử lý: {total_failed})")
+
+            # Mở CheckInfoSummaryDialog báo cáo chi tiết
+            try:
+                from check_features.ui import CheckInfoSummaryDialog
+
+                def _select_failed_on_table(p_names: List[str]):
+                    if 'tree' in globals() and tree.winfo_exists():
+                        name_set = set(p_names)
+                        to_select = []
+                        for iid in tree.get_children(''):
+                            vals = tree.item(iid, 'values')
+                            if vals and vals[0] in name_set:
+                                to_select.append(iid)
+                        if to_select:
+                            tree.selection_set(to_select)
+                            tree.focus(to_select[0])
+                            tree.see(to_select[0])
+                            try:
+                                _update_ui_state()
+                            except Exception:
+                                pass
+
+                CheckInfoSummaryDialog(root, summary=summary, on_select_profiles=_select_failed_on_table)
+            except Exception as e:
+                logger.error(f"Lỗi mở CheckInfoSummaryDialog: {e}", exc_info=True)
+                msg = (
+                    f"Đã hoàn thành kiểm tra {tot} profile:\n"
+                    f"- Thành công: {suc}\n"
+                    f"- Chưa đăng nhập: {not_logged}\n"
+                    f"- Cần login lại: {exp}\n"
+                    f"- Lỗi Proxy: {proxy_err}\n"
+                    f"- Lỗi khác: {err}"
+                )
+                messagebox.showinfo("Check Thông Tin Hoàn Tất", msg)
+
+            try:
+                request_profile_refresh()
+            except Exception:
+                pass
+        if 'root' in globals() and root:
+            root.after(0, _ui_finish)
+
+    _global_check_info_runner = CheckInfoBatchRunner(
+        profiles_provider=lambda: profiles,
+        on_profile_progress=on_progress,
+        on_profile_done=on_done,
+        on_batch_complete=on_complete,
+        max_workers=5,
+    )
+
+    update_status(f"Bắt đầu kiểm tra thông tin cho {len(targets)} profile (Pool 5 workers)...")
+    _global_check_info_runner.run_batch_async(targets)
 
 activity_handlers = {
     'get_logs': get_activity_logs,
@@ -9264,7 +9467,117 @@ def _start_schedule_daemon():
 
     threading.Thread(target=_daemon_loop, daemon=True).start()
 
+def get_profile_drawer_info(profile_name: str) -> dict:
+    """Trả về dữ liệu chi tiết của profile để hiển thị trên Side Detail Drawer."""
+    if not profile_name or profile_name not in profiles:
+        return {}
+    p = profiles[profile_name]
+    cfg = p.get('config', {})
+    ui = _profile_ui(profile_name)
+    snap_mono = monetization_cache.get(profile_name, {})
+    snapshot = _build_profile_snapshot(profile_name, p)
+
+    tiktok_id = str(cfg.get('tiktok_id', '') or cfg.get('tiktok_account', '') or '').lstrip('@')
+    tiktok_display = f"@{tiktok_id}" if tiktok_id else "Chưa liên kết"
+
+    auth_state = str(cfg.get('session_auth_state', '')).lower()
+    cookie_raw = str(cfg.get('cookie_str', '') or '').strip()
+    login_ui = str(ui.get('login', '')).lower()
+    payout_st = snap_mono.get('payout_status', '')
+    kyc_st = snap_mono.get('kyc_status', '')
+    tax_st = snap_mono.get('tax_status', '')
+    crp_st = snap_mono.get('crp_status', '')
+    mono_st = snap_mono.get('status', '')
+    inspection = cfg.get('tiktok_inspection', {}) or {}
+
+    is_no_cookie = (not cookie_raw) or (cookie_raw in ("[]", "{}", "null"))
+    is_cookie_live = (
+        not is_no_cookie
+        and (
+            auth_state in ("live", "verified")
+            or mono_st == "SUCCESS"
+            or payout_st in ("PAYOUT_READY", "PAYOUT_NOT_LINKED", "CRP_ACTIVE")
+            or browser_label(snapshot.browser) == "Sẵn sàng"
+            or inspection.get("state") == "VALID"
+        )
+        and auth_state not in ("expired", "invalid", "dead")
+    )
+    is_cookie_die = (
+        not is_no_cookie
+        and not is_cookie_live
+        and (
+            auth_state in ("expired", "invalid", "dead")
+            or mono_st == "COOKIE_EXPIRED"
+            or payout_st in ("Cookie Die", "COOKIE_EXPIRED")
+            or kyc_st == "Cookie Die"
+            or "die" in login_ui
+        )
+    )
+
+    if is_no_cookie:
+        cookie_badge = "⚪ Chưa có"
+    elif is_cookie_live:
+        cookie_badge = "🟢 Live"
+    elif is_cookie_die:
+        cookie_badge = "🔴 Die"
+    else:
+        cookie_badge = "🟡 Chưa check"
+
+    driver_alive = _browser_session_valid(p.get('driver'))
+    manual_driver_alive = _browser_session_valid(p.get('manual_driver'))
+    uploading = bool(p.get('uploading'))
+    is_running = p.get('running') or snapshot.can_stop or driver_alive or manual_driver_alive or uploading
+
+    if is_running:
+        activity_badge = "⚡ Đang chạy"
+    elif snapshot.automation == AutomationState.WAITING_DAILY_LIMIT or p.get('auto_daily_resume'):
+        activity_badge = "⏳ Chờ ngày mới"
+    elif driver_alive or manual_driver_alive:
+        activity_badge = "🌐 Đang mở"
+    else:
+        activity_badge = "⏸ Đã dừng"
+
+    is_tktbm = (crp_st == "TKTBM" or "tktbm" in str(inspection).lower())
+    is_kyc_ok = (
+        kyc_st == "APPROVED"
+        or inspection.get("identity", {}).get("verified") is True
+        or inspection.get("payout", {}).get("verification_status") == "APPROVED"
+    )
+    is_tax_ok = (
+        tax_st in ("TAX_VERIFIED", "APPROVED")
+        or inspection.get("payout", {}).get("payout_status") in ("VERIFIED", "TAX_VERIFIED")
+    )
+
+    if is_tktbm:
+        mono_badge = "🔴 TKTBM"
+    elif crp_st in ("ENABLED", "ACTIVE") or payout_st in ("PAYOUT_READY", "CRP_ACTIVE"):
+        mono_badge = "🏆 Đang bật"
+    elif is_kyc_ok:
+        mono_badge = "🟢 Đã KYC"
+    elif is_tax_ok:
+        mono_badge = "🟢 Đã Thuế"
+    else:
+        mono_badge = "⚪ Chưa bật"
+
+    region = _profile_region(cfg)
+    proxy_str = ui.get('proxy', '') or cfg.get('proxy_string', '') or cfg.get('proxy', '')
+    proxy_badge = f"[{region}] {proxy_str}" if (region and proxy_str) else (proxy_str or region or "Không dùng")
+
+    return {
+        "name": profile_name,
+        "tiktok_id": tiktok_display,
+        "folder_path": cfg.get('folder_path', ''),
+        "last_error": ui.get('last_error', ''),
+        "cookie_badge": cookie_badge,
+        "activity_badge": activity_badge,
+        "mono_badge": mono_badge,
+        "proxy_badge": proxy_badge,
+        "proxy": proxy_str,
+        "tiktok_uid": cfg.get('tiktok_uid', ''),
+    }
+
 ui_handlers = {
+    'get_profile_drawer_info': get_profile_drawer_info,
     'create_project': create_project,
     'delete_project': delete_project,
     'add_profile': add_profile,
@@ -9280,6 +9593,10 @@ ui_handlers = {
     'get_tiktok_cookies': get_tiktok_cookies,
     'check_cookie_live': check_cookie_live,
     'check_profile_posts_dialog': check_profile_posts_dialog,
+    'open_check_user_dialog': open_check_user_dialog,
+    'open_video_rank_dialog': open_video_rank_dialog,
+    'open_check_dup_dialog': open_check_dup_dialog,
+    'batch_check_tiktok_info': batch_check_tiktok_info,
     'inspect_tiktok_account': inspect_selected_tiktok_account,
     'refresh_all_monetization': refresh_all_monetization,
     'refresh_selected_monetization': refresh_selected_monetization,
@@ -9394,11 +9711,30 @@ def _start_youtube_monitor_safe():
             delay = min(300, delay * 2)
     threading.Thread(target=_run, daemon=True).start()
 
+_profile_filter_debounce_id = None
+
 def _on_profile_filter_changed(*_args):
+    global _profile_filter_debounce_id
+    current_page_var.set(1)
+    if _profile_filter_debounce_id is not None:
+        try:
+            root.after_cancel(_profile_filter_debounce_id)
+        except Exception:
+            pass
+    _profile_filter_debounce_id = root.after(200, update_profile_list)
+
+def _on_project_selection_changed(*_args):
+    global _profile_filter_debounce_id
+    if _profile_filter_debounce_id is not None:
+        try:
+            root.after_cancel(_profile_filter_debounce_id)
+        except Exception:
+            pass
+        _profile_filter_debounce_id = None
     current_page_var.set(1)
     update_profile_list()
 
-selected_project_var.trace('w', _on_profile_filter_changed)
+selected_project_var.trace('w', _on_project_selection_changed)
 filter_var.trace('w', _on_profile_filter_changed)
 selected_project_var.trace('w', _update_monetization_table)
 filter_var.trace('w', _update_monetization_table)
