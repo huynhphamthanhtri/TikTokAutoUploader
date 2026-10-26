@@ -66,13 +66,13 @@ def resolve_tz(tz_name: str, strict: bool = False) -> datetime.tzinfo:
         return zoneinfo.ZoneInfo(name)
     except Exception as e:
         logger.warning(f"Lỗi tải cơ sở dữ liệu IANA timezone '{name}': {e}")
+        if name in COMMON_TZ_OFFSETS:
+            return datetime.timezone(datetime.timedelta(hours=COMMON_TZ_OFFSETS[name]))
         if strict:
             raise ValueError(
                 f"Không thể tải múi giờ IANA '{name}' để tính toán DST an toàn. "
                 f"Vui lòng cài đặt gói tzdata hoặc kiểm tra lại tên múi giờ."
             ) from e
-        if name in COMMON_TZ_OFFSETS:
-            return datetime.timezone(datetime.timedelta(hours=COMMON_TZ_OFFSETS[name]))
     return datetime.timezone.utc
 
 

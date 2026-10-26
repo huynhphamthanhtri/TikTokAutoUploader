@@ -8,9 +8,11 @@ under path redirection.
 import copy
 import hashlib
 import json
+import shutil
+import tempfile
+import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
-import pytest
+from unittest.mock import MagicMock, patch
 
 from youtube_monitor.core import (
     channels_store,
@@ -39,94 +41,105 @@ def get_file_fingerprints():
     return fps
 
 
-def test_production_files_zero_mutation_under_mocked_operations(monkeypatch, tmp_path):
-    initial_fps = get_file_fingerprints()
+class TestZeroLiveMutation(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="test_zero_mutation_")
+        self.tmp_path = Path(self.tmp_dir)
 
-    # Isolated temporary store
-    temp_channels = tmp_path / "temp_channels.json"
-    temp_channels.write_text("{}", encoding="utf-8")
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    # Quiesce any active autosave thread
-    channels_store._autosave_stop.set()
-    if channels_store._autosave_thread and channels_store._autosave_thread.is_alive():
-        channels_store._autosave_thread.join(timeout=3)
-        assert not channels_store._autosave_thread.is_alive()
+    def test_production_files_zero_mutation_under_mocked_operations(self):
+        initial_fps = get_file_fingerprints()
 
-    with _store_lock:
-        orig_channels = copy.deepcopy(channels_store._channels)
-        orig_dirty = channels_store._dirty
-        orig_revision = channels_store._revision
-        orig_path = channels_store.path
+        # Isolated temporary store
+        temp_channels = self.tmp_path / "temp_channels.json"
+        temp_channels.write_text("{}", encoding="utf-8")
 
-        channels_store.path = temp_channels
-        channels_store._channels = {}
-        channels_store._dirty = False
-        channels_store._revision = 0
+        # Quiesce any active autosave thread
+        channels_store._autosave_stop.set()
+        if channels_store._autosave_thread and channels_store._autosave_thread.is_alive():
+            channels_store._autosave_thread.join(timeout=3)
+            self.assertFalse(channels_store._autosave_thread.is_alive())
 
-    mock_save = MagicMock(return_value=True)
-    monkeypatch.setattr(channels_store, "save_now", mock_save)
-
-    try:
-        # Perform mutations on store
-        channels_store._channels["UC_MOCK_TEST"] = {"title": "Mock", "active": True}
-        set_channel_active("UC_MOCK_TEST", False)
-        remove_channel("UC_MOCK_TEST")
-    finally:
         with _store_lock:
-            channels_store._channels = orig_channels
-            channels_store._dirty = orig_dirty
-            channels_store._revision = orig_revision
-            channels_store.path = orig_path
+            orig_channels = copy.deepcopy(channels_store._channels)
+            orig_dirty = channels_store._dirty
+            orig_revision = channels_store._revision
+            orig_path = channels_store.path
 
-    # Verify that production files were strictly unchanged
-    final_fps = get_file_fingerprints()
-    for p in PROD_FILES:
-        if p in initial_fps:
-            assert initial_fps[p][0] == final_fps[p][0], f"mtime_ns mutated for {p}"
-            assert initial_fps[p][1] == final_fps[p][1], f"sha256 mutated for {p}"
+            channels_store.path = temp_channels
+            channels_store._channels = {}
+            channels_store._dirty = False
+            channels_store._revision = 0
 
+        mock_save = MagicMock(return_value=True)
 
-def test_production_files_zero_mutation_under_real_save_now_redirect(tmp_path):
-    """Verify that unmocked save_now() writes ONLY to the redirected temp path, never production."""
-    initial_fps = get_file_fingerprints()
+        try:
+            with patch.object(channels_store, "save_now", mock_save):
+                # Perform mutations on store
+                channels_store._channels["UC_MOCK_TEST"] = {"title": "Mock", "active": True}
+                set_channel_active("UC_MOCK_TEST", False)
+                remove_channel("UC_MOCK_TEST")
+        finally:
+            with _store_lock:
+                channels_store._channels = orig_channels
+                channels_store._dirty = orig_dirty
+                channels_store._revision = orig_revision
+                channels_store.path = orig_path
 
-    temp_channels = tmp_path / "isolated_channels.json"
-    temp_channels.write_text("{}", encoding="utf-8")
+        # Verify that production files were strictly unchanged
+        final_fps = get_file_fingerprints()
+        for p in PROD_FILES:
+            if p in initial_fps:
+                self.assertEqual(initial_fps[p][0], final_fps[p][0], f"mtime_ns mutated for {p}")
+                self.assertEqual(initial_fps[p][1], final_fps[p][1], f"sha256 mutated for {p}")
 
-    # Quiesce autosave
-    channels_store._autosave_stop.set()
-    if channels_store._autosave_thread and channels_store._autosave_thread.is_alive():
-        channels_store._autosave_thread.join(timeout=3)
-        assert not channels_store._autosave_thread.is_alive()
+    def test_production_files_zero_mutation_under_real_save_now_redirect(self):
+        """Verify that unmocked save_now() writes ONLY to the redirected temp path, never production."""
+        initial_fps = get_file_fingerprints()
 
-    with _store_lock:
-        orig_channels = copy.deepcopy(channels_store._channels)
-        orig_dirty = channels_store._dirty
-        orig_revision = channels_store._revision
-        orig_path = channels_store.path
+        temp_channels = self.tmp_path / "isolated_channels.json"
+        temp_channels.write_text("{}", encoding="utf-8")
 
-        channels_store.path = temp_channels
-        channels_store._channels = {"UC_ISOLATED": {"title": "Isolated Channel", "active": True}}
-        channels_store._dirty = True
-        channels_store._revision = 1
+        # Quiesce autosave
+        channels_store._autosave_stop.set()
+        if channels_store._autosave_thread and channels_store._autosave_thread.is_alive():
+            channels_store._autosave_thread.join(timeout=3)
+            self.assertFalse(channels_store._autosave_thread.is_alive())
 
-    try:
-        # Real unmocked save_now writing to temp_channels
-        ok = channels_store.save_now()
-        assert ok is True
-        assert temp_channels.exists()
-        saved_data = json.loads(temp_channels.read_text(encoding="utf-8"))
-        assert "UC_ISOLATED" in saved_data
-    finally:
         with _store_lock:
-            channels_store._channels = orig_channels
-            channels_store._dirty = orig_dirty
-            channels_store._revision = orig_revision
-            channels_store.path = orig_path
+            orig_channels = copy.deepcopy(channels_store._channels)
+            orig_dirty = channels_store._dirty
+            orig_revision = channels_store._revision
+            orig_path = channels_store.path
 
-    # Verify production files were completely untouched
-    final_fps = get_file_fingerprints()
-    for p in PROD_FILES:
-        if p in initial_fps:
-            assert initial_fps[p][0] == final_fps[p][0], f"mtime_ns mutated for {p}"
-            assert initial_fps[p][1] == final_fps[p][1], f"sha256 mutated for {p}"
+            channels_store.path = temp_channels
+            channels_store._channels = {"UC_ISOLATED": {"title": "Isolated Channel", "active": True}}
+            channels_store._dirty = True
+            channels_store._revision = 1
+
+        try:
+            # Real unmocked save_now writing to temp_channels
+            ok = channels_store.save_now()
+            self.assertTrue(ok)
+            self.assertTrue(temp_channels.exists())
+            saved_data = json.loads(temp_channels.read_text(encoding="utf-8"))
+            self.assertIn("UC_ISOLATED", saved_data)
+        finally:
+            with _store_lock:
+                channels_store._channels = orig_channels
+                channels_store._dirty = orig_dirty
+                channels_store._revision = orig_revision
+                channels_store.path = orig_path
+
+        # Verify production files were completely untouched
+        final_fps = get_file_fingerprints()
+        for p in PROD_FILES:
+            if p in initial_fps:
+                self.assertEqual(initial_fps[p][0], final_fps[p][0], f"mtime_ns mutated for {p}")
+                self.assertEqual(initial_fps[p][1], final_fps[p][1], f"sha256 mutated for {p}")
+
+
+if __name__ == "__main__":
+    unittest.main()

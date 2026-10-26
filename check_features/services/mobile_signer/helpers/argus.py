@@ -6,10 +6,17 @@ import struct
 import zlib
 from typing import Optional
 
-from gmssl import sm3
+try:
+    from gmssl import sm3
+except ImportError:
+    sm3 = None
 
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad
+try:
+    from Crypto.Cipher import AES
+    from Crypto.Util.Padding import pad
+except ImportError:
+    AES = None
+    pad = None
 
 from ..cipher.RC4 import RC4
 from ..cipher.SIMON import SIMON
