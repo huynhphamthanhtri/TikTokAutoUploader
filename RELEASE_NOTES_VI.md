@@ -1,4 +1,4 @@
-# Phiên bản 1.2.8
+# Phiên bản 1.2.9
 
 ## Điểm mới
 - **Hệ Thống Lên Lịch Đăng TikTok Tự Động (TikTok Auto-Scheduler Engine)**:
