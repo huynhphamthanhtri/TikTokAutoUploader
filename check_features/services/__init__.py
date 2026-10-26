@@ -8,6 +8,9 @@ from .vpcs_violation_decoder import decode_violation_text, calculate_penalty_exp
 from .cookie_extractor import CookieExtractor
 from .check_info_service import TikTokCheckInfoService, CheckInfoResult
 from .check_info_batch_runner import CheckInfoBatchRunner
+from .post_moderation_evaluator import PostModerationEvaluator, ModerationEvaluation
+from .ttm_dedup_provider import TtmDedupLogProvider, TtmDedupRecord
+from .duplicate_resolver import DuplicateResolver
 
 __all__ = [
     "download_video_no_watermark",
@@ -17,4 +20,9 @@ __all__ = [
     "TikTokCheckInfoService",
     "CheckInfoResult",
     "CheckInfoBatchRunner",
+    "PostModerationEvaluator",
+    "ModerationEvaluation",
+    "TtmDedupLogProvider",
+    "TtmDedupRecord",
+    "DuplicateResolver",
 ]

@@ -11,7 +11,7 @@ Features:
 """
 
 import threading
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 
 def build_row_model(

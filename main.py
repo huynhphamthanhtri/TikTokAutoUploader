@@ -112,8 +112,8 @@ from cookie_live_check import (
 import account_session_runner as session_runner
 from schedule_calculator import interleave_tasks_by_profile
 from schedule_manager import ScheduleManager
-global_schedule_manager = ScheduleManager()
-from schedule_ui import AutoScheduleView, BulkScheduleModal
+global_schedule_manager = None
+from schedule_ui import AutoScheduleView, BulkScheduleModal, make_bulk_schedule_success_callback
 from tiktok_account_inspection import (
     AccountInspectionResult,
     InspectionState,
@@ -8856,7 +8856,7 @@ def get_profiles_statistics_snapshot():
 # DEDUP WATCHDOG ENGINE INTEGRATION
 # --------------------------------------------------------------------------
 from tiktok_dedup_engine import DedupDatabase, DedupConfig, DedupWatchdogWorker, ProfileContext
-from tiktok_dedup_ui import DedupWatchdogView, CheckPostDialog
+from tiktok_dedup_ui import DedupWatchdogView, CheckPostDialog as DedupCheckPostDialog
 
 def _get_dedup_profile_contexts():
     contexts = []
@@ -8927,45 +8927,34 @@ def _build_dedup_view(parent_frame):
     )
 
 def check_profile_posts_dialog(profile_name: Optional[str] = None):
-    """Mở hộp thoại Kiểm tra bài đăng (Check Post / Check Trùng) chuyên biệt theo chuẩn TikTokManager."""
+    """Mở hộp thoại Kiểm tra bài đăng & Sức khỏe nội dung (F2 - CheckPostDialog)."""
     target_name = profile_name
     if not target_name:
         if 'tree' in globals():
             sel = tree.selection()
             if sel:
-                target_name = tree.item(sel[0], 'values')[0]
+                item_data = tree.item(sel[0])
+                vals = item_data.get('values') if isinstance(item_data, dict) else tree.item(sel[0], 'values')
+                if vals and len(vals) > 0:
+                    target_name = vals[0]
         if not target_name and 'ui_widgets' in globals() and 'monetization_tree' in ui_widgets:
             mono_tree = ui_widgets['monetization_tree']
             sel_m = mono_tree.selection()
             if sel_m:
-                target_name = mono_tree.item(sel_m[0], 'values')[0]
+                item_m = mono_tree.item(sel_m[0])
+                vals_m = item_m.get('values') if isinstance(item_m, dict) else mono_tree.item(sel_m[0], 'values')
+                if vals_m and len(vals_m) > 0:
+                    target_name = vals_m[0]
 
     if not target_name:
         messagebox.showwarning("Kiểm tra bài đăng", "Vui lòng chọn 1 profile trong danh sách để kiểm tra bài đăng.")
         return
 
-    contexts = _get_dedup_profile_contexts()
-    target_ctx = None
-    for ctx in contexts:
-        if ctx.profile_id == target_name:
-            target_ctx = ctx
-            break
+    prof_data = profiles.get(target_name, {})
+    cfg = prof_data.get('config', {})
+    CheckPostDialog(root, profile_name=target_name, profile_config=cfg)
 
-    if not target_ctx:
-        prof_data = profiles.get(target_name, {})
-        cfg = prof_data.get('config', {})
-        target_ctx = ProfileContext(
-            profile_id=target_name,
-            tiktok_account=cfg.get('tiktok_id') or target_name,
-            sec_uid=cfg.get('sec_uid') or "",
-            cookies=cfg.get('cookies') or cfg.get('cookie') or cfg.get('cookie_str') or "",
-            proxy_type=cfg.get('proxy_type') or "http",
-            proxy_string=cfg.get('proxy_string') or "",
-        )
-
-    dlg = CheckPostDialog(root, profile=target_ctx, db=dedup_db)
-
-from check_features.ui import CheckUserDialog, VideoRankDialog, CheckDupDialog
+from check_features.ui import CheckUserDialog, CheckPostDialog, VideoRankDialog, CheckDupDialog
 
 def open_check_user_dialog(profile_name: Optional[str] = None):
     """Mở hộp thoại Check Thông Tin Tài Khoản & Đổi Nickname (F1 - CheckUserDialog)."""
@@ -9167,17 +9156,33 @@ activity_handlers = {
 # TIKTOK AUTO-SCHEDULER ENGINE & HANDLERS
 # ==============================================================================
 logger = logging.getLogger("tiktok_scheduler")
-if 'global_schedule_manager' not in globals() or global_schedule_manager is None:
-    global_schedule_manager = ScheduleManager()
+
+def _get_active_schedule_manager() -> ScheduleManager:
+    global global_schedule_manager
+    if global_schedule_manager is None:
+        global_schedule_manager = ScheduleManager()
+    return global_schedule_manager
 
 def _execute_schedule_task_upload(task: Dict[str, Any]) -> Tuple[bool, str]:
+    global global_schedule_manager
+    global_schedule_manager = _get_active_schedule_manager();
     """Thực thi tải lên cho 1 tác vụ lên lịch qua Direct API."""
-    p_name = task.get("profile_name", "")
-    prof_cfg = profiles.get(p_name, {}).get("config", {}) if p_name in profiles else {}
+    def _norm_name(val: Any) -> str:
+        return str(val or "").strip().lstrip("﻿").strip()
+
+    p_name = _norm_name(task.get("profile_name", ""))
+    matches = [entry for k, entry in profiles.items() if _norm_name(k) == p_name]
+    if matches:
+        prof_cfg = matches[0].get("config", {})
+    else:
+        prof_cfg = profiles.get(p_name, {}).get("config", {}) if p_name in profiles else {}
+
     v_path = task.get("video_path", "")
     caption = task.get("title") or Path(v_path).stem
     exec_mode = task.get("execution_mode", "SERVER_SCHEDULE")
-    sched_epoch = task.get("scheduled_epoch") if exec_mode == "SERVER_SCHEDULE" else None
+
+    raw_epoch = task.get("scheduled_epoch")
+    sched_epoch = int(raw_epoch) if (exec_mode == "SERVER_SCHEDULE" and raw_epoch and int(raw_epoch) > 0) else None
 
     update_status(f"[AutoSchedule][{p_name}] Bắt đầu tải lên: {Path(v_path).name}")
     try:
@@ -9191,7 +9196,18 @@ def _execute_schedule_task_upload(task: Dict[str, Any]) -> Tuple[bool, str]:
             workspace_dir=Path(os.path.dirname(os.path.abspath(__file__))),
             schedule_time=sched_epoch,
         )
-        if res.outcome in ('posted', 'prepared'):
+
+        if res.outcome == 'prepared':
+            # Pre-Post Dry-run hoàn tất: không xóa video gốc
+            global_schedule_manager.update_task(task["id"], {
+                "status": "PREPARED",
+                "completed_at": datetime.now().isoformat(),
+                "error_message": "",
+            })
+            update_status(f"[AutoSchedule][{p_name}] Pre-post dry-run hoàn tất: {res.message}")
+            return True, res.message
+
+        if res.outcome == 'posted':
             new_status = "SERVER_SCHEDULED" if sched_epoch else "SUCCESS"
             item_id = str(res.details.get("item_id") or "")
             task_updates: Dict[str, Any] = {
@@ -9201,7 +9217,10 @@ def _execute_schedule_task_upload(task: Dict[str, Any]) -> Tuple[bool, str]:
                 "error_message": "",
             }
 
-            # Tự động xóa file video gốc nếu delete_source_after_post bật và không còn task nào dùng chung
+            # LƯU TRẠNG THÁI SERVER_SCHEDULED VÀO DATABASE TRƯỚC TIÊN
+            global_schedule_manager.update_task(task["id"], task_updates)
+
+            # TIẾN HÀNH DỌN DẸP FILE NGUỒN SAU KHI SERVER_SCHEDULE ĐÃ ĐƯỢC PERSIST
             if task.get("delete_source_after_post", True):
                 if global_schedule_manager.is_video_referenced_by_pending_tasks(v_path, exclude_task_id=task.get("id", "")):
                     update_status(f"[AutoSchedule][{p_name}] Bảo lưu video gốc (đang dùng chung cho bài khác): {Path(v_path).name}")
@@ -9210,14 +9229,14 @@ def _execute_schedule_task_upload(task: Dict[str, Any]) -> Tuple[bool, str]:
                     try:
                         if os.path.isfile(v_path):
                             os.remove(v_path)
-                            task_updates["source_deleted"] = True
+                            global_schedule_manager.update_task(task["id"], {"source_deleted": True})
                             update_status(f"[AutoSchedule][{p_name}] Đã xóa video gốc: {Path(v_path).name}")
                             logger.info(f"[AutoSchedule] Đã xóa video gốc an toàn: {v_path}")
                     except Exception as del_err:
                         logger.warning(f"Không thể xóa file nguồn {v_path}: {del_err}")
 
-            global_schedule_manager.update_task(task["id"], task_updates)
-            update_status(f"[AutoSchedule][{p_name}] Hoàn tất xuất sắc! Link: {res.details.get('video_url', '')}")
+            action_desc = "Đã lên lịch thành công trên Server TikTok!" if sched_epoch else "Hoàn tất xuất sắc!"
+            update_status(f"[AutoSchedule][{p_name}] {action_desc} Link: {res.details.get('video_url', '')}")
             return True, res.message
         else:
             err_msg = res.message or "Tải lên không thành công"
@@ -9247,6 +9266,8 @@ _schedule_queue_paused = False
 _last_profile_upload_time: Dict[str, float] = {}
 
 def _handle_start_schedule_queue(task_ids: Optional[List[str]] = None):
+    global global_schedule_manager
+    global_schedule_manager = _get_active_schedule_manager()
     """Bắt đầu chạy hàng đợi theo thuật toán xoay vòng Round-Robin chéo tài khoản kèm cooldown an toàn."""
     global _schedule_queue_running, _schedule_queue_paused
     if _schedule_queue_running:
@@ -9352,6 +9373,8 @@ def _handle_pause_schedule_queue():
     messagebox.showinfo("Thông báo", f"Đã {state_str} hàng đợi lịch đăng.")
 
 def _handle_schedule_post_now(task_ids: List[str]):
+    global global_schedule_manager
+    global_schedule_manager = _get_active_schedule_manager()
     """Xử lý yêu cầu Đăng Ngay Lập Tức cho danh sách task."""
     def _worker():
         raw_tasks = [global_schedule_manager.get_task_by_id(tid) for tid in task_ids]
@@ -9379,6 +9402,8 @@ def _handle_schedule_post_now(task_ids: List[str]):
     threading.Thread(target=_worker, daemon=True).start()
 
 def open_schedule_modal():
+    global global_schedule_manager
+    global_schedule_manager = _get_active_schedule_manager()
     """Mở modal 1-Click to Schedule cho các profile đang chọn trên bảng Profile."""
     selected = tree.selection() if 'tree' in globals() else ()
     if selected:
@@ -9392,16 +9417,13 @@ def open_schedule_modal():
 
     prof_configs = {p: profiles[p].get("config", {}) for p in target_profiles if p in profiles}
 
-    def _on_success(created_tasks=None):
-        update_status(f"Đã lên lịch thành công cho {len(target_profiles)} profile.")
-        try:
-            update_profile_list()
-        except Exception:
-            pass
-        if 'switch_workspace' in globals():
-            switch_workspace("schedule")
-        elif 'ui_widgets' in globals() and 'schedule_view' in ui_widgets:
-            ui_widgets['schedule_view']._refresh_data()
+    _on_success = make_bulk_schedule_success_callback(
+        target_profiles=target_profiles,
+        update_status_fn=update_status if 'update_status' in globals() else None,
+        update_profile_list_fn=update_profile_list if 'update_profile_list' in globals() else None,
+        switch_workspace_fn=switch_workspace if 'switch_workspace' in globals() else None,
+        schedule_view_ref=ui_widgets.get('schedule_view') if 'ui_widgets' in globals() else None,
+    )
 
     BulkScheduleModal(
         parent=root,
@@ -9412,6 +9434,8 @@ def open_schedule_modal():
     )
 
 def _build_schedule_view(parent_frame):
+    global global_schedule_manager
+    global_schedule_manager = _get_active_schedule_manager()
     handlers = {
         "post_now_handler": _handle_schedule_post_now,
         "start_queue_handler": _handle_start_schedule_queue,
@@ -9421,6 +9445,8 @@ def _build_schedule_view(parent_frame):
     return AutoScheduleView(parent_frame, schedule_manager=global_schedule_manager, handlers=handlers)
 
 def _start_schedule_daemon():
+    global global_schedule_manager
+    global_schedule_manager = _get_active_schedule_manager()
     """Khởi động Background Scheduler Daemon Worker kiểm tra các task đến giờ."""
     if os.environ.get("CI", "").lower() == "true":
         return

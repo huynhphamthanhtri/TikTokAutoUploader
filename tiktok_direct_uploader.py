@@ -13,6 +13,7 @@ Tích hợp toàn diện:
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -27,10 +28,12 @@ from tiktok_cookie_extractor import (
     get_profile_tiktok_cookies,
 )
 from tiktok_publish_client import (
+    ScheduleCapabilityResult,
     TikTokAccountBlockedError,
     TikTokLoginRequiredError,
     TikTokPublishClient,
     TikTokPublishError,
+    check_schedule_capability,
 )
 from tiktok_signer_bridge import read_profile_fingerprint
 from tiktok_vod_uploader import (
@@ -109,6 +112,75 @@ def run_direct_upload(
     # Cấu hình Bypass Proxy Hosts cho Chunks
     bypass_chunks = bool(profile_config.get("upload_bypass_hosts", True))
 
+    # 3.1. Pre-flight kiểm tra quyền lên lịch (nếu có yêu cầu schedule_time)
+    if schedule_time is not None:
+        if type(schedule_time) is not int or schedule_time <= 0:
+            return UploadResult(
+                outcome="rejected",
+                message=f"Giá trị schedule_time không hợp lệ (phải là Unix epoch int dương): {schedule_time!r}",
+                post_dispatched=False,
+                details={"rejection_scope": REJECTION_SCOPE_VIDEO, "reason": "invalid_schedule_time_format"},
+            )
+
+        _log_status("Pre-flight: Đang kiểm tra quyền lên lịch đăng bài trên Server TikTok...")
+        cap_res = check_schedule_capability(
+            session_cookies=cookies,
+            proxy_cfg=proxy_cfg,
+            user_agent=user_agent,
+        )
+
+        if cap_res.check_status == "disabled":
+            _log_status(f"Pre-flight từ chối: {cap_res.reason}")
+            return UploadResult(
+                outcome="rejected",
+                message=f"Tài khoản không được TikTok cấp quyền lên lịch: {cap_res.reason}",
+                post_dispatched=False,
+                details={"rejection_scope": REJECTION_SCOPE_ACCOUNT_BLOCKED, "reason": "schedule_disabled"},
+            )
+        elif cap_res.check_status == "unknown":
+            _log_status(f"Pre-flight cảnh báo mạng/phiên: {cap_res.reason}")
+            # Nếu status_code do TikTok trả về báo lỗi phiên
+            if "status_code" in cap_res.reason.lower() or "login" in cap_res.reason.lower():
+                return UploadResult(
+                    outcome="login_required",
+                    message=f"Phiên đăng nhập hết hạn khi kiểm tra quyền lên lịch: {cap_res.reason}",
+                    post_dispatched=False,
+                    details={"reason": "session_expired_during_capability_check"},
+                )
+            return UploadResult(
+                outcome="failed",
+                message=f"Không thể kiểm tra quyền lên lịch TikTok do lỗi kết nối: {cap_res.reason}",
+                post_dispatched=False,
+                details={"reason": "capability_check_network_error"},
+            )
+
+        server_time_ref = cap_res.server_time
+        server_time_mono = time.monotonic()
+
+        # Kiểm tra ngưỡng thời gian hợp lệ với server_time
+        diff = schedule_time - cap_res.server_time
+        if diff < 900:
+            _log_status(f"Lỗi thời gian: cách server {diff}s (< 900s)")
+            return UploadResult(
+                outcome="rejected",
+                message=f"Thời gian lên lịch quá gần: cách server TikTok {diff}s (yêu cầu tối thiểu 15 phút = 900s).",
+                post_dispatched=False,
+                details={"rejection_scope": REJECTION_SCOPE_VIDEO, "reason": "schedule_time_too_soon"},
+            )
+        if diff > 864000:
+            _log_status(f"Lỗi thời gian: cách server {diff}s (> 864,000s)")
+            return UploadResult(
+                outcome="rejected",
+                message=f"Thời gian lên lịch quá xa: cách server TikTok {diff}s (tối đa 10 ngày = 864,000s).",
+                post_dispatched=False,
+                details={"rejection_scope": REJECTION_SCOPE_VIDEO, "reason": "schedule_time_too_far"},
+            )
+
+        _log_status(f"  -> Quyền lên lịch hợp lệ (Server Time: {cap_res.server_time}, hẹn sau: {diff // 60} phút)")
+    else:
+        server_time_ref = None
+        server_time_mono = None
+
     try:
         # 4. Tải video lên VOD (Bước 1 -> Bước 4)
         vod_uploader = TikTokVodUploader(
@@ -168,10 +240,12 @@ def run_direct_upload(
             poster_delay_ms=poster_delay_ms,
             playlist_id=playlist_id,
             schedule_time=schedule_time,
+            server_time_ref=server_time_ref,
+            server_time_mono=server_time_mono,
         )
 
-        is_sched = bool(schedule_time and int(schedule_time) > 0)
-        msg_action = "Đã lên lịch đăng thành công lên TikTok" if is_sched else "Đã đăng thành công lên TikTok"
+        final_sched_time = pub_res.schedule_time if pub_res.is_scheduled else None
+        msg_action = "Đã lên lịch đăng thành công lên TikTok" if pub_res.is_scheduled else "Đã đăng thành công lên TikTok"
 
         return UploadResult(
             outcome="posted",
@@ -183,8 +257,8 @@ def run_direct_upload(
                 "video_url": pub_res.video_url,
                 "vid": vod_res.vid,
                 "engine": "api_direct",
-                "is_scheduled": is_sched,
-                "schedule_time": schedule_time if is_sched else None,
+                "is_scheduled": pub_res.is_scheduled,
+                "schedule_time": final_sched_time,
             },
         )
 

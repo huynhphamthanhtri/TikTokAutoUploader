@@ -8,8 +8,16 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 def _collect_watchdog_files():
     """Recursively collect all files from the watchdog package directory."""
     result = []
+    candidates = []
+    try:
+        import watchdog
+        candidates.append(Path(watchdog.__file__).resolve().parent)
+    except Exception:
+        pass
     for p in site.getsitepackages():
-        src = Path(p) / "watchdog"
+        candidates.append(Path(p) / "watchdog")
+
+    for src in candidates:
         if src.is_dir():
             for f in src.rglob("*"):
                 if f.is_file():
@@ -22,6 +30,7 @@ project_datas = [
     ('icon.ico', '.'),
     ('assets/templates', 'assets/templates'),
     ('assets/donglao_browser_logo.png', 'assets'),
+    ('assets/donglao_browser_icon.ico', 'assets'),
     ('tiktok_mssdk.js', '.'),
     ('tiktok_signer_worker.js', '.'),
 ]
@@ -32,6 +41,7 @@ datas += _collect_watchdog_files()
 datas += collect_data_files('charset_normalizer')
 datas += collect_data_files('requests')
 datas += collect_data_files('patchright')
+datas += collect_data_files('curl_cffi')
 
 hidden_imports = [
     'selenium.webdriver',
@@ -116,6 +126,8 @@ hidden_imports += collect_submodules('googleapiclient')
 hidden_imports += collect_submodules('charset_normalizer')
 hidden_imports += collect_submodules('patchright')
 hidden_imports += collect_submodules('youtube_monitor')
+hidden_imports += collect_submodules('check_features')
+hidden_imports += collect_submodules('curl_cffi')
 hidden_imports += [
     'config_service',
     'log_engine',
@@ -139,6 +151,22 @@ hidden_imports += [
     'schedule_calculator',
     'schedule_manager',
     'schedule_ui',
+    'schedule_contracts',
+    'schedule_service',
+    'video_probe',
+    'tiktok_account_discovery',
+    'tiktok_account_inspection',
+    'tiktok_capability_models',
+    'tiktok_capability_requests',
+    'tiktok_monetization_client',
+    'tiktok_schema_adapters',
+    'vibe_stealth_engine',
+    'inspection_repository',
+    'sqlite3',
+    'app_paths',
+    'readonly_policy',
+    'account_session_runner',
+    'browser_profile_quarantine',
 ]
 
 a = Analysis(

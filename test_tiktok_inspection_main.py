@@ -17,9 +17,9 @@ class TiktokInspectionMainTests(unittest.TestCase):
         self.assertIn("'inspect_tiktok_account': inspect_selected_tiktok_account", self.main_source)
 
     def test_inspection_context_menu_entry(self):
-        self.assertIn(
-            "ctx_menu.add_command(label=\"Kiểm tra thông tin TikTok\", command=handlers['inspect_tiktok_account'])",
-            self.ui_source,
+        self.assertTrue(
+            "ctx_menu.add_command(label=\"Kiểm tra thông tin TikTok\", command=handlers['inspect_tiktok_account'])" in self.ui_source
+            or "menu_check.add_command(label=\"Kiểm tra thông tin TikTok\", command=handlers['inspect_tiktok_account'])" in self.ui_source
         )
 
     def test_inspection_runtime_guard_in_preflight(self):

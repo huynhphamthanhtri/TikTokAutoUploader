@@ -8,6 +8,7 @@ from .check_user_dialog import CheckUserDialog
 from .video_rank_dialog import VideoRankDialog
 from .check_dup_view import CheckDupView, CheckDupDialog
 from .summary_dialog import CheckInfoSummaryDialog
+from .check_post_dialog import CheckPostDialog
 
 __all__ = [
     "ManualAppealDialog",
@@ -16,4 +17,5 @@ __all__ = [
     "CheckDupView",
     "CheckDupDialog",
     "CheckInfoSummaryDialog",
+    "CheckPostDialog",
 ]

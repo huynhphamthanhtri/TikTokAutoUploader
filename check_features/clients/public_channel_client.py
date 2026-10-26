@@ -130,59 +130,80 @@ class TikTokPublicChannelClient:
         }
 
         posts: List[AwemePost] = []
+        raw_list = []
+        has_more = False
+        next_cursor = max_cursor
+
+        # Thử qua session.get trước (hỗ trợ session mock trong unit test)
         try:
             resp = self.session.get(url, params=params, timeout=self.timeout)
-            if resp.status_code == 200:
+            if resp.status_code == 200 and resp.text.strip().startswith("{"):
                 data = resp.json()
                 raw_list = data.get("aweme_list") or []
                 has_more = bool(data.get("has_more", 0))
                 next_cursor = int(data.get("max_cursor", 0))
-
-                for it in raw_list:
-                    aweme_id = str(it.get("aweme_id") or it.get("id") or "")
-                    group_id = str(it.get("group_id") or it.get("groupId") or "")
-                    stats = it.get("statistics") or {}
-                    video = it.get("video") or {}
-                    cov = video.get("cover", {}).get("url_list", [""])[0] if isinstance(video.get("cover"), dict) else ""
-
-                    # Bóc tách thiết bị và trạng thái
-                    misc = it.get("misc_info") or ""
-                    device_str = "phone"
-                    if "web" in str(misc).lower() or it.get("create_scene") == 1:
-                        device_str = "web"
-
-                    # Kiểm tra shadowban
-                    status_dict = it.get("status") or {}
-                    control_dict = it.get("item_control") or {}
-                    shadow_status = "no"
-                    shadow_reason = ""
-                    if status_dict.get("is_prohibited"):
-                        shadow_status = "yes"
-                        shadow_reason = "Bị cấm phân phối"
-                    elif control_dict.get("can_repost") is False:
-                        shadow_status = "suspect"
-                        shadow_reason = "Hạn chế tương tác"
-
-                    post = AwemePost(
-                        aweme_id=aweme_id,
-                        group_id=group_id,
-                        desc=str(it.get("desc") or ""),
-                        cover=cov,
-                        play=int(stats.get("play_count") or 0),
-                        like=int(stats.get("digg_count") or 0),
-                        comment=int(stats.get("comment_count") or 0),
-                        create_time=int(it.get("create_time") or 0),
-                        device=device_str,
-                        region=str(it.get("region") or ""),
-                        shadow=shadow_status,
-                        shadow_reason=shadow_reason,
-                        share_url=str(it.get("share_url") or ""),
-                    )
-                    posts.append(post)
-
-                return True, posts, next_cursor, has_more, f"Đã lấy {len(posts)} video công khai."
-
         except Exception as e:
-            logger.debug(f"fetch_channel_videos error: {e}")
+            logger.debug(f"fetch_channel_videos session get note: {e}")
+
+        # Nếu chưa có bài nào, thử qua TikTokMobilePostClient (Module Ký Mobile Python)
+        if not raw_list:
+            try:
+                from .mobile_post_client import TikTokMobilePostClient
+                m_client = TikTokMobilePostClient(timeout=self.timeout)
+                feed_res = m_client.fetch_user_feed(sec_user_id=sec_uid, max_cursor=max_cursor, count=count)
+                if feed_res.get("success") and feed_res.get("aweme_list"):
+                    raw_list = feed_res["aweme_list"]
+                    has_more = bool(feed_res.get("has_more", False))
+                    next_cursor = int(feed_res.get("max_cursor", max_cursor + len(raw_list)))
+            except Exception as me:
+                logger.debug(f"fetch_channel_videos mobile client note: {me}")
+
+        if raw_list:
+            for it in raw_list:
+                aweme_id = str(it.get("aweme_id") or it.get("id") or "")
+                raw_gid = it.get("group_id") or it.get("groupId")
+                if raw_gid is None and isinstance(it.get("group_id_list"), dict):
+                    gid_list = it.get("group_id_list", {}).get("GroupdIdList0") or it.get("group_id_list", {}).get("GroupdIdList1")
+                    if gid_list and len(gid_list) > 0:
+                        raw_gid = gid_list[0]
+                group_id = str(raw_gid or "")
+                stats = it.get("statistics") or {}
+                video = it.get("video") or {}
+                cov = video.get("cover", {}).get("url_list", [""])[0] if isinstance(video.get("cover"), dict) else ""
+
+                misc = it.get("misc_info") or ""
+                device_str = "phone"
+                if "web" in str(misc).lower() or it.get("create_scene") == 1:
+                    device_str = "web"
+
+                status_dict = it.get("status") or {}
+                control_dict = it.get("item_control") or {}
+                shadow_status = "no"
+                shadow_reason = ""
+                if status_dict.get("is_prohibited"):
+                    shadow_status = "yes"
+                    shadow_reason = "Bị cấm phân phối"
+                elif control_dict.get("can_repost") is False:
+                    shadow_status = "suspect"
+                    shadow_reason = "Hạn chế tương tác"
+
+                post = AwemePost(
+                    aweme_id=aweme_id,
+                    group_id=group_id,
+                    desc=str(it.get("desc") or ""),
+                    cover=cov,
+                    play=int(stats.get("play_count") or 0),
+                    like=int(stats.get("digg_count") or 0),
+                    comment=int(stats.get("comment_count") or 0),
+                    create_time=int(it.get("create_time") or 0),
+                    device=device_str,
+                    region=str(it.get("region") or ""),
+                    shadow=shadow_status,
+                    shadow_reason=shadow_reason,
+                    share_url=str(it.get("share_url") or ""),
+                )
+                posts.append(post)
+
+            return True, posts, next_cursor, has_more, f"Đã lấy {len(posts)} video công khai."
 
         return False, [], max_cursor, False, "Không thể kết nối lấy video công khai từ máy chủ TikTok."

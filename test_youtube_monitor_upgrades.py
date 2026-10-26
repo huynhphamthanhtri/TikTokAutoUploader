@@ -76,9 +76,10 @@ class TestChannelMetadata(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = core.ChannelsStore(Path(self.tmp.name) / "channels.json")
+        self.orig_store = core.channels_store
 
     def tearDown(self):
-        core.channels_store = core.ChannelsStore(core.CHANNELS_JSON)
+        core.channels_store = self.orig_store
         self.tmp.cleanup()
 
     def test_add_channel_stores_metadata(self):

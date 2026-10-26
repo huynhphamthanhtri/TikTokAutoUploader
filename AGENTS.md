@@ -101,3 +101,19 @@
   - `Chưa kiểm chứng:` Những gì chưa thể xác nhận, đặc biệt là live account/server.
   - `Bằng chứng:` Lệnh, test count, raw response hoặc đường dẫn artifact có thật.
   - `Rủi ro còn lại:` Flaky test, edge case, môi trường chưa kiểm tra hoặc giả định còn tồn tại.
+
+## 14. Quy Tắc Bảo Vệ Dữ Liệu Thực & Cấm Ghi Đè Dữ Liệu Live Khi Test (Zero Live Data Mutation)
+- **TUYỆT ĐỐI NGHIÊM CẤM** mọi unit test, regression test, integration test ghi đè, làm biến đổi, làm mất hoặc làm sai lệch dữ liệu cấu hình thực tế (`youtube_config.json`, `configs.json`, credentials, API key pool, database, token, profiles thật).
+- Mọi test case có liên quan đến việc cập nhật trạng thái pool, lưu cấu hình, chỉnh sửa dữ liệu BẮT BUỘC PHẢI:
+  - Sử dụng thư mục tạm (`tmp_path`, `TemporaryDirectory`), HOẶC
+  - Mock cô lập triệt để các hàm ghi đĩa (`_save_config`, `save_configs`, `save_configs_file`, `_persist_pool_state_if_dirty`, open file write mode).
+- Bất kỳ hành vi chạy test nào làm thay đổi dữ liệu cấu hình live trên workspace đều bị coi là lỗi nghiêm trọng (Critical Regression) và phải được revert/khôi phục ngay lập tức từ backup.
+
+## 15. Quy Tắc Cung Cấp Ngữ Cảnh 360° Khi QA / Phản Biện Với Codex Qua MCP (Full Call-Chain Context)
+- **NGHIÊM CẤM QA PHÂN MẢNH**: Tuyệt đối không được chỉ đưa cho Codex một đoạn code lẻ hoặc chỉ đưa file con (callee) mà giấu file gọi (caller / parent component / UI view).
+- Khi đưa code cho Codex review hoặc QA phản biện, payload `context` BẮT BUỘC phải bao quát đầy đủ chuỗi gọi (Call-Chain) từ đầu đến cuối:
+  - **Caller Module:** File giao diện cha / luồng kích hoạt (ví dụ: `ui.py` chứa class `YouTubeMonitorView`, nút bấm, và callback handler).
+  - **Callee Module:** File thực thi / giao diện con (ví dụ: `activity_dialog.py` chứa `ChannelActivityReviewDialog`).
+  - **Core Service / Contract:** File backend / logic lõi (ví dụ: `core.py`, `key_manager.py`).
+  - **Verification Suite:** File test tương ứng để Codex kiểm tra xem test có phải là shallow test hay integration test thực thụ.
+- Phải chỉ thị rõ cho Codex rà soát tính tương thích chéo (cross-module compatibility): tên method, signature callback, tham số truyền vào giữa các class/module, và các side-effect ghi đĩa không mong muốn.

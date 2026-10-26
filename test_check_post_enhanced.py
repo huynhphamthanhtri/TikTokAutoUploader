@@ -74,8 +74,9 @@ class TestCheckPostEnhanced(unittest.TestCase):
         self.assertEqual(p2.group_id, "79999999999")
         self.assertTrue(p2.is_dup)
 
+    @patch("requests.Session.post")
     @patch("requests.Session.get")
-    def test_get_penalty_details_parsing(self, mock_get):
+    def test_get_penalty_details_parsing(self, mock_get, mock_post):
         """Kiểm tra lấy chi tiết án phạt qua get_penalty_details."""
         client = TikTokStudioPostClient({})
 
@@ -89,6 +90,7 @@ class TestCheckPostEnhanced(unittest.TestCase):
             "appealStatus": 1,
         }
         mock_get.return_value = mock_resp
+        mock_post.return_value = mock_resp
 
         ok, p_info, msg = client.get_penalty_details("71111111111", 1700000000)
         self.assertTrue(ok)

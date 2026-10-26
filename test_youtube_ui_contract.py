@@ -76,8 +76,8 @@ class TestYouTubeUIContract(unittest.TestCase):
         parent = ctk.CTkFrame(self.root)
         view = YouTubeMonitorView(parent, handlers)
 
-        # 1. Verify Treeview columns
-        expected_cols = ("channel", "channel_id", "profile", "active", "short", "seen", "folder")
+        # 1. Verify Treeview columns (Refactored 4 columns)
+        expected_cols = ("channel_id", "active", "short", "seen")
         self.assertEqual(view.tree["columns"], expected_cols)
 
         # 2. Verify Cookie filename masking (only filename is displayed, full path in cookie_var)
@@ -110,6 +110,156 @@ class TestYouTubeUIContract(unittest.TestCase):
         # 5. Verify Video Quality Control
         self.assertIsNotNone(view.quality_menu)
         self.assertIn(view.video_quality_var.get(), ("720p", "1080p"))
+
+        parent.destroy()
+
+    def test_youtube_monitor_table_columns_refactor_regression(self):
+        """Regression test for table column refactoring:
+        - 3 columns removed (channel, profile, folder)
+        - Channel title moved into #0 (Cấu Trúc / Kênh)
+        - Safe metadata lookup in _open_folder and _open_profile_picker
+        - Grouped vs Flat rendering and 0 seen_count preservation
+        - Deleted-column failure path verification (exercising fallback without TclError)
+        """
+        channels_mock = [
+            {
+                "channel_id": "UC_TEST_1",
+                "title": "あ〜べ〜好きなワイの反応集",
+                "profile_name": "Profile_A",
+                "active": True,
+                "process_short": True,
+                "short_min_duration": 30.0,
+                "seen_count": 0,  # Critical edge case: 0 must not become empty string
+                "folder": "C:/videos/Profile_A",
+            },
+            {
+                "channel_id": "UC_TEST_2",
+                "title": "Kênh Tiếng Việt 2",
+                "profile_name": "Profile_A",
+                "active": False,
+                "process_short": False,
+                "seen_count": 42,
+                "folder": "C:/videos/Profile_A_2",
+            },
+            {
+                "channel_id": "UC_TEST_EMPTY_FOLDER",
+                "title": "",  # Empty title tests fallback to tree.item text
+                "profile_name": "Profile_A",
+                "active": True,
+                "process_short": False,
+                "seen_count": 5,
+                "folder": "",  # Empty folder forces fallback path
+            },
+        ]
+        handlers = {
+            "get_profiles": lambda: ["Profile_A"],
+            "get_status": lambda: {"running": False},
+            "get_channels": lambda: channels_mock,
+            "get_logs": lambda: [],
+            "get_cookies_file": lambda: "",
+            "get_max_video_minutes": lambda: 15,
+            "get_profiles_meta": lambda: {"Profile_A": {"project": "Proj1"}},
+        }
+        parent = ctk.CTkFrame(self.root)
+        view = YouTubeMonitorView(parent, handlers)
+        view.refresh_data()
+
+        # 1. Check exact 4 columns
+        expected_cols = ("channel_id", "active", "short", "seen")
+        self.assertEqual(view.tree["columns"], expected_cols)
+
+        # 2. Check #0 heading and attributes
+        self.assertEqual(view.tree.heading("#0")["text"], "Cấu Trúc / Kênh")
+        self.assertEqual(int(view.tree.column("#0")["width"]), 360)
+        self.assertEqual(int(view.tree.column("#0")["minwidth"]), 220)
+        self.assertTrue(bool(view.tree.column("#0")["stretch"]))
+
+        # 3. Check column widths and stretch
+        self.assertEqual(int(view.tree.column("channel_id")["width"]), 240)
+        self.assertTrue(bool(view.tree.column("channel_id")["stretch"]))
+        self.assertEqual(int(view.tree.column("active")["width"]), 130)
+        self.assertFalse(bool(view.tree.column("active")["stretch"]))
+        self.assertEqual(int(view.tree.column("short")["width"]), 160)
+        self.assertFalse(bool(view.tree.column("short")["stretch"]))
+        self.assertEqual(int(view.tree.column("seen")["width"]), 90)
+        self.assertFalse(bool(view.tree.column("seen")["stretch"]))
+
+        # 4. Check Grouped Rendering: Group Node
+        root_children = view.tree.get_children("")
+        self.assertEqual(len(root_children), 1)
+        group_iid = root_children[0]
+        group_text = view.tree.item(group_iid, "text")
+        self.assertIn("[Profile] Profile_A", group_text)
+        self.assertIn("3 kênh", group_text)
+        self.assertEqual(tuple(view.tree.item(group_iid, "values")), ("", "", "", ""))
+
+        # 5. Check Grouped Rendering: Child Nodes (Title in #0 text)
+        children = view.tree.get_children(group_iid)
+        self.assertEqual(len(children), 3)
+        
+        # Child 1: seen_count == 0 preserved, title in text
+        item1 = view.tree.item("UC_TEST_1")
+        self.assertEqual(item1["text"], "あ〜べ〜好きなワイの反応集")
+        vals1 = tuple(item1["values"])
+        self.assertEqual(len(vals1), 4)
+        self.assertEqual(vals1[0], "UC_TEST_1")
+        self.assertEqual(vals1[1], "● Hoạt động")
+        self.assertIn("30–60s", vals1[2])
+        self.assertEqual(int(vals1[3]), 0)
+
+        # Child 2:
+        item2 = view.tree.item("UC_TEST_2")
+        self.assertEqual(item2["text"], "Kênh Tiếng Việt 2")
+        vals2 = tuple(item2["values"])
+        self.assertEqual(vals2[0], "UC_TEST_2")
+        self.assertEqual(vals2[1], "Ⅱ Tạm dừng")
+        self.assertEqual(vals2[2], "⚪ Giữ nguyên")
+        self.assertEqual(int(vals2[3]), 42)
+
+        # Child 3 (Empty title falls back to CID in display_name):
+        item3 = view.tree.item("UC_TEST_EMPTY_FOLDER")
+        self.assertEqual(item3["text"], "UC_TEST_EMPTY_FOLDER")
+
+        # 6. Check Flat Mode Rendering
+        view._on_view_mode_change("📄 Phẳng")
+        self.assertEqual(view.tree.heading("#0")["text"], "Tên Kênh / Handle")
+        flat_items = view.tree.get_children("")
+        self.assertEqual(len(flat_items), 3)
+        flat_item1 = view.tree.item("UC_TEST_1")
+        self.assertEqual(flat_item1["text"], "あ〜べ〜好きなワイの反応集")
+        self.assertEqual(tuple(flat_item1["values"])[0], "UC_TEST_1")
+
+        # Switch back to grouped
+        view._on_view_mode_change("📁 Nhóm")
+        self.assertEqual(view.tree.heading("#0")["text"], "Cấu Trúc / Kênh")
+
+        # 7. Safe metadata access: _open_folder with empty/missing folder
+        # Tests the fallback block: does NOT raise TclError when 'folder' column is deleted
+        with patch.object(view, "append_log") as mock_log:
+            view._open_folder("UC_TEST_EMPTY_FOLDER")
+            mock_log.assert_called_with("Kênh UC_TEST_EMPTY_FOLDER chưa có thư mục lưu video được cấu hình", error=True)
+
+        with patch("os.path.exists", return_value=True), patch("os.startfile") as mock_startfile:
+            view._open_folder("UC_TEST_1")
+            mock_startfile.assert_called_once()
+        
+        # 8. Safe metadata access: _open_profile_picker directly invoked & asserted
+        with patch("ui_dialogs.SearchableProfilePickerModal") as mock_picker:
+            # Case A: Normal channel with title
+            view._open_profile_picker("UC_TEST_1")
+            mock_picker.assert_called_once()
+            call_kwargs = mock_picker.call_args[1]
+            self.assertEqual(call_kwargs["channel_title"], "あ〜べ〜好きなワイの反応集")
+            self.assertEqual(call_kwargs["current_profile"], "Profile_A")
+            self.assertEqual(call_kwargs["channel_id"], "UC_TEST_1")
+
+        with patch("ui_dialogs.SearchableProfilePickerModal") as mock_picker_fallback:
+            # Case B: Empty title channel - extracts from tree_text
+            view._open_profile_picker("UC_TEST_EMPTY_FOLDER")
+            mock_picker_fallback.assert_called_once()
+            call_kwargs_b = mock_picker_fallback.call_args[1]
+            self.assertEqual(call_kwargs_b["channel_title"], "UC_TEST_EMPTY_FOLDER")
+            self.assertEqual(call_kwargs_b["current_profile"], "Profile_A")
 
         parent.destroy()
 

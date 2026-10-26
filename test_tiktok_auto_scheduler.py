@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -299,7 +300,7 @@ class TestDirectApiNativeSchedule(unittest.TestCase):
         client = TikTokPublishClient(session_cookies={"sessionid": "mock_sess", "msToken": "mock_token"})
         vid = "v0123456789"
         video_meta = {"Width": 1080, "Height": 1920, "Duration": 15.0}
-        target_timestamp = 1792300500
+        target_timestamp = ((int(time.time() + 3600) + 299) // 300) * 300  # 1 hour in future aligned to 5m
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -319,18 +320,26 @@ class TestDirectApiNativeSchedule(unittest.TestCase):
             )
 
             self.assertEqual(res.item_id, "719283719283")
-            mock_post.assert_called_once()
-            call_kwargs = mock_post.call_args[1]
+            # Có 2 cuộc gọi POST: 1 gọi ACK điều khoản lưu trữ, 1 gọi post video
+            self.assertEqual(mock_post.call_count, 2)
+            ack_call = mock_post.call_args_list[0]
+            self.assertIn("post_schedule/ack", ack_call[0][0])
+
+            post_call = mock_post.call_args_list[1]
+            call_kwargs = post_call[1]
             data_bytes = call_kwargs.get("data")
             payload_dict = json.loads(data_bytes.decode("utf-8"))
 
             feature_info = payload_dict["feature_common_info_list"][0]
             self.assertIn("schedule_time", feature_info)
             self.assertEqual(feature_info["schedule_time"], target_timestamp)
+            self.assertIsNone(feature_info["privacy_setting_info"]["allow_duet"])
+            self.assertIsNone(feature_info["privacy_setting_info"]["allow_stitch"])
 
     def test_run_direct_upload_forwards_schedule_time(self):
         """run_direct_upload truyền tham số schedule_time và thiết lập is_scheduled trong details."""
         from tiktok_direct_uploader import run_direct_upload
+        from tiktok_publish_client import ScheduleCapabilityResult
         from tiktok_vod_uploader import VodUploadResult
 
         mock_vod_res = VodUploadResult(
@@ -342,13 +351,24 @@ class TestDirectApiNativeSchedule(unittest.TestCase):
             store_region="us-east-1",
         )
 
+        now_sec = int(time.time())
+        target_ts = now_sec + 3600  # 1 hour in the future
+
         mock_pub_res = MagicMock()
         mock_pub_res.item_id = "7987654321"
         mock_pub_res.video_url = "https://www.tiktok.com/video/7987654321"
+        mock_pub_res.is_scheduled = True
+        mock_pub_res.schedule_time = target_ts
 
-        target_ts = 1792300500
+        mock_cap_res = ScheduleCapabilityResult(
+            can_schedule=True,
+            check_status="allowed",
+            server_time=now_sec,
+            ab_value="1",
+        )
 
         with patch("tiktok_direct_uploader.get_profile_tiktok_cookies", return_value={"sessionid": "valid_session"}), \
+             patch("tiktok_direct_uploader.check_schedule_capability", return_value=mock_cap_res), \
              patch("tiktok_direct_uploader.TikTokVodUploader.upload_video", return_value=mock_vod_res), \
              patch("tiktok_direct_uploader.TikTokPublishClient.publish_video", return_value=mock_pub_res) as mock_pub:
 
@@ -454,53 +474,57 @@ class TestDirectApiNativeSchedule(unittest.TestCase):
 
     def test_source_deletion_on_success_and_preservation_on_failure(self):
         """File gốc bị xóa khi đăng thành công (nếu bật cờ) và giữ nguyên 100% khi thất bại."""
-        import main
-        from tiktok_direct_uploader import UploadResult
+        temp_db = Path(self.test_dir) / "sched_exec.db"
+        with patch("schedule_manager.DEFAULT_DB_FILE", temp_db):
+            import main
+            from tiktok_direct_uploader import UploadResult
 
-        # 1. File test thành công có cờ delete=True -> File bị xóa
-        vid1 = Path(self.test_dir) / "vid1.mp4"
-        vid1.write_bytes(b"dummy1")
-        task1 = {
-            "id": "task_del_1",
-            "profile_name": "P1",
-            "video_path": str(vid1),
-            "delete_source_after_post": True,
-        }
+            temp_mgr = ScheduleManager(storage_file=temp_db)
+            with patch.object(main, "global_schedule_manager", temp_mgr):
+                # 1. File test thành công có cờ delete=True -> File bị xóa
+                vid1 = Path(self.test_dir) / "vid1.mp4"
+                vid1.write_bytes(b"dummy1")
+                task1 = {
+                    "id": "task_del_1",
+                    "profile_name": "P1",
+                    "video_path": str(vid1),
+                    "delete_source_after_post": True,
+                }
 
-        with patch("main.run_direct_upload", return_value=UploadResult(outcome="posted", message="ok", details={"item_id": "123"})):
-            ok, msg = main._execute_schedule_task_upload(task1)
-            self.assertTrue(ok)
-            self.assertFalse(vid1.exists())
+                with patch("main.run_direct_upload", return_value=UploadResult(outcome="posted", message="ok", details={"item_id": "123"})):
+                    ok, msg = main._execute_schedule_task_upload(task1)
+                    self.assertTrue(ok)
+                    self.assertFalse(vid1.exists())
 
-        # 2. File test thất bại có cờ delete=True -> File KHÔNG bị xóa
-        vid2 = Path(self.test_dir) / "vid2.mp4"
-        vid2.write_bytes(b"dummy2")
-        task2 = {
-            "id": "task_del_2",
-            "profile_name": "P1",
-            "video_path": str(vid2),
-            "delete_source_after_post": True,
-        }
+                # 2. File test thất bại có cờ delete=True -> File KHÔNG bị xóa
+                vid2 = Path(self.test_dir) / "vid2.mp4"
+                vid2.write_bytes(b"dummy2")
+                task2 = {
+                    "id": "task_del_2",
+                    "profile_name": "P1",
+                    "video_path": str(vid2),
+                    "delete_source_after_post": True,
+                }
 
-        with patch("main.run_direct_upload", return_value=UploadResult(outcome="failed", message="network error")):
-            ok, msg = main._execute_schedule_task_upload(task2)
-            self.assertFalse(ok)
-            self.assertTrue(vid2.exists())
+                with patch("main.run_direct_upload", return_value=UploadResult(outcome="failed", message="network error")):
+                    ok, msg = main._execute_schedule_task_upload(task2)
+                    self.assertFalse(ok)
+                    self.assertTrue(vid2.exists())
 
-        # 3. File test thành công nhưng cờ delete=False -> File KHÔNG bị xóa
-        vid3 = Path(self.test_dir) / "vid3.mp4"
-        vid3.write_bytes(b"dummy3")
-        task3 = {
-            "id": "task_del_3",
-            "profile_name": "P1",
-            "video_path": str(vid3),
-            "delete_source_after_post": False,
-        }
+                # 3. File test thành công nhưng cờ delete=False -> File KHÔNG bị xóa
+                vid3 = Path(self.test_dir) / "vid3.mp4"
+                vid3.write_bytes(b"dummy3")
+                task3 = {
+                    "id": "task_del_3",
+                    "profile_name": "P1",
+                    "video_path": str(vid3),
+                    "delete_source_after_post": False,
+                }
 
-        with patch("main.run_direct_upload", return_value=UploadResult(outcome="posted", message="ok", details={"item_id": "456"})):
-            ok, msg = main._execute_schedule_task_upload(task3)
-            self.assertTrue(ok)
-            self.assertTrue(vid3.exists())
+                with patch("main.run_direct_upload", return_value=UploadResult(outcome="posted", message="ok", details={"item_id": "456"})):
+                    ok, msg = main._execute_schedule_task_upload(task3)
+                    self.assertTrue(ok)
+                    self.assertTrue(vid3.exists())
 
 
 class TestBulkScheduleModalUI(unittest.TestCase):
@@ -514,8 +538,11 @@ class TestBulkScheduleModalUI(unittest.TestCase):
         except Exception:
             self.skipTest("Tkinter display not available")
 
+        modal_temp_dir = tempfile.mkdtemp(prefix="test_modal_ui_")
+        modal_db = Path(modal_temp_dir) / "sched.db"
+        iso_mgr = ScheduleManager(storage_file=modal_db)
         try:
-            modal = BulkScheduleModal(root, selected_profiles=["Profile_A"])
+            modal = BulkScheduleModal(root, selected_profiles=["Profile_A"], schedule_manager=iso_mgr)
             self.assertTrue(hasattr(modal, "scroll"))
             self.assertIsInstance(modal.scroll, ctk.CTkScrollableFrame)
             self.assertTrue(hasattr(modal, "btn_submit"))
@@ -527,6 +554,7 @@ class TestBulkScheduleModalUI(unittest.TestCase):
                 root.destroy()
             except Exception:
                 pass
+            shutil.rmtree(modal_temp_dir, ignore_errors=True)
 
 
 class TestScheduleSummaryAndProfileTableIntegration(unittest.TestCase):
@@ -643,6 +671,92 @@ class TestScheduleSummaryAndProfileTableIntegration(unittest.TestCase):
 
         # 4. Profile đang thực sự tải lên (UPLOADING) -> Luôn ưu tiên hiển thị tiến trình đang tải
         self.assertEqual(compute_upload_badge("Prof_Sched", UploadState.UPLOADING), "Đang tải video")
+
+    def test_publish_schedule_bounds_and_drift(self):
+        """Kiểm tra chặt chẽ các trường hợp biên thời gian (900s, 864000s) và bù trôi đồng hồ server."""
+        from tiktok_publish_client import TikTokPublishClient, TikTokPublishError
+
+        client = TikTokPublishClient(session_cookies={"sessionid": "mock_sess", "msToken": "mock_token"})
+        vid = "v0123456789"
+        video_meta = {"Width": 1080, "Height": 1920, "Duration": 15.0}
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "status_code": 0,
+            "single_post_resp_list": [{"item_id": "719283719283", "status_code": 0}],
+        }
+
+        with patch.object(client.proxy_session, "post", return_value=mock_resp), \
+             patch("tiktok_publish_client.sign_tiktok_url", return_value=("mock_bogus", "mock_gnarly")):
+
+            server_base = 1700000100  # Exact multiple of 300 (1700000100 % 300 == 0)
+            # 1. Quá gần (< 900s): server_base + 600s -> diff = 600s < 900s -> raise
+            with self.assertRaises(TikTokPublishError) as ctx:
+                client.publish_video(
+                    vid=vid,
+                    video_meta=video_meta,
+                    schedule_time=server_base + 600,
+                    server_time_ref=server_base,
+                )
+            self.assertIn("tối thiểu 15 phút", str(ctx.exception))
+
+            # 2. Quá xa (> 864000s): server_base + 900000s -> raise
+            with self.assertRaises(TikTokPublishError) as ctx:
+                client.publish_video(
+                    vid=vid,
+                    video_meta=video_meta,
+                    schedule_time=server_base + 900000,
+                    server_time_ref=server_base,
+                )
+            self.assertIn("tối đa 10 ngày", str(ctx.exception))
+
+            # 3. Hợp lệ (server_base + 1800s): thành công
+            res = client.publish_video(
+                vid=vid,
+                video_meta=video_meta,
+                schedule_time=server_base + 1800,
+                server_time_ref=server_base,
+            )
+            self.assertTrue(res.is_scheduled)
+            self.assertEqual(res.schedule_time, server_base + 1800)
+
+    def test_publish_fatal_item_ids_and_inner_error(self):
+        """Kiểm tra xử lý lỗi khi TikTok trả về fatal_item_ids hoặc status_code nội bộ thất bại."""
+        from tiktok_publish_client import TikTokPublishClient, TikTokPublishError
+
+        client = TikTokPublishClient(session_cookies={"sessionid": "mock_sess", "msToken": "mock_token"})
+        vid = "v0123456789"
+        video_meta = {"Width": 1080, "Height": 1920, "Duration": 15.0}
+
+        # Case 1: fatal_item_ids
+        mock_resp_fatal = MagicMock()
+        mock_resp_fatal.status_code = 200
+        mock_resp_fatal.json.return_value = {
+            "status_code": 0,
+            "extra": {"fatal_item_ids": ["719283719283"]},
+            "single_post_resp_list": [{"item_id": "719283719283", "status_code": 0}],
+        }
+
+        with patch.object(client.proxy_session, "post", return_value=mock_resp_fatal), \
+             patch("tiktok_publish_client.sign_tiktok_url", return_value=("mock_bogus", "mock_gnarly")):
+            with self.assertRaises(TikTokPublishError) as ctx:
+                client.publish_video(vid=vid, video_meta=video_meta)
+            self.assertIn("fatal_item_ids", str(ctx.exception))
+
+        # Case 2: inner status_code != 0
+        mock_resp_inner = MagicMock()
+        mock_resp_inner.status_code = 200
+        mock_resp_inner.json.return_value = {
+            "status_code": 0,
+            "single_post_resp_list": [{"item_id": "719283719283", "status_code": 1002, "status_msg": "Video banned"}],
+        }
+
+        with patch.object(client.proxy_session, "post", return_value=mock_resp_inner), \
+             patch("tiktok_publish_client.sign_tiktok_url", return_value=("mock_bogus", "mock_gnarly")):
+            with self.assertRaises(TikTokPublishError) as ctx:
+                client.publish_video(vid=vid, video_meta=video_meta)
+            self.assertIn("status_code=1002", str(ctx.exception))
 
 
 if __name__ == "__main__":

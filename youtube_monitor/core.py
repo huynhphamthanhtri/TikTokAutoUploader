@@ -19,6 +19,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 from flask import Flask, jsonify, request
 from pyngrok import conf as ngconf
 from pyngrok import ngrok
@@ -920,6 +922,97 @@ def get_youtube_client(api_key=None):
     return api_key_manager.get_youtube_client(api_key)
 
 
+
+_feed_session = None
+_feed_session_lock = threading.Lock()
+
+
+def _get_feed_session():
+    global _feed_session
+    with _feed_session_lock:
+        if _feed_session is None:
+            s = requests.Session()
+            try:
+                retries = Retry(
+                    total=2,
+                    backoff_factor=0.5,
+                    status_forcelist=[500, 502, 503, 504],
+                    raise_on_status=False,
+                )
+                adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=20)
+                s.mount("https://", adapter)
+                s.mount("http://", adapter)
+                _feed_session = s
+            except Exception as e:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+                log(f"[FeedSession] Lỗi khởi tạo feed session: {e}")
+                raise
+        return _feed_session
+
+
+def _sync_api_key_manager_if_needed():
+    """Sync API key manager with config without losing in-memory cooldowns."""
+    if not api_key_manager.get_keys():
+        try:
+            cfg = get_config()
+            api_key_manager.load_from_config(cfg)
+        except Exception as e:
+            log(f"[API] Lỗi sync API key manager: {e}")
+
+
+def _persist_pool_state_if_dirty():
+    """Persist updated pool state to config if any key status changed."""
+    try:
+        cfg = get_config()
+        with api_key_manager._lock:
+            api_key_manager.save_to_config(cfg)
+        _save_config(cfg)
+    except Exception as e:
+        log(f"[API] Lỗi lưu pool state: {e}")
+
+
+def execute_api_request(
+    request_builder,
+    action_desc="API request",
+    max_key_rotations=3,
+    max_network_retries=2,
+    deadline_seconds=30.0,
+):
+    """
+    Thực thi an toàn một Google API request thông qua ApiKeyManager.execute_with_pool:
+    - Tự động luân chuyển API key khi gặp QUOTA_EXCEEDED (403) hoặc RATE_LIMITED (429)
+    - Tự động khôi phục socket (invalidate_thread_client) khi gặp ConnectionResetError (10054)
+    - Thread-isolated Google API client chống race condition giữa Polling và UI thread
+    - Tự động đồng bộ và lưu trạng thái pool nếu có thay đổi
+    """
+    _sync_api_key_manager_if_needed()
+    try:
+        return api_key_manager.execute_with_pool(
+            request_builder=request_builder,
+            action_desc=action_desc,
+            max_key_rotations=max_key_rotations,
+            max_network_retries=max_network_retries,
+            deadline_seconds=deadline_seconds,
+        )
+    finally:
+        _persist_pool_state_if_dirty()
+
+
+def derive_uploads_playlist_id(channel_id):
+    """
+    Tự động suy ra uploads playlist ID từ channel ID chuẩn YouTube dạng UC... (24 ký tự).
+    Quy tắc chuẩn YouTube: UC... -> UU...
+    Tiết kiệm 100% quota và triệt tiêu socket reset khi không cần gọi API channels().list.
+    """
+    cid = str(channel_id or "").strip()
+    if cid.startswith("UC") and len(cid) == 24:
+        return "UU" + cid[2:]
+    return None
+
+
 def check_api_key_validity(api_key):
     return api_key_manager.test_key(api_key)
 
@@ -1189,6 +1282,13 @@ class ChannelsStore:
                 "manual_windows": meta.get("manual_windows") or [],
                 "schedule_learned": meta.get("schedule_learned") or {},
                 "timezone": meta.get("timezone") or DEFAULT_TIMEZONE,
+                "latest_observed_video_id": meta.get("latest_observed_video_id", ""),
+                "latest_observed_video_title": meta.get("latest_observed_video_title", ""),
+                "latest_observed_pub_utc": meta.get("latest_observed_pub_utc"),
+                "last_api_audit_at": meta.get("last_api_audit_at"),
+                "last_api_audit_status": meta.get("last_api_audit_status", ""),
+                "last_api_audit_error": meta.get("last_api_audit_error", ""),
+                "last_api_audit_success_at": meta.get("last_api_audit_success_at"),
             }
         return out
 
@@ -1219,6 +1319,13 @@ class ChannelsStore:
                         "manual_windows": meta.get("manual_windows") or [],
                         "schedule_learned": meta.get("schedule_learned") or {},
                         "timezone": meta.get("timezone") or DEFAULT_TIMEZONE,
+                        "latest_observed_video_id": meta.get("latest_observed_video_id", ""),
+                        "latest_observed_video_title": meta.get("latest_observed_video_title", ""),
+                        "latest_observed_pub_utc": meta.get("latest_observed_pub_utc"),
+                        "last_api_audit_at": meta.get("last_api_audit_at"),
+                        "last_api_audit_status": meta.get("last_api_audit_status", ""),
+                        "last_api_audit_error": meta.get("last_api_audit_error", ""),
+                "last_api_audit_success_at": meta.get("last_api_audit_success_at"),
                     }
             log(f"[Channels] Loaded {len(self._channels)} channels.")
         except Exception as e:
@@ -1290,6 +1397,13 @@ class ChannelsStore:
                 "thumbnail": thumbnail or existing.get("thumbnail", ""),
                 "channel_url": channel_url or existing.get("channel_url", ""),
                 "added_at": existing.get("added_at") or datetime.now(timezone.utc).isoformat(),
+                "latest_observed_video_id": existing.get("latest_observed_video_id", ""),
+                "latest_observed_video_title": existing.get("latest_observed_video_title", ""),
+                "latest_observed_pub_utc": existing.get("latest_observed_pub_utc"),
+                "last_api_audit_at": existing.get("last_api_audit_at"),
+                "last_api_audit_status": existing.get("last_api_audit_status", ""),
+                "last_api_audit_error": existing.get("last_api_audit_error", ""),
+                "last_api_audit_success_at": existing.get("last_api_audit_success_at"),
             }
             self._dirty = True
             self._revision += 1
@@ -1324,6 +1438,73 @@ class ChannelsStore:
     def count_by_profile(self, profile_name):
         with _store_lock:
             return sum(1 for meta in self._channels.values() if meta.get("profile_name") == profile_name)
+
+    def set_active(self, cid, active: bool):
+        with _store_lock:
+            meta = self._channels.get(cid)
+            if not meta:
+                return "NOT_FOUND"
+            new_val = bool(active)
+            if meta.get("active") == new_val:
+                return "UNCHANGED"
+            meta["active"] = new_val
+            self._dirty = True
+            self._revision += 1
+            return "UPDATED"
+
+    def update_observed_audit(self, cid, video_id="", video_title="", pub_utc=None, status="OK", error="", audit_time=None):
+        cid = str(cid or "").strip()
+        status_clean = str(status or "OK").strip().upper()
+        if status_clean not in ("OK", "EMPTY", "ERROR"):
+            status_clean = "ERROR"
+
+        clean_time = float(audit_time) if audit_time is not None else time.time()
+        clean_vid = str(video_id or "").strip()
+        clean_title = str(video_title or "").strip()
+        clean_error = str(error or "").strip()
+
+        # Validate pub_utc strictly (not a bool, must be finite positive float)
+        clean_pub = None
+        if pub_utc is not None and not isinstance(pub_utc, bool):
+            try:
+                val = float(pub_utc)
+                if math.isfinite(val) and val > 0:
+                    clean_pub = val
+            except (ValueError, TypeError):
+                clean_pub = None
+
+        with _store_lock:
+            meta = self._channels.get(cid)
+            if not meta:
+                return False
+
+            # Sequence guard: reject out-of-order stale audits
+            last_audit_at = meta.get("last_api_audit_at")
+            if last_audit_at is not None and clean_time < last_audit_at:
+                log(f"[Audit] Bỏ qua kết quả audit cũ cho {cid} (audit_time {clean_time} < last_audit {last_audit_at})")
+                return False
+
+            meta["last_api_audit_at"] = clean_time
+            meta["last_api_audit_status"] = status_clean
+            meta["last_api_audit_error"] = clean_error
+
+            if status_clean == "OK":
+                if clean_pub is not None:
+                    # Atomic update of observation triplet
+                    meta["latest_observed_video_id"] = clean_vid
+                    meta["latest_observed_video_title"] = clean_title
+                    meta["latest_observed_pub_utc"] = clean_pub
+                    meta["last_api_audit_success_at"] = clean_time
+            elif status_clean == "EMPTY":
+                meta["latest_observed_video_id"] = ""
+                meta["latest_observed_video_title"] = ""
+                meta["latest_observed_pub_utc"] = None
+                meta["last_api_audit_success_at"] = clean_time
+            # For ERROR: keep previous observation intact as historical cache
+
+            self._dirty = True
+            self._revision += 1
+            return True
 
     def toggle_active(self, cid):
         with _store_lock:
@@ -1768,7 +1949,7 @@ def save_channel_cache(cache):
         log(f"[Cache] Save lỗi: {e}")
 
 
-def get_channel_id_from_link(link, youtube):
+def get_channel_id_from_link(link, youtube=None):
     cache = load_channel_cache()
     link = str(link or "").strip()
     if link in cache:
@@ -1777,30 +1958,66 @@ def get_channel_id_from_link(link, youtube):
         link = f"https://www.youtube.com/{link}"
     elif not link.startswith("http") and not link.startswith("youtube.com") and not link.startswith("youtu.be"):
         link = f"https://www.youtube.com/@{link}"
+
+    # 1. Fast path: Kênh dạng URL /channel/UC... hoặc có channel id
     channel_match = re.search(r"youtube\.com/channel/([^\s/?#]+)", link)
     if channel_match:
         cid = channel_match.group(1)
-        response = youtube.channels().list(part="contentDetails", id=cid).execute()
-        if response.get("items"):
-            info = {"id": cid, "playlistId": response["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]}
+        playlist_id = derive_uploads_playlist_id(cid)
+        if not playlist_id:
+            try:
+                if youtube is not None:
+                    response = youtube.channels().list(part="contentDetails", id=cid).execute()
+                else:
+                    def _call(yt):
+                        return yt.channels().list(part="contentDetails", id=cid).execute()
+                    response = execute_api_request(_call, action_desc=f"get_channel_info {cid}")
+                if response and response.get("items"):
+                    playlist_id = response["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
+            except Exception as e:
+                log(f"[Channel] Lỗi resolve channel id {cid}: {e}")
+        if playlist_id or (cid.startswith("UC") and len(cid) == 24):
+            info = {"id": cid, "playlistId": playlist_id or derive_uploads_playlist_id(cid) or f"UU{cid[2:]}"}
             cache[link] = info
             save_channel_cache(cache)
             return info
+
+    # 2. Kênh dạng handle @... hoặc custom URL
     user_match = re.search(r"youtube\.com/(@|c/|user/)([^\s/?#]+)", link)
     if user_match:
         username = urllib.parse.unquote(user_match.group(2))
-        response = youtube.channels().list(part="id,contentDetails", forHandle=f"@{username}").execute()
-        if not response.get("items"):
-            response = youtube.search().list(part="snippet", q=username, type="channel", maxResults=1).execute()
-            if response.get("items"):
-                cid = response["items"][0]["snippet"]["channelId"]
-                response = youtube.channels().list(part="id,contentDetails", id=cid).execute()
-        if response.get("items"):
-            item = response["items"][0]
-            info = {"id": item["id"], "playlistId": item["contentDetails"]["relatedPlaylists"]["uploads"]}
-            cache[link] = info
-            save_channel_cache(cache)
-            return info
+        try:
+            if youtube is not None:
+                resp = youtube.channels().list(part="id,contentDetails", forHandle=f"@{username}").execute()
+                if not resp.get("items"):
+                    resp = youtube.search().list(part="snippet", q=username, type="channel", maxResults=1).execute()
+                    if resp.get("items"):
+                        cid_found = resp["items"][0]["snippet"]["channelId"]
+                        resp = youtube.channels().list(part="id,contentDetails", id=cid_found).execute()
+                response = resp
+            else:
+                def _call_handle(yt):
+                    r = yt.channels().list(part="id,contentDetails", forHandle=f"@{username}").execute()
+                    if not r.get("items"):
+                        r = yt.search().list(part="snippet", q=username, type="channel", maxResults=1).execute()
+                        if r.get("items"):
+                            cid_f = r["items"][0]["snippet"]["channelId"]
+                            r = yt.channels().list(part="id,contentDetails", id=cid_f).execute()
+                    return r
+                response = execute_api_request(_call_handle, action_desc=f"resolve_handle @{username}")
+
+            if response and response.get("items"):
+                item = response["items"][0]
+                cid = item["id"]
+                playlist_id = item.get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads") or derive_uploads_playlist_id(cid)
+                info = {"id": cid, "playlistId": playlist_id}
+                cache[link] = info
+                save_channel_cache(cache)
+                return info
+        except Exception as e:
+            log(f"[Channel] Lỗi resolve handle @{username}: {e}")
+            return None
+
     short_match = re.search(r"youtu\.be/([^\s/?#]+)", link)
     if short_match:
         return get_channel_from_video_id(short_match.group(1), youtube)
@@ -1810,15 +2027,32 @@ def get_channel_id_from_link(link, youtube):
     return None
 
 
-def get_channel_from_video_id(video_id, youtube):
-    response = youtube.videos().list(part="snippet", id=video_id).execute()
-    if not response.get("items"):
+def get_channel_from_video_id(video_id, youtube=None):
+    try:
+        if youtube is not None:
+            response = youtube.videos().list(part="snippet", id=video_id).execute()
+        else:
+            def _call_vid(yt):
+                return yt.videos().list(part="snippet", id=video_id).execute()
+            response = execute_api_request(_call_vid, action_desc=f"get_channel_from_video_id {video_id}")
+
+        if not response or not response.get("items"):
+            return None
+        cid = response["items"][0]["snippet"]["channelId"]
+        playlist_id = derive_uploads_playlist_id(cid)
+        if not playlist_id:
+            if youtube is not None:
+                details = youtube.channels().list(part="contentDetails", id=cid).execute()
+            else:
+                def _call_ch(yt):
+                    return yt.channels().list(part="contentDetails", id=cid).execute()
+                details = execute_api_request(_call_ch, action_desc=f"get_channel_details {cid}")
+            if details and details.get("items"):
+                playlist_id = details["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
+        return {"id": cid, "playlistId": playlist_id or derive_uploads_playlist_id(cid) or f"UU{cid[2:]}"}
+    except Exception as e:
+        log(f"[Channel] Lỗi get_channel_from_video_id {video_id}: {e}")
         return None
-    cid = response["items"][0]["snippet"]["channelId"]
-    details = youtube.channels().list(part="contentDetails", id=cid).execute()
-    if not details.get("items"):
-        return None
-    return {"id": cid, "playlistId": details["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]}
 
 
 def sanitize_filename(name, max_length=150):
@@ -3328,11 +3562,13 @@ def _polling_worker(run_gen=None):
                     continue
                 entries = []
                 try:
-                    feed = requests.get(
+                    feed_session = _get_feed_session()
+                    feed = feed_session.get(
                         YOUTUBE_FEED_URL_TEMPLATE.format(urllib.parse.quote(cid)),
                         headers={
                             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                             "Accept": "application/atom+xml,application/xml,text/xml;q=0.9,*/*;q=0.8",
+                            "Connection": "keep-alive",
                         },
                         timeout=10,
                     )
@@ -3342,17 +3578,20 @@ def _polling_worker(run_gen=None):
                     log(f"[Polling] Feed lỗi {cid}, fallback Data API: {feed_error}")
                     if _predictive_scheduler and _predictive_scheduler.is_channel_in_window(cid):
                         continue
-                    if youtube is None:
-                        youtube = get_youtube_client()
-                    playlist_id = _get_uploads_playlist_id(cid, youtube)
+                    playlist_id = _get_uploads_playlist_id(cid)
                     if playlist_id:
-                        response = youtube.playlistItems().list(
-                            part="snippet,contentDetails", playlistId=playlist_id, maxResults=scan_limit
-                        ).execute()
-                        entries = [
-                            (_playlist_item_video_id(item), cid, _playlist_item_published(item))
-                            for item in response.get("items", [])
-                        ]
+                        try:
+                            def _fetch_poll(yt):
+                                return yt.playlistItems().list(
+                                    part="snippet,contentDetails", playlistId=playlist_id, maxResults=scan_limit
+                                ).execute()
+                            response = execute_api_request(_fetch_poll, action_desc=f"poll_fallback {cid}")
+                            entries = [
+                                (_playlist_item_video_id(item), cid, _playlist_item_published(item))
+                                for item in response.get("items", [])
+                            ]
+                        except Exception as api_poll_err:
+                            log(f"[Polling] Data API fallback lỗi {cid}: {api_poll_err}")
                 # Feeds are newest-first. Process oldest-first so watermark advances
                 # monotonically and a burst of uploads cannot hide an earlier item.
                 for vid, _entry_cid, published in reversed(entries):
@@ -3372,13 +3611,18 @@ def _polling_worker(run_gen=None):
     log("[Polling] Reconciliation worker stopped")
 
 
-def _ensure_channel_metadata(channel_id, youtube):
+def _ensure_channel_metadata(channel_id, youtube=None):
     """Fetch and persist channel title/thumbnail/url when missing (one-time enrichment)."""
     meta = channels_store.get_meta(channel_id) or {}
     if meta.get("title") or meta.get("meta_attempted"):
         return meta
     try:
-        resp = youtube.channels().list(part="snippet", id=channel_id).execute()
+        if youtube is not None:
+            resp = youtube.channels().list(part="snippet", id=channel_id).execute()
+        else:
+            def _call(yt):
+                return yt.channels().list(part="snippet", id=channel_id).execute()
+            resp = execute_api_request(_call, action_desc=f"enrich_metadata {channel_id}")
         items = resp.get("items") or []
         if not items:
             channels_store.update_meta(channel_id, meta_attempted=True)
@@ -3402,9 +3646,23 @@ def _ensure_channel_metadata(channel_id, youtube):
     return channels_store.get_meta(channel_id) or {}
 
 
-def _get_uploads_playlist_id(channel_id, youtube):
+def _get_uploads_playlist_id(channel_id, youtube=None):
+    cid = str(channel_id or "").strip()
+    derived = derive_uploads_playlist_id(cid)
+    if derived:
+        return derived
+    if youtube is not None:
+        try:
+            response = youtube.channels().list(part="contentDetails", id=cid).execute()
+            items = response.get("items", [])
+            if items:
+                return items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
+        except Exception:
+            pass
     try:
-        response = youtube.channels().list(part="contentDetails", id=channel_id).execute()
+        def _call(yt):
+            return yt.channels().list(part="contentDetails", id=cid).execute()
+        response = execute_api_request(_call, action_desc=f"get_uploads_playlist_id {cid}")
         items = response.get("items", [])
         if items:
             return items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
@@ -3711,16 +3969,18 @@ def analyze_channel_schedule(channel_id):
     if not meta:
         return False, "Kênh không tồn tại trong danh sách."
     try:
-        yt = get_youtube_client()
-        playlist_id = meta.get("uploads_playlist_id") or _get_uploads_playlist_id(cid, yt)
+        playlist_id = meta.get("uploads_playlist_id") or _get_uploads_playlist_id(cid)
         if not playlist_id:
             return False, "Không xác định được uploads playlist của kênh."
 
-        resp = yt.playlistItems().list(
-            part="snippet",
-            playlistId=playlist_id,
-            maxResults=30,
-        ).execute()
+        def _call(yt):
+            return yt.playlistItems().list(
+                part="snippet",
+                playlistId=playlist_id,
+                maxResults=30,
+            ).execute()
+
+        resp = execute_api_request(_call, action_desc=f"analyze_schedule {cid}")
 
         published_list = []
         for it in resp.get("items", []):
@@ -3759,17 +4019,24 @@ def update_channel_manual_windows(channel_id, manual_windows):
 
 
 def add_channel_for_profile(channel_input, profile_name, folder_path):
-    youtube = get_youtube_client()
-    info = get_channel_id_from_link(channel_input, youtube)
+    try:
+        info = get_channel_id_from_link(channel_input)
+    except Exception as e:
+        log(f"[Channel] Lỗi resolve link {channel_input}: {e}")
+        return False, f"Không lấy được Channel ID: {e}"
+
     if not info or not info.get("id"):
         return False, "Không lấy được Channel ID."
+
     cid = info["id"]
     channel_title = ""
     channel_thumbnail = ""
     channel_url = f"https://www.youtube.com/channel/{cid}"
     try:
-        resp = youtube.channels().list(part="snippet,contentDetails", id=cid).execute()
-        if resp.get("items"):
+        def _call_meta(yt):
+            return yt.channels().list(part="snippet,contentDetails", id=cid).execute()
+        resp = execute_api_request(_call_meta, action_desc=f"get_channel_meta {cid}")
+        if resp and resp.get("items"):
             sn = resp["items"][0].get("snippet") or {}
             channel_title = sn.get("title") or ""
             thumbs = sn.get("thumbnails") or {}
@@ -3778,17 +4045,20 @@ def add_channel_for_profile(channel_input, profile_name, folder_path):
                 channel_thumbnail = thumb.get("url") or ""
     except Exception as e:
         log(f"[Channel] Lấy metadata lỗi {cid}: {e}")
+
     channels_store.add_channel(cid, folder_path, profile_name=profile_name, process_short=True,
                                title=channel_title, thumbnail=channel_thumbnail, channel_url=channel_url)
     try:
-        playlist_id = info.get("playlistId") or _get_uploads_playlist_id(cid, youtube)
+        playlist_id = info.get("playlistId") or _get_uploads_playlist_id(cid)
         if playlist_id:
             channels_store.update_meta(cid, uploads_playlist_id=playlist_id)
-            response = youtube.playlistItems().list(
-                part="snippet,contentDetails",
-                playlistId=playlist_id,
-                maxResults=5
-            ).execute()
+            def _call_baseline(yt):
+                return yt.playlistItems().list(
+                    part="snippet,contentDetails",
+                    playlistId=playlist_id,
+                    maxResults=5
+                ).execute()
+            response = execute_api_request(_call_baseline, action_desc=f"baseline_playlist {cid}")
             seeded = _seed_polling_baseline(cid, response.get("items", []))
             if seeded:
                 log(f"[Channel] Baseline {seeded} existing videos for {cid}")
@@ -3798,6 +4068,7 @@ def add_channel_for_profile(channel_input, profile_name, folder_path):
                 log(f"[Learner] Phân tích lịch ban đầu {cid} lỗi: {sch_err}")
     except Exception as e:
         log(f"[Channel] Baseline lỗi {cid}: {e}")
+
     channels_store.save_now()
     if public_callback_url:
         subscribe_websub(cid, public_callback_url)
@@ -3831,6 +4102,14 @@ def get_channels():
             "title": meta.get("title", ""),
             "thumbnail": meta.get("thumbnail", ""),
             "channel_url": meta.get("channel_url", ""),
+            "added_at": meta.get("added_at", ""),
+            "uploads_playlist_id": meta.get("uploads_playlist_id", ""),
+            "latest_observed_video_id": meta.get("latest_observed_video_id", ""),
+            "latest_observed_video_title": meta.get("latest_observed_video_title", ""),
+            "latest_observed_pub_utc": meta.get("latest_observed_pub_utc"),
+            "last_api_audit_at": meta.get("last_api_audit_at"),
+            "last_api_audit_status": meta.get("last_api_audit_status", ""),
+            "last_api_audit_error": meta.get("last_api_audit_error", ""),
             "manual_windows": meta.get("manual_windows") or [],
             "schedule_learned": meta.get("schedule_learned") or {},
             "timezone": meta.get("timezone") or DEFAULT_TIMEZONE,
@@ -3930,4 +4209,518 @@ def get_status():
         "subscriptions_degraded": total_subs - subs_ok,
         "pending": len([v for v in _pending_video_ids if not stop_event.is_set()]),
         "video_states": _get_video_state_store().counts(),
+    }
+
+
+def set_channel_active(channel_id, active: bool):
+    """
+    Cập nhật trạng thái active của kênh theo cách idempotent.
+    Trả về (ok: bool, message: str, status_code: "UPDATED" | "UNCHANGED" | "NOT_FOUND" | "SAVE_ERROR").
+    """
+    cid = str(channel_id or "").strip()
+    if not isinstance(active, bool):
+        active = str(active).strip().lower() in ("true", "1", "yes")
+
+    status_code = channels_store.set_active(cid, active)
+    if status_code == "NOT_FOUND":
+        return False, f"Không tìm thấy kênh {cid}", status_code
+    if status_code == "UPDATED":
+        saved = channels_store.save_now()
+        state_str = "Hoạt động" if active else "Tạm dừng"
+        if not saved:
+            log(f"[Channel] Cảnh báo: Đã đổi trạng thái {cid} nhưng lưu channels.json thất bại")
+            return False, "Đã đổi trạng thái trong bộ nhớ nhưng lưu tệp thất bại", "SAVE_ERROR"
+        log(f"[Channel] Đã chuyển trạng thái kênh {cid} -> {state_str}")
+        return True, f"Đã chuyển kênh sang {state_str}", status_code
+    return True, "Trạng thái không thay đổi", status_code
+
+
+def fetch_channel_latest_video_api(channel_id, uploads_playlist_id=None):
+    """
+    Lấy thông tin video mới nhất của kênh trực tiếp qua YouTube Data API v3 (1 quota unit).
+    Sử dụng endpoint playlistItems().list trên playlist tải lên (UU...) với maxResults=1.
+    Ưu tiên trường contentDetails.videoPublishedAt (thời điểm video thực sự công khai).
+    Bảo toàn thread-isolated client và tự động xoay key khi gặp lỗi quota hoặc 10054.
+    """
+    cid = str(channel_id or "").strip()
+    playlist_id = str(uploads_playlist_id or "").strip()
+
+    try:
+        if not playlist_id:
+            playlist_id = derive_uploads_playlist_id(cid) or _get_uploads_playlist_id(cid)
+
+        if not playlist_id:
+            return {
+                "channel_id": cid,
+                "uploads_playlist_id": "",
+                "status": "ERROR",
+                "video_id": "",
+                "video_title": "",
+                "published_iso": "",
+                "published_utc": None,
+                "error": "Không xác định được uploads playlist của kênh",
+            }
+
+        def _call(yt):
+            return yt.playlistItems().list(
+                part="snippet,contentDetails",
+                playlistId=playlist_id,
+                maxResults=1,
+            ).execute()
+
+        resp = execute_api_request(_call, action_desc=f"fetch_latest_video {cid}")
+        if not isinstance(resp, dict) or "items" not in resp:
+            return {
+                "channel_id": cid,
+                "uploads_playlist_id": playlist_id,
+                "status": "ERROR",
+                "video_id": "",
+                "video_title": "",
+                "published_iso": "",
+                "published_utc": None,
+                "error": "Response từ YouTube API không đúng cấu trúc",
+            }
+
+        items = resp.get("items", [])
+        if not items:
+            return {
+                "channel_id": cid,
+                "uploads_playlist_id": playlist_id,
+                "status": "EMPTY",
+                "video_id": "",
+                "video_title": "",
+                "published_iso": "",
+                "published_utc": None,
+                "error": "Kênh chưa có video công khai nào trong playlist",
+            }
+
+        first_item = items[0]
+        snippet = first_item.get("snippet", {}) or {}
+        content_details = first_item.get("contentDetails", {}) or {}
+
+        vid = content_details.get("videoId") or snippet.get("resourceId", {}).get("videoId") or ""
+        vtitle = snippet.get("title") or "Video không tiêu đề"
+
+        # Thử contentDetails.videoPublishedAt trước, fallback sang snippet.publishedAt
+        pub_iso = content_details.get("videoPublishedAt") or ""
+        pub_utc = iso_to_epoch(pub_iso) if pub_iso else None
+
+        if pub_utc is None or not math.isfinite(pub_utc) or pub_utc <= 0:
+            pub_iso = snippet.get("publishedAt") or ""
+            pub_utc = iso_to_epoch(pub_iso) if pub_iso else None
+
+        if pub_utc is None or not math.isfinite(pub_utc) or pub_utc <= 0:
+            return {
+                "channel_id": cid,
+                "uploads_playlist_id": playlist_id,
+                "status": "ERROR",
+                "video_id": vid,
+                "video_title": vtitle,
+                "published_iso": pub_iso,
+                "published_utc": None,
+                "error": "Không trích xuất được timestamp xuất bản hợp lệ từ video",
+            }
+
+        return {
+            "channel_id": cid,
+            "uploads_playlist_id": playlist_id,
+            "status": "OK",
+            "video_id": vid,
+            "video_title": vtitle,
+            "published_iso": pub_iso,
+            "published_utc": pub_utc,
+            "error": "",
+        }
+    except Exception as e:
+        err_msg = str(e)
+        log(f"[API] Lỗi lấy video mới nhất cho kênh {cid}: {err_msg}")
+        return {
+            "channel_id": cid,
+            "uploads_playlist_id": playlist_id,
+            "status": "ERROR",
+            "video_id": "",
+            "video_title": "",
+            "published_iso": "",
+            "published_utc": None,
+            "error": err_msg,
+        }
+
+
+def format_time_ago(seconds: Optional[float]) -> str:
+    """Định dạng khoảng thời gian từ mốc giây thành chuỗi thân thiện người dùng."""
+    if seconds is None:
+        return "Chưa có dữ liệu"
+    if seconds <= 60:
+        return "Vừa xong"
+    minutes = int(seconds // 60)
+    hours = int(seconds // 3600)
+    days = int(hours // 24)
+
+    if minutes < 60:
+        return f"{minutes} phút trước"
+    if hours < 24:
+        return f"{hours} giờ trước"
+    if days == 1:
+        return "Hôm qua"
+    if days < 30:
+        return f"{days} ngày trước"
+    months = int(days // 30)
+    return f"{months} tháng trước"
+
+
+def evaluate_channel_activity(meta: dict, now_utc: Optional[float] = None, threshold_hours: float = 48.0) -> dict:
+    """
+    Đánh giá độ tích cực ra video của một kênh dựa trên dữ liệu quan sát.
+    - Phân loại: "IN_THRESHOLD" (bình thường), "EXCEEDED_THRESHOLD" (quá hạn), "NO_DATA" (chưa có mốc thời gian).
+    - Ngưỡng threshold_hours mặc định 48.0 giờ.
+    - Nhận biết kênh mới thêm (0 <= now_utc - added_epoch < threshold_seconds) để tránh cảnh báo nhầm.
+    """
+    if now_utc is None:
+        now_utc = time.time()
+
+    try:
+        threshold_hours_val = float(threshold_hours)
+        if not math.isfinite(threshold_hours_val) or threshold_hours_val <= 0:
+            threshold_hours_val = 48.0
+    except (ValueError, TypeError):
+        threshold_hours_val = 48.0
+
+    threshold_seconds = threshold_hours_val * 3600.0
+
+    # Kiểm tra tính hợp lệ của timestamp observation (loại trừ bool, NaN, inf)
+    obs_pub = meta.get("latest_observed_pub_utc")
+    is_valid_obs = (
+        obs_pub is not None
+        and not isinstance(obs_pub, bool)
+        and isinstance(obs_pub, (int, float))
+        and math.isfinite(obs_pub)
+        and obs_pub > 0
+        and obs_pub <= (now_utc + 3600.0)
+    )
+
+    # Kiểm tra tính hợp lệ của timestamp watermark (loại trừ bool, NaN, inf)
+    wm_pub = meta.get("last_pub_utc")
+    is_valid_wm = (
+        wm_pub is not None
+        and not isinstance(wm_pub, bool)
+        and isinstance(wm_pub, (int, float))
+        and math.isfinite(wm_pub)
+        and wm_pub > 0
+        and wm_pub <= (now_utc + 3600.0)
+    )
+
+    if is_valid_obs:
+        pub_utc = float(obs_pub)
+        data_source = "API_OBSERVATION"
+        vid = meta.get("latest_observed_video_id") or ""
+        vtitle = meta.get("latest_observed_video_title") or ""
+    elif is_valid_wm:
+        pub_utc = float(wm_pub)
+        data_source = "MONITOR_WATERMARK"
+        vid = meta.get("last_known_video_id") or ""
+        vtitle = meta.get("latest_observed_video_title") or ""
+    else:
+        pub_utc = None
+        data_source = "NONE"
+        vid = meta.get("latest_observed_video_id") or meta.get("last_known_video_id") or ""
+        vtitle = meta.get("latest_observed_video_title") or ""
+
+    if pub_utc is None:
+        category = "NO_DATA"
+        age_seconds = None
+        age_display = "Chưa có dữ liệu"
+    else:
+        age_seconds = max(0.0, now_utc - pub_utc)
+        time_str = format_time_ago(age_seconds)
+        if age_seconds > threshold_seconds:
+            category = "EXCEEDED_THRESHOLD"
+            age_display = f"{time_str} (⚠ Quá {threshold_hours_val:g}h)"
+        else:
+            category = "IN_THRESHOLD"
+            age_display = time_str
+
+    # Kiểm tra thời gian thêm kênh: 0 <= age < threshold_seconds (chặn ngày tương lai)
+    added_at_iso = str(meta.get("added_at") or "").strip()
+    added_epoch = iso_to_epoch(added_at_iso) if added_at_iso else None
+    is_recently_added = False
+    if added_epoch is not None and not isinstance(added_epoch, bool) and math.isfinite(added_epoch):
+        added_age = now_utc - added_epoch
+        if 0.0 <= added_age < threshold_seconds:
+            is_recently_added = True
+
+    return {
+        "channel_id": meta.get("channel_id") or "",
+        "title": meta.get("title") or meta.get("channel_id") or "",
+        "profile_name": meta.get("profile_name") or "",
+        "active": bool(meta.get("active", True)),
+        "added_at": added_at_iso,
+        "is_recently_added": is_recently_added,
+        "latest_video_id": vid,
+        "latest_video_title": vtitle,
+        "latest_pub_utc": pub_utc,
+        "age_seconds": age_seconds,
+        "age_display": age_display,
+        "category": category,
+        "data_source": data_source,
+        "audit_status": meta.get("last_api_audit_status") or "CACHED",
+        "audit_error": meta.get("last_api_audit_error") or "",
+        "last_api_audit_at": meta.get("last_api_audit_at"),
+        "last_api_audit_success_at": meta.get("last_api_audit_success_at"),
+    }
+
+
+
+def audit_channels_activity_data_api(
+    channels_list=None,
+    progress_callback=None,
+    cancellation_event=None,
+    max_workers=4,
+    run_id=None,
+):
+    """
+    Quét kiểm tra hàng loạt video mới nhất của toàn bộ kênh qua YouTube Data API v3.
+    - Chạy song song có giới hạn bằng ThreadPoolExecutor (mặc định 4 workers)
+    - Tận dụng thread-isolated clients từ key_manager chống 10054
+    - Tự động xoay key khi gặp lỗi Quota
+    - Báo cáo tiến độ qua progress_callback(completed, total, result_item, run_id)
+    - Hỗ trợ hủy an toàn qua cancellation_event (ngắt O(1) không treo executor)
+    - Cập nhật an toàn vào ChannelsStore mà không thay đổi watermark của bot
+    - Cô lập lỗi hoàn toàn ở cấp độ từng kênh, chống input/output dị dạng
+    """
+    import copy
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if channels_list is None:
+        channels_list = get_channels()
+
+    if not isinstance(channels_list, (list, tuple)):
+        try:
+            channels_list = list(channels_list)
+        except Exception:
+            channels_list = []
+
+    # Snapshot và chuẩn hóa danh sách kênh đầu vào để tránh mutation từ bên ngoài
+    normalized_channels = []
+    for item in channels_list:
+        if isinstance(item, dict):
+            cid = str(item.get("channel_id") or "").strip()
+            pid = str(item.get("uploads_playlist_id") or "").strip()
+        else:
+            cid = str(item or "").strip()
+            pid = ""
+        if cid:
+            normalized_channels.append({"channel_id": cid, "uploads_playlist_id": pid})
+
+    active_run_id = str(run_id or uuid.uuid4().hex)
+    total = len(normalized_channels)
+    results = []
+    completed_count = 0
+    ok_count = 0
+    empty_count = 0
+    error_count = 0
+    is_cancelled = False
+
+    if total == 0:
+        return {
+            "run_id": active_run_id,
+            "total": 0,
+            "completed": 0,
+            "ok": 0,
+            "empty": 0,
+            "error": 0,
+            "cancelled": False,
+            "results": [],
+        }
+
+    audit_time = time.time()
+    try:
+        w_val = int(max_workers)
+    except (TypeError, ValueError):
+        w_val = 4
+    workers = max(1, min(w_val, 16, total))
+
+    def _worker_task(ch_item):
+        if cancellation_event and cancellation_event.is_set():
+            return None
+        cid = ch_item["channel_id"]
+        pid = ch_item["uploads_playlist_id"] or None
+        res = fetch_channel_latest_video_api(cid, uploads_playlist_id=pid)
+        if cancellation_event and cancellation_event.is_set():
+            return None
+        return res
+
+    executor = ThreadPoolExecutor(max_workers=workers)
+    future_to_ch = {}
+    cancelled_handled = False
+
+    try:
+        for item in normalized_channels:
+            if cancellation_event and cancellation_event.is_set():
+                is_cancelled = True
+                break
+            f = executor.submit(_worker_task, item)
+            future_to_ch[f] = item
+
+        for future in as_completed(future_to_ch):
+            if cancellation_event and cancellation_event.is_set():
+                is_cancelled = True
+                if not cancelled_handled:
+                    cancelled_handled = True
+                    for remaining_f in future_to_ch:
+                        remaining_f.cancel()
+                continue
+
+            orig_ch = future_to_ch[future]
+            target_cid = orig_ch["channel_id"]
+            expected_pid = orig_ch["uploads_playlist_id"]
+
+            try:
+                raw_res = future.result()
+            except Exception as e:
+                raw_res = {
+                    "channel_id": target_cid,
+                    "uploads_playlist_id": expected_pid,
+                    "status": "ERROR",
+                    "video_id": "",
+                    "video_title": "",
+                    "published_iso": "",
+                    "published_utc": None,
+                    "error": str(e),
+                }
+
+            if not raw_res:
+                continue
+
+            # Defensive normalization: Enforce target_cid as immutable source of truth
+            if not isinstance(raw_res, dict):
+                res = {
+                    "channel_id": target_cid,
+                    "uploads_playlist_id": expected_pid,
+                    "status": "ERROR",
+                    "video_id": "",
+                    "video_title": "",
+                    "published_iso": "",
+                    "published_utc": None,
+                    "error": f"Dữ liệu worker trả về không hợp lệ: {type(raw_res).__name__}",
+                }
+            else:
+                res = dict(raw_res)
+                res["channel_id"] = target_cid
+                if not res.get("uploads_playlist_id") and expected_pid:
+                    res["uploads_playlist_id"] = expected_pid
+
+            st = str(res.get("status") or "ERROR").strip().upper()
+            if st not in ("OK", "EMPTY", "ERROR"):
+                st = "ERROR"
+                res["error"] = res.get("error") or f"Trạng thái không xác định: {st}"
+            res["status"] = st
+            res["run_id"] = active_run_id
+            res["last_api_audit_at"] = audit_time
+            completed_count += 1
+
+            # Per-channel error isolation: store update + evaluation + callback
+            try:
+                prior_meta = channels_store.get_meta(target_cid) or {}
+                prior_success_at = prior_meta.get("last_api_audit_success_at")
+
+                if st in ("OK", "EMPTY"):
+                    res["last_api_audit_success_at"] = audit_time
+                else:
+                    res["last_api_audit_success_at"] = prior_success_at
+
+                if st == "OK":
+                    channels_store.update_observed_audit(
+                        target_cid,
+                        video_id=res.get("video_id", ""),
+                        video_title=res.get("video_title", ""),
+                        pub_utc=res.get("published_utc"),
+                        status="OK",
+                        error="",
+                        audit_time=audit_time,
+                    )
+                    ok_count += 1
+                elif st == "EMPTY":
+                    channels_store.update_observed_audit(
+                        target_cid,
+                        status="EMPTY",
+                        error=res.get("error", ""),
+                        audit_time=audit_time,
+                    )
+                    empty_count += 1
+                else:
+                    channels_store.update_observed_audit(
+                        target_cid,
+                        status="ERROR",
+                        error=res.get("error", "Lỗi không xác định"),
+                        audit_time=audit_time,
+                    )
+                    error_count += 1
+
+                channel_meta = channels_store.get_meta(target_cid) or {}
+                eval_dict = evaluate_channel_activity(dict(channel_meta, channel_id=target_cid), now_utc=audit_time)
+                res["evaluation"] = eval_dict
+            except Exception as proc_err:
+                log(f"[Audit] Lỗi xử lý kết quả cho kênh {target_cid}: {proc_err}")
+                error_count += 1
+                res["status"] = "ERROR"
+                res["error"] = f"Lỗi xử lý nội bộ: {proc_err}"
+                prior_success_fallback = prior_meta.get("last_api_audit_success_at") if "prior_meta" in locals() else None
+                res["last_api_audit_success_at"] = prior_success_fallback
+                res["evaluation"] = {
+                    "channel_id": target_cid,
+                    "title": target_cid,
+                    "profile_name": "",
+                    "active": True,
+                    "added_at": "",
+                    "is_recently_added": False,
+                    "latest_video_id": "",
+                    "latest_video_title": "",
+                    "latest_pub_utc": None,
+                    "age_seconds": None,
+                    "age_display": "Lỗi nội bộ",
+                    "category": "NO_DATA",
+                    "data_source": "NONE",
+                    "audit_status": "ERROR",
+                    "audit_error": str(proc_err),
+                    "last_api_audit_at": audit_time,
+                    "last_api_audit_success_at": prior_success_fallback,
+                }
+
+            results.append(res)
+
+            if progress_callback and callable(progress_callback):
+                try:
+                    cb_snapshot = copy.deepcopy(res)
+                    try:
+                        progress_callback(completed_count, total, cb_snapshot, active_run_id)
+                    except TypeError:
+                        progress_callback(completed_count, total, cb_snapshot)
+                except Exception as cb_err:
+                    log(f"[Audit] Progress callback lỗi: {cb_err}")
+
+    finally:
+        if is_cancelled:
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                executor.shutdown(wait=False)
+        else:
+            executor.shutdown(wait=True)
+
+    try:
+        channels_store.save_now()
+    except Exception as save_err:
+        log(f"[Audit] Lỗi lưu channels_store sau batch audit: {save_err}")
+
+    log(f"[Audit] Hoàn tất quét Data API {total} kênh: {ok_count} OK, {empty_count} Empty, {error_count} Lỗi (Cancelled: {is_cancelled})")
+
+    return {
+        "run_id": active_run_id,
+        "total": total,
+        "completed": completed_count,
+        "ok": ok_count,
+        "empty": empty_count,
+        "error": error_count,
+        "cancelled": is_cancelled,
+        "results": results,
     }

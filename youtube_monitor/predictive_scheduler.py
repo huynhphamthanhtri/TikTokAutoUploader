@@ -17,6 +17,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from .key_manager import ApiKeyManager
 from .polling_settings import normalize_settings
@@ -71,6 +73,11 @@ class PredictiveScheduler:
         self._lock = threading.RLock()
         self._last_safety_net_at: float = 0.0
         self._learner = ScheduleLearner(DEFAULT_TIMEZONE)
+        self._rss_session = requests.Session()
+        retries = Retry(total=2, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504], raise_on_status=False)
+        adapter = HTTPAdapter(max_retries=retries, pool_connections=5, pool_maxsize=10)
+        self._rss_session.mount("https://", adapter)
+        self._rss_session.mount("http://", adapter)
 
     def settings(self):
         raw = self.settings_provider() if self.settings_provider else {"poll_interval_seconds": self.micro_poll_interval}
@@ -221,18 +228,18 @@ class PredictiveScheduler:
         detected_count = 0
         now_iso = self.clock().isoformat()
 
-        key = self.key_manager.get_active_key()
-        if not key:
-            logger.warning("[Scheduler] Không có API Key khả dụng để poll")
-            return 0
-
         try:
-            yt = self.key_manager.get_youtube_client(key)
-            resp = yt.playlistItems().list(
-                part="snippet,contentDetails",
-                playlistId=uploads_id,
-                maxResults=max_results,
-            ).execute()
+            def _call_pred(yt):
+                return yt.playlistItems().list(
+                    part="snippet,contentDetails",
+                    playlistId=uploads_id,
+                    maxResults=max_results,
+                ).execute()
+
+            resp = self.key_manager.execute_with_pool(
+                _call_pred,
+                action_desc=f"predictive_poll {channel_id}",
+            )
 
             items = resp.get("items", [])
             # Process oldest first
@@ -250,8 +257,7 @@ class PredictiveScheduler:
                         logger.info(f"[{source}] Phát hiện video mới {vid} kênh {channel_id}")
 
         except Exception as e:
-            err_type = self.key_manager.handle_api_error(key, e)
-            logger.warning(f"[{source}] Lỗi poll API kênh {channel_id} (key ...{key[-4:]}): {err_type} - {e}")
+            logger.warning(f"[{source}] Lỗi poll API kênh {channel_id}: {e}")
 
         return detected_count
 
@@ -272,7 +278,7 @@ class PredictiveScheduler:
 
             # 1. Thử cào RSS nhẹ nhàng (0 quota)
             try:
-                r = requests.get(rss_url, headers={"User-Agent": RSS_USER_AGENT}, timeout=8)
+                r = self._rss_session.get(rss_url, headers={"User-Agent": RSS_USER_AGENT, "Connection": "keep-alive"}, timeout=8)
                 if r.status_code == 200:
                     rss_ok = True
                     # Bóc tách đơn giản regex videoId và published

@@ -202,8 +202,14 @@ def load_configs_file(config_path):
 
 def normalize_loaded_config(raw_configs):
     if 'profiles' in raw_configs and 'projects' in raw_configs:
-        return raw_configs['profiles'], raw_configs['projects']
-    return raw_configs, {'Mặc định': list(raw_configs.keys())}
+        clean_profiles = {k.strip().lstrip('\ufeff'): v for k, v in raw_configs['profiles'].items()}
+        clean_projects = {
+            pk: [p.strip().lstrip('\ufeff') for p in p_list] if isinstance(p_list, list) else p_list
+            for pk, p_list in raw_configs['projects'].items()
+        }
+        return clean_profiles, clean_projects
+    clean_raw = {k.strip().lstrip('\ufeff'): v for k, v in raw_configs.items()}
+    return clean_raw, {'Mặc định': list(clean_raw.keys())}
 
 
 def build_runtime_profiles(loaded_profiles):
