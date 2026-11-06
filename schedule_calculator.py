@@ -161,9 +161,30 @@ def scan_video_files(source: Sequence[str | Path] | str | Path) -> List[Path]:
 
 
 def sanitize_filename_to_title(filename_or_stem: str) -> str:
-    """Chuyển đổi tên file thành tiêu đề sạch, loại bỏ dấu gạch dưới và khoảng trắng thừa."""
+    """Chuyển đổi tên file thành tiêu đề sạch, loại bỏ dấu gạch dưới và khoảng trắng thừa.
+    
+    DEC-09:
+    - Bảo toàn nguyên vẹn dấu gạch dưới '_' bên trong các thẻ hashtag (ví dụ: #this_or_that, #food_tiktok_uk).
+    - Thay thế dấu gạch dưới và gạch ngang ở các phần tiêu đề chữ thông thường bằng khoảng trắng.
+    """
     stem = Path(filename_or_stem).stem
-    clean = stem.replace("_", " ").replace("-", " ")
+
+    # Nhận diện hashtag (hỗ trợ cả tiếng Việt unicode)
+    tag_pattern = re.compile(r"#[\w\u00C0-\u1EF9]+", re.UNICODE)
+    tags: List[str] = []
+
+    def _stash_tag(match: re.Match) -> str:
+        raw_tag = match.group(0).rstrip("_")
+        tags.append(raw_tag)
+        return f" @@TAG{len(tags) - 1}TAG@@ "
+
+    stashed = tag_pattern.sub(_stash_tag, stem)
+    clean = stashed.replace("_", " ").replace("-", " ")
+    clean = re.sub(r"\s+", " ", clean).strip()
+
+    for idx, tag_val in enumerate(tags):
+        clean = clean.replace(f"@@TAG{idx}TAG@@", tag_val)
+
     clean = re.sub(r"\s+", " ", clean).strip()
     return clean or stem
 
@@ -202,6 +223,9 @@ def parse_naming_formula(
         result = re.sub(re.escape(token), val, result, flags=re.IGNORECASE)
 
     result = re.sub(r"[ \t]+", " ", result).strip()
+    # DEC-09: Guard giới hạn độ dài 2,200 ký tự theo chuẩn TikTok Studio
+    if len(result) > 2200:
+        result = result[:2200].rstrip()
     return result or clean_stem
 
 
@@ -220,6 +244,37 @@ def generate_title_preview(
         account_name=account_name,
         schedule_dt=datetime.datetime.now(),
     )
+
+
+def detect_title_stutter(formula: str, sample_stem_or_filename: str = "") -> bool:
+    """Phát hiện nguy cơ lặp đúp tiêu đề khi công thức chứa {filename} và phần văn bản
+    kế tiếp lặp lại đúng tên video/stem trên ranh giới từ."""
+    if not formula or not sample_stem_or_filename:
+        return False
+    clean_stem = sanitize_filename_to_title(str(sample_stem_or_filename)).strip()
+    if not clean_stem:
+        return False
+    pattern = re.compile(
+        r"\{filename\}[\s\-_:]+" + re.escape(clean_stem) + r"(\s|$)",
+        re.IGNORECASE,
+    )
+    return bool(pattern.search(formula))
+
+
+def strip_title_stutter(formula: str, sample_stem_or_filename: str = "") -> str:
+    """Khử phần lặp thừa kế tiếp {filename} khi người dùng bấm nút [⚡ Khử lặp] trên modal."""
+    if not formula or not sample_stem_or_filename:
+        return formula
+    if not detect_title_stutter(formula, sample_stem_or_filename):
+        return formula
+    clean_stem = sanitize_filename_to_title(str(sample_stem_or_filename)).strip()
+    if not clean_stem:
+        return formula
+    pattern = re.compile(
+        r"(\{filename\})[\s\-_:]+" + re.escape(clean_stem) + r"(\s|$)",
+        re.IGNORECASE,
+    )
+    return pattern.sub(r"\1\2", formula)
 
 
 def distribute_videos_round_robin(

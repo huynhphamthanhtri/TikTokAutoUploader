@@ -21,12 +21,14 @@ import customtkinter as ctk
 
 from schedule_calculator import (
     DEFAULT_GOLDEN_HOUR_SLOTS,
+    detect_title_stutter,
     distribute_videos_round_robin,
     generate_schedule_timeline,
     generate_title_preview,
     parse_naming_formula,
     resolve_profile_timezone,
     scan_video_files,
+    strip_title_stutter,
 )
 from schedule_contracts import (
     ConflictSnapshot,
@@ -519,21 +521,49 @@ class BulkScheduleModal(SafeCTkToplevel):
             text_color=UIThemeTokens.TEXT_MUTED,
         ).pack(anchor="w", pady=(0, 4))
 
+        f_row = ctk.CTkFrame(f_inner, fg_color="transparent")
+        f_row.pack(fill="x", pady=(0, 4))
+
         f_entry = ctk.CTkEntry(
-            f_inner,
+            f_row,
             textvariable=self.formula_var,
             height=32,
             font=UIThemeTokens.FONT_BODY,
         )
-        f_entry.pack(fill="x", pady=(0, 4))
+        f_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
-        ctk.CTkLabel(
+        self.btn_strip_stutter = ctk.CTkButton(
+            f_row,
+            text="⚡ Khử Lặp",
+            font=UIThemeTokens.FONT_BUTTON,
+            width=85,
+            height=32,
+            fg_color="#f59e0b",
+            hover_color="#d97706",
+            text_color="#ffffff",
+            command=self._do_strip_stutter,
+        )
+        self.btn_strip_stutter.pack(side="right")
+        self.btn_strip_stutter.pack_forget()
+
+        self.lbl_stutter_warn = ctk.CTkLabel(
+            f_inner,
+            text="⚠️ Cảnh báo: Tiêu đề có thể đang bị lặp lại tên video!",
+            font=UIThemeTokens.FONT_BADGE,
+            text_color="#f59e0b",
+            anchor="w",
+        )
+        self.lbl_stutter_warn.pack(fill="x")
+        self.lbl_stutter_warn.pack_forget()
+
+        self.preview_label = ctk.CTkLabel(
             f_inner,
             textvariable=self.preview_var,
             font=UIThemeTokens.FONT_BADGE,
             text_color=UIThemeTokens.STATUS_RUNNING,
             anchor="w",
-        ).pack(fill="x")
+        )
+        self.preview_label.pack(fill="x")
 
         # 4. Cấu hình Khung Giờ & Tần Suất
         schedule_card = ctk.CTkFrame(
@@ -723,16 +753,46 @@ class BulkScheduleModal(SafeCTkToplevel):
         tree_sb.grid(row=0, column=1, sticky="ns")
         self.preview_tree.configure(yscrollcommand=tree_sb.set)
 
+    def _get_sample_stem(self) -> str:
+        if hasattr(self, "scanned_videos") and self.scanned_videos:
+            return Path(self.scanned_videos[0]).stem
+        return "top_10_clips"
+
+    def has_stutter_warning(self) -> bool:
+        f = self.formula_var.get()
+        return detect_title_stutter(f, self._get_sample_stem())
+
+    def _do_strip_stutter(self):
+        f = self.formula_var.get()
+        cleaned = strip_title_stutter(f, self._get_sample_stem())
+        self.formula_var.set(cleaned)
+
     def _update_preview(self):
         if self._commit_succeeded:
             return
         try:
             f = self.formula_var.get()
+            sample_stem = self._get_sample_stem()
+            has_stutter = detect_title_stutter(f, sample_stem)
+
+            if hasattr(self, "lbl_stutter_warn") and self.lbl_stutter_warn.winfo_exists():
+                if has_stutter:
+                    self.lbl_stutter_warn.pack(fill="x", before=self.preview_label if hasattr(self, "preview_label") and self.preview_label.winfo_exists() else None)
+                else:
+                    self.lbl_stutter_warn.pack_forget()
+
+            if hasattr(self, "btn_strip_stutter") and self.btn_strip_stutter.winfo_exists():
+                if has_stutter:
+                    self.btn_strip_stutter.pack(side="right")
+                else:
+                    self.btn_strip_stutter.pack_forget()
+
             p = self.selected_profiles[0] if self.selected_profiles else "Profile_01"
             acc = ""
             if isinstance(self.profile_configs, dict) and p in self.profile_configs:
                 acc = self.profile_configs[p].get("tiktok_account") or ""
-            sample_title = generate_title_preview(f, sample_filename="top_10_clips.mp4", profile_name=p, account_name=acc)
+            sample_filename = f"{sample_stem}.mp4"
+            sample_title = generate_title_preview(f, sample_filename=sample_filename, profile_name=p, account_name=acc)
             if hasattr(self, "preview_var"):
                 self.preview_var.set(f"🔍 Xem trước tiêu đề: \"{sample_title}\"")
         except Exception:
@@ -1281,6 +1341,75 @@ def make_bulk_schedule_success_callback(
 
 
 
+class TreeviewTooltip:
+    """Tooltip động cho Treeview hiển thị đầy đủ tên video và tiêu đề dài khi rê chuột."""
+    def __init__(self, tree: ttk.Treeview):
+        self.tree = tree
+        self.tip_window: Optional[tk.Toplevel] = None
+        self.last_item: Optional[str] = None
+        self.tree.bind("<Motion>", self._on_motion, add="+")
+        self.tree.bind("<Leave>", self._on_leave, add="+")
+
+    def _on_motion(self, event):
+        try:
+            item_id = self.tree.identify_row(event.y)
+            col = self.tree.identify_column(event.x)
+            # Cột #4 là video_filename, #5 là title
+            if item_id and col in ("#4", "#5"):
+                if item_id == self.last_item and self.tip_window:
+                    return
+                self.last_item = item_id
+                values = self.tree.item(item_id, "values")
+                if values and len(values) >= 5:
+                    v_name = values[3]
+                    t_text = values[4]
+                    tip_content = f"🎥 Video: {v_name}\n📝 Tiêu đề xuất bản:\n{t_text}"
+                    self._show_tip(event.x_root + 15, event.y_root + 10, tip_content)
+            else:
+                self._hide_tip()
+        except Exception:
+            pass
+
+    def _show_tip(self, x: int, y: int, text: str):
+        self._hide_tip()
+        if not text:
+            return
+        try:
+            tw = tk.Toplevel(self.tree)
+            tw.wm_overrideredirect(True)
+            tw.wm_geometry(f"+{x}+{y}")
+            tw.attributes("-topmost", True)
+            label = tk.Label(
+                tw,
+                text=text,
+                justify="left",
+                background="#1e293b",
+                foreground="#f8fafc",
+                relief="solid",
+                borderwidth=1,
+                font=("Segoe UI", 9),
+                padx=8,
+                pady=6,
+                wraplength=500,
+            )
+            label.pack()
+            self.tip_window = tw
+        except Exception:
+            pass
+
+    def _hide_tip(self, event=None):
+        if self.tip_window:
+            try:
+                self.tip_window.destroy()
+            except Exception:
+                pass
+            self.tip_window = None
+        self.last_item = None
+
+    def _on_leave(self, event=None):
+        self._hide_tip()
+
+
 # ==============================================================================
 # 3. AUTO SCHEDULE VIEW (MAIN LEVEL-1 TAB)
 # ==============================================================================
@@ -1302,6 +1431,8 @@ class AutoScheduleView(ctk.CTkFrame):
         self.status_filter_var = ctk.StringVar(value="Tất cả")
         self.profile_filter_var = ctk.StringVar(value="Tất cả")
         self.mode_filter_var = ctk.StringVar(value="Tất cả chế độ")
+        self.date_filter_var = ctk.StringVar(value="Tất cả thời gian")
+        self.scope_filter_var = ctk.StringVar(value="Tất cả")
 
         # Metric vars
         self.stat_pending_var = ctk.StringVar(value="0")
@@ -1400,11 +1531,35 @@ class AutoScheduleView(ctk.CTkFrame):
             f_inner,
             values=["Tất cả"],
             variable=self.profile_filter_var,
-            width=120,
+            width=115,
             height=30,
             command=lambda _: self._refresh_data(keep_page=False),
         )
         self.cb_profile.pack(side="left", padx=(0, 10))
+
+        # Date filter
+        ctk.CTkLabel(f_inner, text="Thời gian:", font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_MUTED).pack(side="left", padx=(0, 4))
+        self.cb_date = ctk.CTkComboBox(
+            f_inner,
+            values=["Tất cả thời gian", "Hôm nay", "Ngày mai", "7 ngày tới", "Quá hạn"],
+            variable=self.date_filter_var,
+            width=125,
+            height=30,
+            command=lambda _: self._refresh_data(keep_page=False),
+        )
+        self.cb_date.pack(side="left", padx=(0, 10))
+
+        # Scope filter
+        ctk.CTkLabel(f_inner, text="Phạm vi:", font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_MUTED).pack(side="left", padx=(0, 4))
+        self.cb_scope = ctk.CTkComboBox(
+            f_inner,
+            values=["Tất cả", "Đang hoạt động", "Đã lưu trữ"],
+            variable=self.scope_filter_var,
+            width=125,
+            height=30,
+            command=lambda _: self._refresh_data(keep_page=False),
+        )
+        self.cb_scope.pack(side="left", padx=(0, 10))
 
         # Refresh button
         ctk.CTkButton(
@@ -1466,6 +1621,7 @@ class AutoScheduleView(ctk.CTkFrame):
         self.tree.configure(yscrollcommand=vsb.set)
 
         self.tree.bind("<Double-1>", self._on_double_click_row)
+        self.tree_tooltip = TreeviewTooltip(self.tree)
 
         # 3.5. Pagination Control Bar (Phase 4)
         page_bar = ctk.CTkFrame(self, fg_color="transparent")
@@ -1709,7 +1865,18 @@ class AutoScheduleView(ctk.CTkFrame):
             cur_st = (self.status_filter_var.get() if self.status_filter_var else "Tất cả").strip()
         except Exception:
             cur_st = "Tất cả"
-        st_filter = None if cur_st in ("Tất cả", "tất cả", "") else cur_st
+        STATUS_MAP = {
+            "Tất cả": None,
+            "Tất cả trạng thái": None,
+            "⏳ Đang chờ": "PENDING",
+            "☁️ Đã hẹn TikTok": "SERVER_SCHEDULED",
+            "🟢 Đã đăng": "SUCCESS",
+            "❌ Thất bại": "FAILED",
+            "⚪ Đã hủy": "CANCELLED",
+            "⏳ Dời sang mai": "MISSED_RESCHEDULED",
+            "⚡ Đang tải...": "UPLOADING",
+        }
+        st_filter = STATUS_MAP.get(cur_st, cur_st if cur_st not in ("Tất cả", "tất cả", "") else None)
 
         try:
             cur_prof = self.profile_filter_var.get() if self.profile_filter_var else "Tất cả"
@@ -1726,6 +1893,41 @@ class AutoScheduleView(ctk.CTkFrame):
             search_q = self.search_var.get() if self.search_var else ""
         except Exception:
             search_q = ""
+
+        # Date & Scope filters
+        try:
+            raw_date = (self.date_filter_var.get() if hasattr(self, "date_filter_var") and self.date_filter_var else "Tất cả thời gian").strip()
+        except Exception:
+            raw_date = "Tất cả thời gian"
+        DATE_MAP = {
+            "Tất cả thời gian": None,
+            "Tất cả": None,
+            "Hôm nay": "TODAY",
+            "Ngày mai": "TOMORROW",
+            "7 ngày tới": "NEXT_7_DAYS",
+            "Quá hạn": "PAST",
+        }
+        date_filter = DATE_MAP.get(raw_date, None)
+
+        try:
+            raw_scope = (self.scope_filter_var.get() if hasattr(self, "scope_filter_var") and self.scope_filter_var else "Đang hoạt động").strip()
+        except Exception:
+            raw_scope = "Đang hoạt động"
+        SCOPE_MAP = {
+            "Tất cả": None,
+            "Đang hoạt động": "ACTIVE",
+            "Đã lưu trữ": "ARCHIVED",
+        }
+        scope_filter = SCOPE_MAP.get(raw_scope, None)
+
+        project_profiles = None
+        if hasattr(self, "handlers") and isinstance(self.handlers, dict):
+            proj_cb = self.handlers.get("get_project_profiles")
+            if proj_cb and callable(proj_cb):
+                try:
+                    project_profiles = proj_cb()
+                except Exception:
+                    project_profiles = None
 
         # 4. Phân trang & parse phòng thủ an toàn (P2-03)
         try:
@@ -1751,6 +1953,9 @@ class AutoScheduleView(ctk.CTkFrame):
                 filter_profile=prof_filter,
                 filter_mode=mode_filter,
                 search_query=search_q,
+                filter_profiles=project_profiles,
+                filter_date_range=date_filter,
+                view_scope=scope_filter,
             )
         except Exception as ex:
             import logging
@@ -1777,6 +1982,9 @@ class AutoScheduleView(ctk.CTkFrame):
                 search_query=search_q,
                 limit=limit,
                 offset=offset,
+                filter_profiles=project_profiles,
+                filter_date_range=date_filter,
+                view_scope=scope_filter,
             )
         except Exception as ex:
             import logging
@@ -1829,7 +2037,7 @@ class AutoScheduleView(ctk.CTkFrame):
                     values=(
                         time_str,
                         t.get("profile_name", ""),
-                        f"@{t.get('tiktok_account', '')}" if t.get("tiktok_account") else "-",
+                        f"@{t.get('tiktok_account')}" if t.get("tiktok_account") else "Chưa liên kết",
                         t.get("video_filename", ""),
                         t.get("title", ""),
                         mode,

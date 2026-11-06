@@ -3904,6 +3904,8 @@ def add_log_entry(message, tag="INFO", important=False):
             LOG_RING_BUFFER["important"].pop(0)
 
 def update_status(message):
+    import re
+    message = re.sub(r"(\[[^\]]+\])\s*\1", r"\1", str(message or ""))
     tag, important_tag = classify_log_message(message)
     add_log_entry(message, tag=tag or "INFO", important=bool(important_tag))
     try:
@@ -9163,7 +9165,7 @@ def _get_active_schedule_manager() -> ScheduleManager:
         global_schedule_manager = ScheduleManager()
     return global_schedule_manager
 
-def _execute_schedule_task_upload(task: Dict[str, Any]) -> Tuple[bool, str]:
+def _execute_schedule_task_upload(task: Dict[str, Any], force_immediate: bool = False) -> Tuple[bool, str]:
     global global_schedule_manager
     global_schedule_manager = _get_active_schedule_manager();
     """Thực thi tải lên cho 1 tác vụ lên lịch qua Direct API."""
@@ -9182,7 +9184,24 @@ def _execute_schedule_task_upload(task: Dict[str, Any]) -> Tuple[bool, str]:
     exec_mode = task.get("execution_mode", "SERVER_SCHEDULE")
 
     raw_epoch = task.get("scheduled_epoch")
-    sched_epoch = int(raw_epoch) if (exec_mode == "SERVER_SCHEDULE" and raw_epoch and int(raw_epoch) > 0) else None
+    if exec_mode == "SERVER_SCHEDULE" and not force_immediate:
+        try:
+            val_epoch = int(raw_epoch) if raw_epoch is not None else 0
+        except (ValueError, TypeError):
+            val_epoch = 0
+        if val_epoch <= 0:
+            err_msg = "Task SERVER_SCHEDULE có scheduled_epoch không hợp lệ (<= 0). Hủy để tránh tự động đăng ngay lập tức."
+            global_schedule_manager.update_task(task["id"], {
+                "status": "FAILED",
+                "completed_at": datetime.now().isoformat(),
+                "error_message": err_msg,
+            })
+            update_status(f"[AutoSchedule][{p_name}] {err_msg}")
+            logger.error(f"[AutoSchedule] {err_msg}")
+            return False, err_msg
+        sched_epoch = val_epoch
+    else:
+        sched_epoch = None
 
     update_status(f"[AutoSchedule][{p_name}] Bắt đầu tải lên: {Path(v_path).name}")
     try:
@@ -9218,10 +9237,10 @@ def _execute_schedule_task_upload(task: Dict[str, Any]) -> Tuple[bool, str]:
             }
 
             # LƯU TRẠNG THÁI SERVER_SCHEDULED VÀO DATABASE TRƯỚC TIÊN
-            global_schedule_manager.update_task(task["id"], task_updates)
+            update_ok = global_schedule_manager.update_task(task["id"], task_updates)
 
             # TIẾN HÀNH DỌN DẸP FILE NGUỒN SAU KHI SERVER_SCHEDULE ĐÃ ĐƯỢC PERSIST
-            if task.get("delete_source_after_post", True):
+            if update_ok and task.get("delete_source_after_post", True):
                 if global_schedule_manager.is_video_referenced_by_pending_tasks(v_path, exclude_task_id=task.get("id", "")):
                     update_status(f"[AutoSchedule][{p_name}] Bảo lưu video gốc (đang dùng chung cho bài khác): {Path(v_path).name}")
                     logger.info(f"[AutoSchedule] Bảo lưu file nguồn {v_path} vì vẫn còn tác vụ khác tham chiếu.")
@@ -9239,6 +9258,66 @@ def _execute_schedule_task_upload(task: Dict[str, Any]) -> Tuple[bool, str]:
             update_status(f"[AutoSchedule][{p_name}] {action_desc} Link: {res.details.get('video_url', '')}")
             return True, res.message
         else:
+            # DEC-15: Kiểm tra lý do từ chối lên lịch từ TikTok API
+            details = getattr(res, "details", {}) or {}
+            reason = str(details.get("reason") or "")
+            ab_val = str(details.get("ab_value") or "")
+
+            if reason == "schedule_disabled" or ab_val == "0":
+                # Chuyển đổi liền mạch sang hàng đợi máy (LOCAL_QUEUE)
+                fallback_msg = "TikTok chặn lên lịch từ xa (ab_value='0'). Tự động chuyển sang Hàng đợi máy tính (LOCAL_QUEUE) để đăng khi đến giờ."
+                global_schedule_manager.update_task(task["id"], {
+                    "execution_mode": "LOCAL_QUEUE",
+                    "status": "PENDING",
+                    "error_message": fallback_msg,
+                })
+                update_status(f"[AutoSchedule][{p_name}] {fallback_msg}")
+                logger.info(f"[AutoSchedule] Task {task['id']} auto-fallback to LOCAL_QUEUE.")
+                return True, fallback_msg
+
+            # Nếu là lỗi tạm thời và chưa retry: Thử lại 1 lần sau 3s
+            current_retry = int(task.get("retry_count") or 0)
+            if current_retry == 0:
+                update_status(f"[AutoSchedule][{p_name}] Gặp lỗi tạm thời ({res.message}). Đang thử lại lần 2 sau 3 giây...")
+                time.sleep(3)
+                global_schedule_manager.update_task(task["id"], {"retry_count": 1})
+                task["retry_count"] = 1
+                try:
+                    res_retry = run_direct_upload(
+                        profile_name=p_name,
+                        profile_config=prof_cfg,
+                        video_path=v_path,
+                        caption=caption,
+                        status_callback=lambda msg: update_status(f"[AutoSchedule][{p_name}] [Retry] {msg}"),
+                        stop_before_post=os.environ.get('UPLOAD_TEST_STOP_BEFORE_POST') == '1',
+                        workspace_dir=Path(os.path.dirname(os.path.abspath(__file__))),
+                        schedule_time=sched_epoch,
+                    )
+                    if res_retry.outcome == 'posted':
+                        new_status = "SERVER_SCHEDULED" if sched_epoch else "SUCCESS"
+                        item_id = str(res_retry.details.get("item_id") or "")
+                        update_ok_retry = global_schedule_manager.update_task(task["id"], {
+                            "status": new_status,
+                            "completed_at": datetime.now().isoformat(),
+                            "tiktok_item_id": item_id,
+                            "error_message": "",
+                        })
+                        if update_ok_retry and task.get("delete_source_after_post", True):
+                            if not global_schedule_manager.is_video_referenced_by_pending_tasks(v_path, exclude_task_id=task.get("id", "")):
+                                try:
+                                    if os.path.isfile(v_path):
+                                        os.remove(v_path)
+                                        global_schedule_manager.update_task(task["id"], {"source_deleted": True})
+                                except Exception:
+                                    pass
+                        action_desc = "Đã lên lịch thành công trên Server TikTok (sau retry)!" if sched_epoch else "Hoàn tất xuất sắc (sau retry)!"
+                        update_status(f"[AutoSchedule][{p_name}] {action_desc} Link: {res_retry.details.get('video_url', '')}")
+                        return True, res_retry.message
+                    else:
+                        res = res_retry
+                except Exception as retry_ex:
+                    logger.warning(f"[AutoSchedule] Lỗi khi retry task {task['id']}: {retry_ex}")
+
             err_msg = res.message or "Tải lên không thành công"
             global_schedule_manager.update_task(
                 task["id"],
@@ -9433,6 +9512,19 @@ def open_schedule_modal():
         on_success=_on_success,
     )
 
+def _get_active_project_profiles() -> Optional[List[str]]:
+    if 'selected_project_var' not in globals() or not selected_project_var:
+        return None
+    sp = selected_project_var.get()
+    if not sp or sp == ALL_OPTION:
+        return None
+    proj_members = set(projects.get(sp, []))
+    for p_k, p_v in profiles.items():
+        if _profile_project(p_v) == sp:
+            proj_members.add(p_k)
+    return sorted(list(proj_members))
+
+
 def _build_schedule_view(parent_frame):
     global global_schedule_manager
     global_schedule_manager = _get_active_schedule_manager()
@@ -9441,14 +9533,18 @@ def _build_schedule_view(parent_frame):
         "start_queue_handler": _handle_start_schedule_queue,
         "pause_queue_handler": _handle_pause_schedule_queue,
         "on_change_handler": update_profile_list,
+        "get_project_profiles": _get_active_project_profiles,
     }
-    return AutoScheduleView(parent_frame, schedule_manager=global_schedule_manager, handlers=handlers)
+    view = AutoScheduleView(parent_frame, schedule_manager=global_schedule_manager, handlers=handlers)
+    if 'ui_widgets' in globals() and isinstance(ui_widgets, dict):
+        ui_widgets['schedule_view'] = view
+    return view
 
 def _start_schedule_daemon():
     global global_schedule_manager
     global_schedule_manager = _get_active_schedule_manager()
     """Khởi động Background Scheduler Daemon Worker kiểm tra các task đến giờ."""
-    if os.environ.get("CI", "").lower() == "true":
+    if os.environ.get("CI", "").lower() == "true" or "unittest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST"):
         return
 
     def _daemon_loop():
@@ -9760,6 +9856,15 @@ def _on_project_selection_changed(*_args):
     current_page_var.set(1)
     update_profile_list()
 
+def _on_schedule_project_changed(*_):
+    if 'ui_widgets' in globals() and isinstance(ui_widgets, dict) and ui_widgets.get('schedule_view'):
+        try:
+            ui_widgets['schedule_view']._refresh_data(keep_page=False)
+        except Exception:
+            pass
+
+
+selected_project_var.trace('w', _on_schedule_project_changed)
 selected_project_var.trace('w', _on_project_selection_changed)
 filter_var.trace('w', _on_profile_filter_changed)
 selected_project_var.trace('w', _update_monetization_table)
@@ -9804,9 +9909,9 @@ def _tick():
     
     # Quét qua tất cả profile để xem đã qua ngày mới chưa
     for name, prof in profiles.items():
-        if prof['uploads_today_date'] != current_date_str:
+        if isinstance(prof, dict) and prof.get('uploads_today_date') != current_date_str:
             # Phát hiện ngày mới -> Reset
-            prof['uploads_yesterday_count'] = prof['uploads_today_count']
+            prof['uploads_yesterday_count'] = prof.get('uploads_today_count', 0)
             prof['uploads_today_count'] = 0
             prof['uploads_today_date'] = current_date_str
             need_save = True
@@ -9819,8 +9924,9 @@ def _tick():
     
     root.after(1000, _tick)
 
-root.after(1000, _tick)
-root.after(100, _drain_update_ui_queue)
+if "unittest" not in sys.modules and not os.environ.get("PYTEST_CURRENT_TEST"):
+    root.after(1000, _tick)
+    root.after(100, _drain_update_ui_queue)
 
 if __name__ == "__main__":
     root.after(0, require_license_then_boot)

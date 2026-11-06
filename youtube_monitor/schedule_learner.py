@@ -313,3 +313,37 @@ class ScheduleLearner:
                 has_new_window = True
 
         return history, final_windows, has_new_window
+
+    def recluster_and_prune_unlocked(
+        self,
+        latest_published_iso_list: List[str],
+        existing_windows: List[PollingWindow],
+        max_history: int = 50,
+    ) -> Tuple[List[str], List[PollingWindow], Dict[str, Any]]:
+        """Phân tích toàn diện lịch sử video mới nhất, thay thế sạch sẽ các khung giờ
+
+        LEARNED cũ (unlocked) không còn xuất hiện, đồng thời bảo lưu tuyệt đối 100%
+        các khung giờ MANUAL và LOCKED.
+        """
+        history = list(latest_published_iso_list or [])
+        history.sort()
+        if len(history) > max_history:
+            history = history[-max_history:]
+
+        analysis = self.analyze_timestamps(history)
+        new_learned = [PollingWindow.from_dict(w) for w in analysis.get("predicted_windows", [])]
+
+        locked_or_manual = [w for w in existing_windows if w.locked or w.source == "MANUAL"]
+
+        final_windows = list(locked_or_manual)
+        for nlw in new_learned:
+            overlap = False
+            for lw in locked_or_manual:
+                diff = abs(_time_str_to_minutes(nlw.start_time) - _time_str_to_minutes(lw.start_time))
+                if min(diff, 1440 - diff) <= 15:
+                    overlap = True
+                    break
+            if not overlap:
+                final_windows.append(nlw)
+
+        return history, final_windows, analysis

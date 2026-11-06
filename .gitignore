@@ -35,6 +35,7 @@ patchright_diagnostics/
 youtube_monitor_ngrok/
 captured_*
 *.db
+*.lock
 
 # Test artifacts
 test_results*.xml
@@ -74,6 +75,7 @@ service_account.json
 .vscode/
 .idea/
 .agents/
+.agent/
 *.swp
 *.swo
 *~

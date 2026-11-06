@@ -3989,9 +3989,23 @@ def analyze_channel_schedule(channel_id):
             if pub:
                 published_list.append(pub)
 
+        existing_windows = []
+        for mw in (meta.get("manual_windows") or []):
+            if isinstance(mw, dict):
+                existing_windows.append(PollingWindow.from_dict(mw))
+        old_learned = (meta.get("schedule_learned") or {}).get("predicted_windows") or []
+        for pw in old_learned:
+            if isinstance(pw, dict):
+                existing_windows.append(PollingWindow.from_dict(pw))
+
         learner = ScheduleLearner(meta.get("timezone") or DEFAULT_TIMEZONE)
-        res = learner.analyze_timestamps(published_list)
-        res["history"] = published_list
+        history, final_windows, analysis = learner.recluster_and_prune_unlocked(
+            published_list, existing_windows
+        )
+        res = dict(analysis)
+        res["history"] = history
+        res["predicted_windows"] = [w.to_dict() for w in final_windows if w.source == "LEARNED"]
+        res["last_analyzed_at"] = datetime.now(timezone.utc).isoformat()
         channels_store.update_meta(cid, schedule_learned=res, uploads_playlist_id=playlist_id)
         channels_store.save_now()
         log(f"[Learner] Đã phân tích lịch {cid}: {len(res.get('predicted_windows', []))} khung giờ dự đoán (tin cậy: {res.get('confidence_score')})")

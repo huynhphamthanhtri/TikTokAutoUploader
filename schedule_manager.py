@@ -534,40 +534,49 @@ class ScheduleManager:
 
         return created_tasks
 
-    def get_all_tasks(
+    def _build_task_filter_clause(
         self,
         filter_status: Optional[str] = None,
         filter_profile: Optional[str] = None,
         filter_mode: Optional[str] = None,
         search_query: Optional[str] = None,
-        limit: Optional[int] = None,
-        offset: int = 0,
-    ) -> List[Dict[str, Any]]:
-        """Lấy danh sách task kèm các bộ lọc tùy chọn và phân trang từ SQLite.
+        filter_profiles: Optional[Sequence[str]] = None,
+        filter_date_range: Optional[str] = None,
+        view_scope: Optional[str] = None,
+        reference_dt: Optional[datetime.datetime] = None,
+    ) -> Tuple[str, List[Any], bool]:
+        """Tạo mệnh đề WHERE và danh sách tham số bind chuẩn hóa dùng chung cho get_all_tasks và count_tasks.
 
-        Cơ chế phân trang & Stable Ordering:
-        Sử dụng ORDER BY scheduled_time ASC, id ASC đảm bảo tính deterministic tuyệt đối
-        cho bất kỳ tập dữ liệu ổn định nào (không có hiện tượng task hoán đổi vị trí do trùng scheduled_time).
-        Lưu ý: Đối với offset-based pagination trong môi trường concurrent, khi có thao tác thêm/xóa
-        bản ghi đồng thời giữa các lần lật trang, offset có thể dịch chuyển theo nguyên lý ACID SQLite;
-        hệ thống giao diện tự động đồng bộ lại total_count và clamp trang hiện tại sau mỗi thao tác.
+        Trả về: (where_clause, params, is_empty)
+        Nếu is_empty là True (ví dụ: filter_profiles = []), câu truy vấn không cần chạy tiếp mà trả về 0/[] ngay.
         """
         conditions: List[str] = []
         params: List[Any] = []
 
-        raw_status = (filter_status or "").strip()
-        raw_mode = (filter_mode or "").strip()
-        q = (search_query or "").strip()
+        # 1. Profile filter (Ưu tiên filter_profiles đa profile của Project)
+        if filter_profiles is not None:
+            # Phòng vệ: Nếu caller truyền nhầm 1 string thay vì Sequence, chuyển thành list 1 phần tử
+            if isinstance(filter_profiles, (str, bytes)):
+                filter_profiles = [filter_profiles]
+            valid_profs = [str(p).strip() for p in filter_profiles if p and str(p).strip()]
+            if not valid_profs:
+                # Dự án chưa có profile nào -> Luôn trả về rỗng
+                return "WHERE 1=0", [], True
+            placeholders = ", ".join(["?"] * len(valid_profs))
+            conditions.append(f"profile_name IN ({placeholders})")
+            params.extend(valid_profs)
+        elif filter_profile is not None and filter_profile != "" and filter_profile != "Tất cả":
+            conditions.append("profile_name = ?")
+            params.append(filter_profile)
 
+        # 2. Status filter
+        raw_status = (filter_status or "").strip()
         if raw_status and raw_status.casefold() not in {"", "all", "tất cả", "tat ca", "tất cả trạng thái"}:
             conditions.append("UPPER(status) = ?")
             params.append(raw_status.upper())
 
-        # Khớp chính xác profile_name (bảo toàn nguyên vẹn mọi tên profile hợp lệ kể cả 'all' hoặc 'tat ca')
-        if filter_profile is not None and filter_profile != "" and filter_profile != "Tất cả":
-            conditions.append("profile_name = ?")
-            params.append(filter_profile)
-
+        # 3. Execution mode filter
+        raw_mode = (filter_mode or "").strip()
         if raw_mode and raw_mode.casefold() not in {"", "all", "tất cả", "tat ca", "tất cả chế độ"}:
             up_mode = raw_mode.upper()
             if "TIKTOK" in up_mode or "SERVER" in up_mode:
@@ -578,6 +587,8 @@ class ScheduleManager:
                 conditions.append("UPPER(execution_mode) = ?")
                 params.append(up_mode)
 
+        # 4. Search query
+        q = (search_query or "").strip()
         if q:
             conditions.append("""(
                 profile_name LIKE ? OR
@@ -589,7 +600,76 @@ class ScheduleManager:
             like_q = f"%{q}%"
             params.extend([like_q, like_q, like_q, like_q, like_q])
 
+        ref_now = reference_dt or datetime.datetime.now()
+        today_start = ref_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_iso = today_start.isoformat()
+        tomorrow_start = today_start + datetime.timedelta(days=1)
+        tomorrow_iso = tomorrow_start.isoformat()
+
+        # 5. Date Range Filter
+        raw_dr = (filter_date_range or "").strip().upper()
+        if raw_dr in ("TODAY", "HÔM NAY", "HOM NAY"):
+            conditions.append("scheduled_time >= ? AND scheduled_time < ?")
+            params.extend([today_iso, tomorrow_iso])
+        elif raw_dr in ("TOMORROW", "NGÀY MAI", "NGAY MAI"):
+            day_after_iso = (tomorrow_start + datetime.timedelta(days=1)).isoformat()
+            conditions.append("scheduled_time >= ? AND scheduled_time < ?")
+            params.extend([tomorrow_iso, day_after_iso])
+        elif raw_dr in ("NEXT_7_DAYS", "7 NGÀY TỚI", "7 NGAY TOI"):
+            next_7_iso = (today_start + datetime.timedelta(days=7)).isoformat()
+            conditions.append("scheduled_time >= ? AND scheduled_time < ?")
+            params.extend([today_iso, next_7_iso])
+        elif raw_dr in ("PAST", "QUÁ HẠN", "QUA HAN"):
+            conditions.append("scheduled_time < ?")
+            params.append(today_iso)
+
+        # 6. View Scope Filter (ACTIVE vs ARCHIVED vs ALL)
+        raw_scope = (view_scope or "").strip().upper()
+        if raw_scope == "ACTIVE":
+            # ACTIVE: bài đang chờ xử lý, lỗi cần thử lại, hoặc bài hôm nay/tương lai (loại bỏ CANCELLED)
+            conditions.append("""(
+                status IN ('PENDING', 'QUEUED', 'MISSED_RESCHEDULED', 'UPLOADING', 'FAILED')
+                OR (status IN ('SERVER_SCHEDULED', 'SUCCESS') AND scheduled_time >= ?)
+            )""")
+            params.append(today_iso)
+        elif raw_scope == "ARCHIVED":
+            # ARCHIVED: bài đã hủy, hoặc bài SERVER_SCHEDULED/SUCCESS đã xong trước hôm nay
+            conditions.append("""(
+                status = 'CANCELLED'
+                OR (status IN ('SERVER_SCHEDULED', 'SUCCESS') AND scheduled_time < ?)
+            )""")
+            params.append(today_iso)
+
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        return where_clause, params, False
+
+    def get_all_tasks(
+        self,
+        filter_status: Optional[str] = None,
+        filter_profile: Optional[str] = None,
+        filter_mode: Optional[str] = None,
+        search_query: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        filter_profiles: Optional[Sequence[str]] = None,
+        filter_date_range: Optional[str] = None,
+        view_scope: Optional[str] = None,
+        reference_dt: Optional[datetime.datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        """Lấy danh sách task kèm các bộ lọc tùy chọn và phân trang từ SQLite."""
+        where_clause, params, is_empty = self._build_task_filter_clause(
+            filter_status=filter_status,
+            filter_profile=filter_profile,
+            filter_mode=filter_mode,
+            search_query=search_query,
+            filter_profiles=filter_profiles,
+            filter_date_range=filter_date_range,
+            view_scope=view_scope,
+            reference_dt=reference_dt,
+        )
+        if is_empty:
+            return []
+
         query = f"SELECT * FROM scheduled_tasks {where_clause} ORDER BY scheduled_time ASC, id ASC"
 
         if limit is not None and int(limit) > 0:
@@ -611,46 +691,25 @@ class ScheduleManager:
         filter_profile: Optional[str] = None,
         filter_mode: Optional[str] = None,
         search_query: Optional[str] = None,
+        filter_profiles: Optional[Sequence[str]] = None,
+        filter_date_range: Optional[str] = None,
+        view_scope: Optional[str] = None,
+        reference_dt: Optional[datetime.datetime] = None,
     ) -> int:
         """Đếm tổng số task thỏa mãn các bộ lọc."""
-        conditions: List[str] = []
-        params: List[Any] = []
+        where_clause, params, is_empty = self._build_task_filter_clause(
+            filter_status=filter_status,
+            filter_profile=filter_profile,
+            filter_mode=filter_mode,
+            search_query=search_query,
+            filter_profiles=filter_profiles,
+            filter_date_range=filter_date_range,
+            view_scope=view_scope,
+            reference_dt=reference_dt,
+        )
+        if is_empty:
+            return 0
 
-        raw_status = (filter_status or "").strip()
-        raw_mode = (filter_mode or "").strip()
-        q = (search_query or "").strip()
-
-        if raw_status and raw_status.casefold() not in {"", "all", "tất cả", "tat ca", "tất cả trạng thái"}:
-            conditions.append("UPPER(status) = ?")
-            params.append(raw_status.upper())
-
-        # Khớp chính xác profile_name (bảo toàn nguyên vẹn mọi tên profile hợp lệ kể cả 'all' hoặc 'tat ca')
-        if filter_profile is not None and filter_profile != "" and filter_profile != "Tất cả":
-            conditions.append("profile_name = ?")
-            params.append(filter_profile)
-
-        if raw_mode and raw_mode.casefold() not in {"", "all", "tất cả", "tat ca", "tất cả chế độ"}:
-            up_mode = raw_mode.upper()
-            if "TIKTOK" in up_mode or "SERVER" in up_mode:
-                conditions.append("execution_mode = 'SERVER_SCHEDULE'")
-            elif "MÁY" in up_mode or "LOCAL" in up_mode or "QUEUE" in up_mode:
-                conditions.append("execution_mode = 'LOCAL_QUEUE'")
-            else:
-                conditions.append("UPPER(execution_mode) = ?")
-                params.append(up_mode)
-
-        if q:
-            conditions.append("""(
-                profile_name LIKE ? OR
-                tiktok_account LIKE ? OR
-                video_filename LIKE ? OR
-                title LIKE ? OR
-                id LIKE ?
-            )""")
-            like_q = f"%{q}%"
-            params.extend([like_q, like_q, like_q, like_q, like_q])
-
-        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         query = f"SELECT COUNT(*) FROM scheduled_tasks {where_clause}"
 
         with _FILE_LOCK:
@@ -825,7 +884,8 @@ class ScheduleManager:
             return 0
 
         placeholders = ",".join("?" * len(target_ids))
-        query = f"DELETE FROM scheduled_tasks WHERE id IN ({placeholders})"
+        # DEC-04: Cấm xóa task đang mang trạng thái UPLOADING để chống tạo bài mồ côi
+        query = f"DELETE FROM scheduled_tasks WHERE id IN ({placeholders}) AND status != 'UPLOADING'"
 
         with _FILE_LOCK:
             conn = self._get_connection()
@@ -840,14 +900,28 @@ class ScheduleManager:
             finally:
                 conn.close()
 
-    def clear_finished_tasks(self) -> int:
-        """Dọn dẹp toàn bộ các task đã hoàn thành (SUCCESS) hoặc đã hủy (CANCELLED)."""
+    def clear_finished_tasks(
+        self,
+        clear_past_server: bool = False,
+        reference_dt: Optional[datetime.datetime] = None,
+    ) -> int:
+        """Dọn dẹp toàn bộ các task đã hoàn thành (SUCCESS), đã hủy (CANCELLED),
+        và tùy chọn dọn dẹp các task SERVER_SCHEDULED đã quá hạn mốc 1 giờ."""
         with _FILE_LOCK:
             conn = self._get_connection()
             cleared = 0
             try:
+                ref_now = reference_dt or datetime.datetime.now()
+                cutoff_iso = (ref_now - datetime.timedelta(hours=1)).isoformat()
                 with conn:
-                    cur = conn.execute("DELETE FROM scheduled_tasks WHERE status IN ('SUCCESS', 'CANCELLED')")
+                    if clear_past_server:
+                        cur = conn.execute("""
+                            DELETE FROM scheduled_tasks 
+                            WHERE status IN ('SUCCESS', 'CANCELLED')
+                               OR (status = 'SERVER_SCHEDULED' AND scheduled_time < ?)
+                        """, (cutoff_iso,))
+                    else:
+                        cur = conn.execute("DELETE FROM scheduled_tasks WHERE status IN ('SUCCESS', 'CANCELLED')")
                     cleared = cur.rowcount
                 if cleared > 0:
                     self._sync_legacy_mirror_unlocked(conn)
@@ -862,23 +936,38 @@ class ScheduleManager:
     def claim_task_for_execution(self, task_id: str, worker_id: str, lease_seconds: int = 180) -> bool:
         """Khóa và nhận việc nguyên tử (Atomic Claim) cho một task cụ thể.
         
-        Chỉ nhận việc thành công nếu:
-        1. Task đang ở trạng thái 'PENDING' hoặc 'QUEUED'.
+        Quy tắc nhận việc:
+        1. Task đang ở trạng thái 'PENDING', 'QUEUED', hoặc 'MISSED_RESCHEDULED' (DEC-02).
         2. HOẶC Task đang ở trạng thái 'UPLOADING' nhưng lease_until < now_epoch (worker trước bị crash/treo).
+        3. HOẶC Task đang ở trạng thái 'FAILED' nhưng được yêu cầu chạy thủ công từ 'post_now' hoặc 'manual_retry' (DEC-03).
         
-        Trả về True nếu claim thành công, False nếu task đã bị worker khác nhận.
+        Trả về True nếu claim thành công, False nếu task đã bị worker khác nhận hoặc không đủ điều kiện.
         """
         now = datetime.datetime.now()
         now_str = now.isoformat()
         now_epoch = int(now.timestamp())
         lease_until = now_epoch + lease_seconds
 
+        # DEC-03: Cho phép nhận lại task FAILED nếu người dùng can thiệp thủ công (Đăng ngay / Retry)
+        allow_failed = worker_id in ("post_now", "manual_retry") or str(worker_id).startswith("post_now")
+        valid_statuses = "'PENDING', 'QUEUED', 'MISSED_RESCHEDULED'"
+        if allow_failed:
+            valid_statuses += ", 'FAILED'"
+
+        where_cond = f"""
+            WHERE id = ?
+              AND (
+                  status IN ({valid_statuses})
+                  OR (status = 'UPLOADING' AND lease_until < ?)
+              )
+        """
+
         with _FILE_LOCK:
             conn = self._get_connection()
             success = False
             try:
                 with conn:
-                    cur = conn.execute("""
+                    cur = conn.execute(f"""
                         UPDATE scheduled_tasks
                         SET status = 'UPLOADING',
                             version = version + 1,
@@ -886,11 +975,7 @@ class ScheduleManager:
                             claimed_at = ?,
                             lease_until = ?,
                             updated_at = ?
-                        WHERE id = ?
-                          AND (
-                              status IN ('PENDING', 'QUEUED')
-                              OR (status = 'UPLOADING' AND lease_until < ?)
-                          )
+                        {where_cond}
                     """, (worker_id, now_str, lease_until, now_str, task_id, now_epoch))
 
                     success = cur.rowcount > 0
@@ -912,13 +997,13 @@ class ScheduleManager:
             conn = self._get_connection()
             try:
                 with conn:
-                    # 1. Quét các task LOCAL_QUEUE đã đến hạn
+                    # 1. Quét các task LOCAL_QUEUE đã đến hạn (DEC-02: Bao gồm cả MISSED_RESCHEDULED)
                     rows = conn.execute("""
                         SELECT id FROM scheduled_tasks
                         WHERE execution_mode = 'LOCAL_QUEUE'
                           AND scheduled_epoch <= ?
                           AND (
-                              status IN ('PENDING', 'QUEUED')
+                              status IN ('PENDING', 'QUEUED', 'MISSED_RESCHEDULED')
                               OR (status = 'UPLOADING' AND lease_until < ?)
                           )
                         ORDER BY scheduled_epoch ASC
@@ -941,7 +1026,7 @@ class ScheduleManager:
                               AND execution_mode = 'LOCAL_QUEUE'
                               AND scheduled_epoch <= ?
                               AND (
-                                  status IN ('PENDING', 'QUEUED')
+                                  status IN ('PENDING', 'QUEUED', 'MISSED_RESCHEDULED')
                                   OR (status = 'UPLOADING' AND lease_until < ?)
                               )
                         """, (worker_id, now_str, lease_until, now_str, tid, now_epoch, now_epoch))
@@ -959,20 +1044,37 @@ class ScheduleManager:
         return claimed_tasks
 
     def is_video_referenced_by_pending_tasks(self, video_path: str, exclude_task_id: str = "") -> bool:
-        """Kiểm tra xem file video còn đang được tham chiếu bởi các task chưa hoàn thành khác hay không."""
+        """Kiểm tra xem file video còn đang được tham chiếu bởi các task chưa hoàn thành khác hay không.
+        
+        DEC-06:
+        - So sánh cả đường dẫn thô và đường dẫn chuẩn hóa (canonical_video_path) để chống sai lệch phân cách Windows/Linux.
+        - Bảo vệ file nếu còn các task 'FAILED' có thể retry (retry_count < max_retries) hoặc 'MISSED_RESCHEDULED'.
+        """
         if not video_path:
             return False
 
         norm_path = str(video_path).strip()
+        try:
+            canonical_path = str(Path(norm_path).resolve())
+        except Exception:
+            canonical_path = norm_path
+
         with _FILE_LOCK:
             conn = self._get_connection()
             try:
                 row = conn.execute("""
                     SELECT COUNT(*) as cnt FROM scheduled_tasks
-                    WHERE video_path = ?
-                      AND id != ?
-                      AND status IN ('PENDING', 'QUEUED', 'UPLOADING')
-                """, (norm_path, exclude_task_id)).fetchone()
+                    WHERE id != ?
+                      AND (
+                          video_path = ?
+                          OR canonical_video_path = ?
+                          OR video_path = ?
+                      )
+                      AND (
+                          status IN ('PENDING', 'QUEUED', 'UPLOADING', 'MISSED_RESCHEDULED')
+                          OR (status = 'FAILED' AND retry_count < max_retries)
+                      )
+                """, (exclude_task_id, norm_path, canonical_path, canonical_path)).fetchone()
                 count = row["cnt"] if row else 0
                 return count > 0
             finally:
@@ -993,10 +1095,11 @@ class ScheduleManager:
             conn = self._get_connection()
             try:
                 placeholders = ",".join("?" * len(targets))
+                # DEC-08: Quét cả UPLOADING và MISSED_RESCHEDULED để chống trùng slot giờ vàng
                 query = f"""
                     SELECT * FROM scheduled_tasks
                     WHERE profile_name IN ({placeholders})
-                      AND status IN ('PENDING', 'SERVER_SCHEDULED', 'QUEUED')
+                      AND status IN ('PENDING', 'SERVER_SCHEDULED', 'QUEUED', 'UPLOADING', 'MISSED_RESCHEDULED')
                     ORDER BY scheduled_epoch ASC
                 """
                 rows = conn.execute(query, list(targets)).fetchall()
@@ -1620,24 +1723,51 @@ class ScheduleManager:
                             except Exception:
                                 pass
 
-                        # Bắt đầu tìm slot từ ngày mai
-                        target_day = (now + datetime.timedelta(days=1)).date()
+                        today_date = now.date()
 
-                        for task in missed_list:
-                            # Tìm ngày còn chỗ trống (< max_daily_posts)
-                            while posts_per_date[target_day] >= max_daily_posts:
-                                target_day += datetime.timedelta(days=1)
+                        for task_idx, task in enumerate(missed_list):
+                            if task_idx == 0:
+                                # Video đầu tiên của profile bị lỡ hẹn: ĐĂNG BÙ NGAY LẬP TỨC
+                                new_target_dt = now
+                                new_target_str = new_target_dt.isoformat()
+                                new_target_epoch = now_epoch
+                                err_msg = "Đăng bù ngay khi mở máy do lỡ hẹn tắt máy."
+                                posts_per_date[today_date] += 1
+                            else:
+                                # Video thứ 2 trở đi: Kiểm tra xem hôm nay còn khung giờ vàng nào cách now ít nhất 2 tiếng không
+                                scheduled_for_today = False
+                                if posts_per_date[today_date] < max_daily_posts:
+                                    min_candidate_dt = now + datetime.timedelta(hours=2)
+                                    for slot_h, slot_m in golden_time_slots:
+                                        candidate_dt = datetime.datetime.combine(
+                                            today_date,
+                                            datetime.time(hour=slot_h, minute=slot_m),
+                                        )
+                                        if candidate_dt >= min_candidate_dt:
+                                            new_target_dt = candidate_dt
+                                            new_target_str = new_target_dt.isoformat()
+                                            new_target_epoch = int(new_target_dt.timestamp())
+                                            err_msg = f"Tự động dời sang khung giờ vàng {new_target_dt.strftime('%H:%M')} hôm nay do lỡ hẹn tắt máy."
+                                            posts_per_date[today_date] += 1
+                                            scheduled_for_today = True
+                                            break
 
-                            slot_idx = posts_per_date[target_day] % len(golden_time_slots)
-                            slot_h, slot_m = golden_time_slots[slot_idx]
-                            new_target_dt = datetime.datetime.combine(
-                                target_day,
-                                datetime.time(hour=slot_h, minute=slot_m),
-                            )
+                                if not scheduled_for_today:
+                                    # Bắt đầu tìm slot từ ngày mai trở đi
+                                    target_day = (now + datetime.timedelta(days=1)).date()
+                                    while posts_per_date[target_day] >= max_daily_posts:
+                                        target_day += datetime.timedelta(days=1)
 
-                            new_target_str = new_target_dt.isoformat()
-                            new_target_epoch = int(new_target_dt.timestamp())
-                            err_msg = f"Tự động dời lịch thông minh sang {new_target_dt.strftime('%H:%M %d/%m')} do tắt máy."
+                                    slot_idx = posts_per_date[target_day] % len(golden_time_slots)
+                                    slot_h, slot_m = golden_time_slots[slot_idx]
+                                    new_target_dt = datetime.datetime.combine(
+                                        target_day,
+                                        datetime.time(hour=slot_h, minute=slot_m),
+                                    )
+                                    new_target_str = new_target_dt.isoformat()
+                                    new_target_epoch = int(new_target_dt.timestamp())
+                                    err_msg = f"Tự động dời lịch thông minh sang {new_target_dt.strftime('%H:%M %d/%m')} do tắt máy."
+                                    posts_per_date[target_day] += 1
 
                             conn.execute("""
                                 UPDATE scheduled_tasks
@@ -1657,15 +1787,13 @@ class ScheduleManager:
                             task["updated_at"] = now.isoformat()
                             recovered.append(task)
 
-                            posts_per_date[target_day] += 1
-
                     self._sync_legacy_mirror_unlocked(conn)
             finally:
                 conn.close()
 
         return recovered
 
-    def get_summary_stats(self) -> Dict[str, int]:
+    def get_summary_stats(self, reference_dt: Optional[datetime.datetime] = None) -> Dict[str, int]:
         """Tổng hợp các chỉ số báo cáo thời gian thực cho Dashboard từ SQLite."""
         stats = {
             "pending": 0,
@@ -1675,7 +1803,10 @@ class ScheduleManager:
             "total": 0,
         }
 
-        today_prefix = f"{datetime.date.today().isoformat()}%"
+        ref_now = reference_dt or datetime.datetime.now()
+        today_prefix = f"{ref_now.date().isoformat()}%"
+        today_start_iso = f"{ref_now.date().isoformat()}T00:00:00"
+        now_iso = ref_now.isoformat()
 
         with _FILE_LOCK:
             conn = self._get_connection()
@@ -1705,13 +1836,25 @@ class ScheduleManager:
                 """).fetchone()
                 stats["failed"] = row_failed["cnt"] if row_failed else 0
 
-                # Đã đăng hôm nay
-                row_posted = conn.execute("""
+                # Đã đăng hôm nay:
+                # 1. Các bài SUCCESS có completed_at bắt đầu bằng today (hoặc fallback updated_at nếu completed_at chưa set)
+                # 2. CỘNG VỚI các bài SERVER_SCHEDULED có scheduled_time trong hôm nay và scheduled_time <= now_iso
+                row_posted_local = conn.execute("""
                     SELECT COUNT(*) as cnt FROM scheduled_tasks
                     WHERE status = 'SUCCESS'
-                      AND (completed_at LIKE ? OR updated_at LIKE ?)
+                      AND (completed_at LIKE ? OR (completed_at IS NULL AND updated_at LIKE ?))
                 """, (today_prefix, today_prefix)).fetchone()
-                stats["posted_today"] = row_posted["cnt"] if row_posted else 0
+                cnt_local = row_posted_local["cnt"] if row_posted_local else 0
+
+                row_posted_server = conn.execute("""
+                    SELECT COUNT(*) as cnt FROM scheduled_tasks
+                    WHERE status = 'SERVER_SCHEDULED'
+                      AND scheduled_time >= ?
+                      AND scheduled_time <= ?
+                """, (today_start_iso, now_iso)).fetchone()
+                cnt_server = row_posted_server["cnt"] if row_posted_server else 0
+
+                stats["posted_today"] = cnt_local + cnt_server
 
                 return stats
             finally:

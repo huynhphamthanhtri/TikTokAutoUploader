@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 SAFETY_NET_INTERVAL_SECONDS = 180  # 3 phút quét thưa khi ngoài khung giờ
 MICRO_POLL_INTERVAL_SECONDS = 1.0  # 1 giây/lần khi trong khung giờ dự đoán
+RELEARN_INTERVAL_SECONDS = 3 * 86400  # 3 ngày = 259,200s
+RELEARN_STAGGER_DELAY_SECONDS = 10.0  # Giãn cách 10s giữa các kênh
 RSS_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 
@@ -252,6 +254,7 @@ class PredictiveScheduler:
                     enqueued = self.on_video_detected(channel_id, vid, pub, now_iso, source)
                     if enqueued:
                         detected_count += 1
+                        self._update_channel_learned_schedule(channel_id, pub)
                         if self.record_detection(channel_id, vid, current):
                             break
                         logger.info(f"[{source}] Phát hiện video mới {vid} kênh {channel_id}")
@@ -329,6 +332,105 @@ class PredictiveScheduler:
         if has_new:
             logger.info(f"[Learner] Tự động bổ sung khung giờ mới cho kênh {channel_id}")
 
+    def reanalyze_channel_schedule(self, channel_id: str) -> bool:
+        """Lấy 30 video gần nhất qua API và phân tích lại toàn diện lịch đăng,
+        dọn sạch các khung giờ tự học cũ không còn video, bảo lưu 100% khung giờ
+        MANUAL và LOCKED. Tiêu tốn đúng 1 unit quota API.
+        """
+        meta = self.channels_store.get_meta(channel_id) or {}
+        if not meta.get("active", True):
+            return False
+        uploads_id = meta.get("uploads_playlist_id") or _channel_to_uploads_playlist(channel_id)
+        if not uploads_id:
+            return False
+
+        def _call_relearn(yt):
+            return yt.playlistItems().list(
+                part="snippet",
+                playlistId=uploads_id,
+                maxResults=30,
+            ).execute()
+
+        try:
+            resp = self.key_manager.execute_with_pool(
+                _call_relearn,
+                action_desc=f"periodic_relearn {channel_id}",
+            )
+        except Exception as e:
+            logger.warning(f"[Scheduler] Lỗi tải 30 video để re-learn kênh {channel_id}: {e}")
+            return False
+
+        published_list = []
+        for it in (resp.get("items") or []):
+            pub = it.get("snippet", {}).get("publishedAt")
+            if pub:
+                published_list.append(pub)
+
+        if not published_list:
+            return False
+
+        existing_windows = self.get_channel_active_windows(meta)
+        channel_tz = meta.get("timezone") or DEFAULT_TIMEZONE
+        learner = ScheduleLearner(channel_tz)
+        history, final_windows, analysis = learner.recluster_and_prune_unlocked(
+            published_list, existing_windows
+        )
+
+        learned_payload = dict(analysis)
+        learned_payload["history"] = history
+        learned_payload["predicted_windows"] = [w.to_dict() for w in final_windows if w.source == "LEARNED"]
+        learned_payload["last_analyzed_at"] = self.clock().isoformat()
+
+        self.channels_store.update_meta(channel_id, schedule_learned=learned_payload)
+        logger.info(
+            f"[Learner] Đã tự động tính lại lịch định kỳ cho kênh {channel_id}: "
+            f"{len(learned_payload['predicted_windows'])} khung giờ mới "
+            f"(tin cậy: {learned_payload.get('confidence_score')})"
+        )
+        return True
+
+    def _check_and_run_periodic_relearn(self) -> None:
+        """Kiểm tra và thực hiện tính lại lịch định kỳ 3 ngày cho kênh active."""
+        now_dt = self.clock()
+        for cid, meta in self.channels_store.all_items().items():
+            if self.stop_event.is_set():
+                break
+            if not meta.get("active", True):
+                continue
+
+            # Kiểm tra ưu tiên: nếu có kênh cần micro-poll ngay -> nhường quyền
+            if self.get_active_channels_now(now_dt):
+                break
+
+            learned = meta.get("schedule_learned") or {}
+            last_iso = learned.get("last_analyzed_at")
+            needs_relearn = False
+            if not last_iso:
+                needs_relearn = True
+            else:
+                try:
+                    last_clean = last_iso.replace("Z", "+00:00")
+                    last_dt = datetime.fromisoformat(last_clean)
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                    if (now_dt - last_dt).total_seconds() >= RELEARN_INTERVAL_SECONDS:
+                        needs_relearn = True
+                except Exception:
+                    needs_relearn = True
+
+            if needs_relearn:
+                success = self.reanalyze_channel_schedule(cid)
+                if not success:
+                    # Ghi nhận last_analyzed_at = now_dt để tránh retry dồn dập khi API lỗi
+                    learned["last_analyzed_at"] = now_dt.isoformat()
+                    self.channels_store.update_meta(cid, schedule_learned=learned)
+
+                # Nghỉ giãn cách (stagger delay) có kiểm tra stop_event
+                if self.stop_event.wait(timeout=RELEARN_STAGGER_DELAY_SECONDS):
+                    break
+                # Chỉ xử lý 1 kênh mỗi lượt để không làm chậm vòng lặp chính
+                break
+
     def run_loop(self) -> None:
         """Vòng lặp chính của scheduler."""
         logger.info("[Scheduler] Predictive Scheduler started with configurable polling")
@@ -350,6 +452,9 @@ class PredictiveScheduler:
                 # GIAI ĐOẠN 2: Ngoài cửa sổ dự đoán -> Safety Net
                 if now - self._last_safety_net_at >= self.safety_net_interval:
                     self.run_safety_net_check()
+
+                # GIAI ĐOẠN 3: Kiểm tra định kỳ 3 ngày tự động tính lại lịch
+                self._check_and_run_periodic_relearn()
 
                 # Ngủ ngắn 5 giây để kiểm tra xem đã đến giờ mở cửa sổ dự đoán tiếp theo chưa
                 self._wake_event.wait(timeout=5.0)
