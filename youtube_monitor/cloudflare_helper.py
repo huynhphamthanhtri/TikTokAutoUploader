@@ -80,22 +80,38 @@ def check_cloudflared() -> tuple[bool, str, Optional[str]]:
     return False, "Chưa cài đặt cloudflared.exe", None
 
 
-def ensure_cloudflared(status_callback: Optional[Callable[[str], None]] = None) -> Optional[Path]:
+def ensure_cloudflared(
+    status_callback: Optional[Callable[[str], None]] = None,
+    progress_callback: Optional[Callable[[str, float], None]] = None,
+) -> Optional[Path]:
     """Đảm bảo cloudflared.exe sẵn sàng. Nếu chưa có, tự động tải ngầm về bin/cloudflared.exe."""
+    def _emit(msg: str, pct: float = 0.0) -> None:
+        if status_callback:
+            try:
+                status_callback(msg)
+            except Exception:
+                pass
+        if progress_callback:
+            try:
+                progress_callback(msg, max(0.0, min(1.0, float(pct))))
+            except Exception:
+                pass
+
     existing = find_cloudflared()
     if existing:
+        _emit("Đã sẵn sàng cloudflared.exe.", 1.0)
         return existing
 
     with _install_lock:
         existing = find_cloudflared()
         if existing:
+            _emit("Đã sẵn sàng cloudflared.exe.", 1.0)
             return existing
 
         target = get_default_bin_path()
         target.parent.mkdir(parents=True, exist_ok=True)
 
-        if status_callback:
-            status_callback("[Cloudflare] Đang tải binary cloudflared.exe lần đầu từ Cloudflare...")
+        _emit("[Cloudflare] Đang tải binary cloudflared.exe lần đầu từ Cloudflare...", 0.05)
 
         urls_to_try = [CLOUDFLARE_PINNED_URL, CLOUDFLARE_LATEST_URL]
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) VibeAutoUpload/2.0"}
@@ -115,9 +131,13 @@ def ensure_cloudflared(status_callback: Optional[Callable[[str], None]] = None) 
                                 continue
                             tmp_file.write(chunk)
                             downloaded += len(chunk)
-                            if status_callback and total_bytes > 0:
-                                pct = int((downloaded / total_bytes) * 100)
-                                status_callback(f"[Cloudflare] Đang tải cloudflared.exe: {pct}% ({downloaded // (1024*1024)}MB/{total_bytes // (1024*1024)}MB)")
+                            if total_bytes > 0:
+                                pct_float = downloaded / total_bytes
+                                pct_int = int(pct_float * 100)
+                                _emit(
+                                    f"[Cloudflare] Đang tải cloudflared.exe: {pct_int}% ({downloaded // (1024*1024)}MB/{total_bytes // (1024*1024)}MB)",
+                                    pct_float,
+                                )
 
                 if not is_valid_executable(tmp_path):
                     raise ValueError(f"File tải về không hợp lệ (size={tmp_path.stat().st_size} bytes)")
@@ -125,13 +145,11 @@ def ensure_cloudflared(status_callback: Optional[Callable[[str], None]] = None) 
                 os.replace(tmp_path, target)
                 tmp_path = None
 
-                if status_callback:
-                    status_callback(f"[Cloudflare] Đã cài đặt cloudflared.exe thành công ({target.stat().st_size // (1024*1024)}MB).")
+                _emit(f"[Cloudflare] Đã cài đặt cloudflared.exe thành công ({target.stat().st_size // (1024*1024)}MB).", 1.0)
 
                 return target
             except Exception as e:
-                if status_callback:
-                    status_callback(f"[Cloudflare] Lỗi tải từ {url}: {e}. Thử mirror tiếp theo...")
+                _emit(f"[Cloudflare] Lỗi tải từ {url}: {e}. Thử mirror tiếp theo...", 0.05)
             finally:
                 if tmp_path and tmp_path.exists():
                     try:

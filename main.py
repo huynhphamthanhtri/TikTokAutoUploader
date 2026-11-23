@@ -4486,9 +4486,9 @@ def _first_run_download_check():
                 _update_status("Đang tải cloudflared.exe...", (i - 0.9) / total)
                 def _ng_progress(text, pct):
                     _update_status(text, (i - 1 + pct) / total)
-                cf_ok, cf_msg = ch.ensure_cloudflared(progress_callback=_ng_progress)
-                if not cf_ok:
-                    raise RuntimeError(f"Cloudflare: {cf_msg}")
+                cf_path = ch.ensure_cloudflared(progress_callback=_ng_progress)
+                if not cf_path or not Path(cf_path).exists():
+                    raise RuntimeError("Cloudflare: Không thể tải cloudflared.exe")
                 _update_status("Đã tải cloudflared.exe.", i / total)
 
             root.after(500, lambda: _done(True, ""))

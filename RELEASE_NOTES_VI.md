@@ -1,3 +1,8 @@
+# Phiên bản 1.4.1
+
+## Sửa lỗi (Hotfix)
+- **Khắc phục lỗi tải tài nguyên khởi động (`ensure_cloudflared() got an unexpected keyword argument 'progress_callback'`)**: Đồng bộ chữ ký và giá trị trả về giữa trình tải tài nguyên khởi động (`main.py`) và `cloudflare_helper.ensure_cloudflared()`, giúp máy người dùng mới tự động tải `cloudflared.exe` trơn tru kèm thanh tiến trình phần trăm.
+
 # Phiên bản 1.4.0
 
 ## Điểm mới
