@@ -209,6 +209,35 @@ def parse_rows(text, delimiter='|'):
     return rows
 
 
+def normalize_tiktok_id(value):
+    value = str(value or '').strip()
+    if not value:
+        return ''
+    value = value.rstrip('/')
+    lowered = value.lower()
+    marker = 'tiktok.com/@'
+    if marker in lowered:
+        idx = lowered.find(marker)
+        value = value[idx + len(marker):]
+    value = value.strip().strip('/')
+    value = value.lstrip('@')
+    value = value.split('?', 1)[0].split('#', 1)[0]
+    return value.strip().strip('/')
+
+
+def resolve_record_name(record):
+    name = str(record.get('name', '') or '').strip()
+    if name:
+        return name
+    tiktok_id = normalize_tiktok_id(record.get('tiktok_id', ''))
+    if tiktok_id:
+        return tiktok_id
+    email = str(record.get('email', '') or '').strip()
+    if email:
+        return email
+    return ''
+
+
 def build_record(fields, values):
     record = {}
     for field, value in zip(fields, values):
@@ -237,9 +266,11 @@ def parse_data_into_records(text, fields, skip_header=False):
             continue
         values = list(row) + [''] * (len(fields) - len(row))
         record = build_record(fields, values)
-        if not record.get('name'):
-            errors.append((line_no, 'Thiếu tên'))
+        resolved_name = resolve_record_name(record)
+        if not resolved_name:
+            errors.append((line_no, 'Thiếu tên (cần có Name, ID TikTok hoặc Email)'))
             continue
+        record['name'] = resolved_name
         records.append(record)
     return records, errors
 

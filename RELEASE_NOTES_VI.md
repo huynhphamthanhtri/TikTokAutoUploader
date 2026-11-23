@@ -1,3 +1,65 @@
+# Phiên bản 1.4.0
+
+## Điểm mới
+- **Kho Tài Khoản YouTube (Multi-Account Cookie Pool) & Tải Video Ngắn Ổn Định**:
+  - Hỗ trợ thêm/quản lý nhiều tài khoản YouTube độc lập (`YT_Acc_01`, `YT_Acc_02`...), mở trình duyệt Chrome riêng cho từng tài khoản để đăng nhập và tự động trích xuất cookie qua CDP, hoặc nhập nhanh từ file `.txt`.
+  - Hỗ trợ gắn Proxy riêng (tùy chọn) cho từng tài khoản YouTube trong Kho Cookie.
+  - Tự động xoay vòng tài khoản theo LRU (chia đều lượt tải) và cách ly tạm thời 5 phút (`Cooldown`) ngay lập tức khi 1 tài khoản gặp `HTTP 403` hoặc `The page needs to be reloaded.`, đồng thời đánh dấu `Hết hạn` nếu cần đăng nhập lại.
+  - Tự động kế thừa file `youtube_cookies.txt` cũ làm tài khoản mặc định đầu tiên trong Pool.
+- **Nâng Cấp Hệ Thống Lên Lịch Quy Mô Lớn (800+ Tài Khoản) & Giao Diện Thuần Việt 100%**:
+  - Chuẩn hóa toàn bộ giao diện Tạo Lịch & Quản Lý Lịch sang tiếng Việt tự nhiên cho người dùng cuối, loại bỏ hoàn toàn các thuật ngữ kỹ thuật (`ORIGINAL`, `SERIES`, `SHUFFLE`, `APPEND`, `OVERWRITE`, `Jitter`, `SERVER_SCHEDULE`).
+  - Sử dụng mặc định duy nhất chế độ **Treo máy tự động đăng qua API**; chuyển các bản ghi `SERVER_SCHEDULED` cũ sang nhóm lưu trữ.
+  - **Đồng bộ Múi Giờ Proxy & Random Giờ Vàng**: Tự động nhận diện múi giờ theo khu vực Proxy của từng tài khoản (kèm nút `🔄 Đồng bộ giờ Proxy`), tự chọn phút ngẫu nhiên bên trong khung giờ vàng và hiển thị cột `Khu Vực (Proxy)` trên bảng Xem trước.
+  - **Chống Trùng IP Quy Mô 800 Acc**: Tự động rải các tài khoản chung Proxy sang các khung giờ vàng khác nhau (giãn cách tối thiểu 15 phút) và nâng cấp Daemon lên Worker Pool đa luồng (`1–15` luồng) có khóa **Per-Proxy Lock & Cooldown**.
+  - **Tùy chọn `Bắt đầu: Hôm nay / Ngày mai`** trên Modal Lên Lịch giúp chủ động chọn ngày khởi chạy đồng bộ, kết hợp chặn tuyệt đối lên lịch trong quá khứ.
+- **Thuật Toán Đăng Bù Thông Minh Theo Múi Giờ Proxy**:
+  - Khi mở lại máy hoặc đánh thức từ Sleep: nếu đang trong khung giờ hoạt động (`07:00 – 22:59` giờ Proxy), cho phép đăng bù ngay 1 bài (giãn cách tự động giữa các acc chung Proxy) và dàn đều các bài còn lại; nếu rơi vào giờ ngủ ban đêm (`23:00 – 06:59` giờ Proxy), tự động dời sang khung giờ vàng sáng gần nhất để tránh flop kênh.
+- **Nới Lỏng Kiểm Duyệt Video (60 Phút) & Cửa Sổ Kiểm Tra Video Bị Bỏ Qua**:
+  - Nâng giới hạn thời lượng video hợp lệ lên **60 phút (3600 giây)** và hỗ trợ thêm các codec phổ biến (`vp9`, `vp8`, `mpeg4`).
+  - Bổ sung nút `⚠️ X video bị bỏ qua [🔍 Xem chi tiết]` mở bảng phân loại lỗi tiếng Việt, cho phép lọc theo nhóm lỗi, mở vị trí file trong Explorer, sao chép đường dẫn và xuất báo cáo `.txt`.
+
+## Cải thiện & Sửa lỗi
+- **Khắc phục triệt để lỗi cắt ngang chuỗi Fallback YouTube ở `[3/6]`**: Khi gặp lỗi `The page needs to be reloaded.` (`FAILURE_RETRY`), hệ thống tự động xoay sang cookie khác trong Pool rồi nối tiếp xuống nhánh không cookie (`mweb`/`android`/`ios`) và Proxy fallback thay vì lặp vô tận với cookie lỗi.
+- **Giới hạn tối đa 3 chu kỳ retry (`MAX_RETRY_CYCLES = 3`)**: Ngăn tình trạng 1 video lỗi ngâm chết worker gây trễ/miss các video ngắn mới từ WebSub/RSS.
+- **Dọn dẹp tàn dư UI thông báo YouTube cũ**: Loại bỏ cụm chọn file `cookies.txt` rời rạc và thông báo *"bật chuông kênh ở chế độ Tất cả"*, thay bằng khối Kho Tài Khoản YouTube gọn đẹp.
+
+# Phiên bản 1.3.0
+
+## Điểm mới
+- **Động cơ Tải Video YouTube Kiên cố hoá 100% (Hardened YouTube Downloader Engine - Spec 2026)**:
+  - **Tự động Bóc tách Cookie khi Tắt Trình duyệt Login**: Người dùng chỉ cần bấm *"Mở Browser Login YouTube"*, đăng nhập Google/YouTube trên cửa sổ Chrome riêng biệt rồi **tắt cửa sổ**. Hệ thống tự động bắt sự kiện đóng qua Generation Token, bóc tách cookie phiên bằng CDP headless sang `Auto_Data/youtube_cookies.txt` chuẩn Netscape 7 cột (tuân thủ nghiêm ngặt điều kiện `domain_specified == initial_dot` của Python `http.cookiejar`) và nạp ngay lên giao diện.
+  - **Chiến lược Tải Ưu tiên Cookie (Cookie-First)**: Tự động đưa lượt tải qua Cookie lên vị trí ưu tiên số 1 (`direct-cookies` & `direct-cookies-alt-format`), giúp tải ngay lập tức với độ ổn định cao nhất, đồng thời bảo toàn chuỗi fallback ẩn danh phía sau.
+  - **Tự động Giải mã Dynamic JS Challenge n-sig (`--js-runtimes node`)**: Tự động nhận diện runtime Node.js trên máy để giải mã thuật toán n-sig động của YouTube, tránh triệt để lỗi bóp băng thông hoặc 403 Forbidden.
+  - **Tự phục hồi Khóa File Windows (`.temp.mp4`) & Đa container (`.webm`, `.mkv`, `.m4v`)**: Vượt qua tình trạng Windows Search Indexer giữ file lock sau khi ghép FFmpeg, đồng thời tự động remux/transcode các định dạng video sang MP4 chuẩn cho TikTok.
+- **Thuật toán Tự động Cứu vãn & Dàn đều Bài đăng Lỡ hẹn (Smart Staggered Catch-up)**:
+  - Khi người dùng tắt máy tính và mở lại, video đầu tiên của mỗi tài khoản bị lỡ hẹn sẽ được tự động kích hoạt **Đăng bù ngay lập tức** mà không cần chờ đợi.
+  - Các video dồn ứ tiếp theo sẽ được thuật toán thông minh tự động phân bổ vào các khung giờ vàng còn trống trong ngày (cách nhau tối thiểu 2 giờ) hoặc dàn đều sang các ngày kế tiếp (tối đa 2 video/ngày), loại bỏ hoàn toàn nguy cơ tài khoản bị bóp tương tác do đăng dồn dập sau khi mở máy.
+- **Trợ lý Nhận diện & Khử Lặp Tiêu đề Thông minh (Title Stutter Stripper)**:
+  - Tự động phát hiện hiện tượng lặp từ khóa tiêu đề (ví dụ: `Title Part 1 | Title Part 1 #fyp`) khi người dùng vừa áp dụng công thức đặt tên vừa có tên file trùng lặp.
+  - Tích hợp cảnh báo trực tiếp (Live Warning) trên hộp thoại lên lịch và nút bấm `[Khử Lặp]`, tự động làm sạch tiêu đề đồng thời bảo toàn 100% các hashtag quan trọng.
+- **Tái cấu trúc Giao diện Lịch Đăng (Tab Schedule UI Redesign)**:
+  - **Bộ lọc Trạng thái Chuyên biệt**: Dễ dàng chuyển đổi giữa `Đang hoạt động (Active)` (các bài chờ đăng, đang tải hoặc cần xử lý) và `Đã lưu trữ (Archived)` (các bài đã đăng thành công, đã ghim server hoặc đã hủy), giúp bảng lịch luôn gọn gàng, trực quan.
+  - **Bộ lọc Dự án Đồng bộ (Project Binding)**: Tự động lọc danh sách bài đăng theo đúng Dự án (Project) đang chọn ở thanh điều hướng bên trái với cơ chế bảo vệ Fail-Closed an toàn.
+  - **Bộ lọc Khoảng thời gian ISO**: Hỗ trợ lọc bài đăng theo ngày cụ thể hoặc khoảng thời gian từ ngày - đến ngày.
+  - **Dark Treeview Tooltip**: Di chuột để soi nhanh tiêu đề đầy đủ, đường dẫn file và thông báo lỗi chi tiết mà không làm vỡ bố cục bảng.
+- **Tự động Phân tích & Tái học Lịch đăng YouTube Định kỳ (Periodic Schedule Relearner)**:
+  - Động cơ YouTube Monitor tự động phân tích lại lịch sử đăng video của các kênh sau mỗi 3 ngày (tiêu tốn đúng 1 unit quota API), tự động cập nhật khung giờ đăng mới của Creator mà không cần thao tác thủ công.
+  - Bảo lưu tuyệt đối 100% các khung giờ do người dùng tự tạo (`MANUAL`) hoặc đã ghim khóa (`LOCKED`).
+
+## Cải thiện
+- **Kiên cố hóa Động cơ Lên lịch (Hardened Scheduler Engine)**:
+  - **Tự động chuyển đổi mượt mà (Auto-Fallback)**: Khi TikTok API trả về lý do chặn lên lịch từ xa (`schedule_disabled` hoặc `ab_value='0'`), hệ thống tự động chuyển bài đăng sang chế độ Hàng đợi máy tính (`LOCAL_QUEUE`) thay vì báo lỗi thất bại.
+  - **Cơ chế Bảo toàn Hashtag Tiếng Việt & Dấu gạch dưới**: Chuẩn hóa thuật toán làm sạch tiêu đề, đảm bảo toàn bộ hashtag có dấu tiếng Việt (ví dụ: `#hàhài`, `#ẩmthực`) và dấu gạch dưới (`#review_phim`) được giữ nguyên 100% khi đăng lên TikTok.
+  - **Tối ưu Cooldown Linh hoạt**: Tự động nhận diện chu kỳ nghỉ giữa 2 lần đăng (5-10s cho cùng profile, 3-5s cho khác profile) và cho phép ngắt nghỉ tức thì khi người dùng bấm Tạm dừng hoặc Dừng tiến trình.
+  - **Bảo vệ File Nguồn Đa Lớp**: Chỉ thực hiện xóa video gốc sau khi hệ thống đã ghi nhận chắc chắn trạng thái thành công vào SQLite, và tự động bỏ qua xóa nếu file vẫn đang được bài đăng khác tham chiếu dùng chung.
+  - **Gia hạn Lease Heartbeat Multipart**: Tự động gia hạn quyền xử lý định kỳ trong lúc upload video dung lượng lớn, loại bỏ hoàn toàn hiện tượng trôi lease gây đăng trùng bài.
+
+## Sửa lỗi
+- **Khắc phục lỗi Đăng Ngay Lập Tức khi Epoch không hợp lệ (Intent Guard)**: Ngăn chặn triệt để tình trạng một số bài đăng chế độ `SERVER_SCHEDULE` bị âm thầm chuyển thành đăng ngay khi epoch thiếu hoặc không hợp lệ.
+- **Khắc phục lỗi Deadlock Task Phục hồi (`MISSED_RESCHEDULED`)**: Bổ sung đầy đủ trạng thái `MISSED_RESCHEDULED` vào bộ quét worker claim trong SQLite, giúp các bài lỡ hẹn sau khi được cứu vãn sẽ được tự động thực thi trơn tru.
+- **Khắc phục lỗi Nút 'Đăng Ngay Lập Tức' bị từ chối**: Cho phép claim và xử lý ngay cả với các task đang ở trạng thái `FAILED`, đồng thời tự động hủy lịch hẹn giờ tương lai để xuất bản bài đăng ngay theo đúng lệnh của người dùng.
+- **Khắc phục lỗi Khởi tạo Lịch học YouTube làm mất khung giờ hiện có**: Khắc phục hiện tượng thuật toán học lịch ghi đè làm mất các khung giờ dự đoán đang kích hoạt khi kênh chỉ mới ghi nhận 1 video mới.
+
 # Phiên bản 1.2.9
 
 ## Điểm mới

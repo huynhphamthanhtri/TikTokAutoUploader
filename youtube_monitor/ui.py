@@ -120,6 +120,18 @@ class YouTubeMonitorView(ctk.CTkFrame):
 
 
 
+        # Initial render: Nap du lieu kenh ngay khi tao view (Defense-in-depth)
+        try:
+            self.refresh_data()
+        except Exception:
+            pass
+
+        try:
+            from .core import register_cookie_update_listener
+            register_cookie_update_listener(self._on_cookie_file_auto_updated)
+        except Exception:
+            pass
+
         # Bind responsive layout handler
 
         self.bind("<Configure>", self._on_configure)
@@ -503,6 +515,7 @@ class YouTubeMonitorView(ctk.CTkFrame):
         self.ctx_menu.add_command(label="🔍 Kiểm tra hoạt động toàn bộ kênh (>48h)...", command=lambda: self._open_channel_activity_dialog())
 
         self.ctx_menu.add_command(label="📊 Xem / Sửa lịch đăng & Khung giờ...", command=lambda: self._open_schedule_dialog())
+        self.ctx_menu.add_command(label="⚡ Ping Google Hub (Thức tỉnh WebSub)", command=lambda: self._ping_channel_hub())
 
 
         self.ctx_menu.add_separator()
@@ -586,6 +599,17 @@ class YouTubeMonitorView(ctk.CTkFrame):
             command=self._start,
 
         ).pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        ctk.CTkButton(
+            ops_btn_row,
+            text="⚡ Quét Ngay",
+            font=UIThemeTokens.FONT_BUTTON,
+            height=34,
+            width=95,
+            fg_color="#0284c7",
+            hover_color="#0369a1",
+            command=self._trigger_manual_ping,
+        ).pack(side="left", padx=(0, 4))
 
 
 
@@ -843,153 +867,49 @@ class YouTubeMonitorView(ctk.CTkFrame):
 
 
 
-        # Cookie File Row (Hiển thị filename, giữ full path)
-
+        # Kho Tài Khoản YouTube (Multi-Account Cookie Pool - Xoay vòng tải)
         ctk.CTkLabel(
-
             card_cfg,
-
-            text="File Cookie YouTube (cookies.txt):",
-
+            text="🍪 Kho Tài Khoản YouTube (Xoay vòng tải):",
             font=UIThemeTokens.FONT_SUBTITLE,
-
             text_color=UIThemeTokens.TEXT_MUTED,
+        ).pack(anchor="w", padx=10, pady=(4, 2))
 
-        ).pack(anchor="w", padx=10, pady=(2, 2))
-
-
-
-        cookie_row = ctk.CTkFrame(card_cfg, fg_color="transparent")
-
-        cookie_row.pack(fill="x", padx=10, pady=(0, 4))
-
-
-
-        self.cookie_entry = ctk.CTkEntry(
-
-            cookie_row,
-
-            textvariable=self.cookie_display_var,
-
-            state="disabled",
-
-            height=28,
-
-            font=UIThemeTokens.FONT_BODY,
-
-        )
-
-        self.cookie_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
-
-
-
-        ctk.CTkButton(
-
-            cookie_row,
-
-            text="Chọn...",
-
-            font=UIThemeTokens.FONT_BUTTON,
-
-            width=65,
-
-            height=28,
-
-            command=self._choose_cookie_file,
-
-        ).pack(side="right")
-
-
-
-        cookie_actions_row = ctk.CTkFrame(card_cfg, fg_color="transparent")
-
-        cookie_actions_row.pack(fill="x", padx=10, pady=(0, 6))
-
-
-
-        ctk.CTkButton(
-
-            cookie_actions_row,
-
-            text="Lưu",
-
-            font=UIThemeTokens.FONT_BUTTON,
-
-            width=70,
-
-            height=28,
-
-            command=self._save_cookie_file,
-
-        ).pack(side="left", padx=(0, 4))
-
-
-
-        self.btn_check_cookie = ctk.CTkButton(
-
-            cookie_actions_row,
-
-            text="Kiểm tra Live",
-
-            font=UIThemeTokens.FONT_BUTTON,
-
-            width=100,
-
-            height=28,
-
-            fg_color=UIThemeTokens.ACCENT_PRIMARY,
-
-            hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
-
-            command=self._check_cookie_file,
-
-        )
-
-        self.btn_check_cookie.pack(side="left", padx=(0, 4))
-
-
-
-        ctk.CTkButton(
-
-            cookie_actions_row,
-
-            text="Xóa",
-
-            font=UIThemeTokens.FONT_BUTTON,
-
-            width=60,
-
-            height=28,
-
-            fg_color=UIThemeTokens.STATUS_ERROR,
-
-            hover_color="#b91c1c",
-
-            command=self._clear_cookie_file,
-
-        ).pack(side="right")
-
-
-
-        ctk.CTkButton(
-
+        self.yt_pool_summary_var = ctk.StringVar(value="🟢 Sẵn sàng: 0 | ⏳ Nghỉ: 0 | 🔴 Hết hạn: 0")
+        self.lbl_yt_pool_summary = ctk.CTkLabel(
             card_cfg,
+            textvariable=self.yt_pool_summary_var,
+            font=UIThemeTokens.FONT_BADGE,
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+            anchor="w",
+        )
+        self.lbl_yt_pool_summary.pack(fill="x", padx=10, pady=(0, 4))
 
-            text="🌐 Mở Browser Login YouTube",
+        pool_btn_row = ctk.CTkFrame(card_cfg, fg_color="transparent")
+        pool_btn_row.pack(fill="x", padx=10, pady=(0, 8))
 
+        self.btn_open_cookie_pool = ctk.CTkButton(
+            pool_btn_row,
+            text="🍪 Quản Lý Kho Cookie",
             font=UIThemeTokens.FONT_BUTTON,
-
             height=30,
-
             fg_color=UIThemeTokens.ACCENT_PRIMARY,
-
             hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
+            command=self._open_cookie_pool_dialog,
+        )
+        self.btn_open_cookie_pool.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
-            command=self._open_youtube_login_browser,
-
-        ).pack(fill="x", padx=10, pady=(0, 8))
-
-
+        self.btn_quick_add_yt_cookie = ctk.CTkButton(
+            pool_btn_row,
+            text="+ Đăng Nhập Nhanh",
+            font=UIThemeTokens.FONT_BUTTON,
+            width=125,
+            height=30,
+            fg_color=UIThemeTokens.STATUS_LIVE,
+            hover_color="#15803d",
+            command=self._quick_login_new_youtube_account,
+        )
+        self.btn_quick_add_yt_cookie.pack(side="right")
 
         # Duration Limit Row
 
@@ -1897,9 +1817,9 @@ class YouTubeMonitorView(ctk.CTkFrame):
 
             auth_status = status.get("ngrok_auth_status", "unknown")
 
-            if auth_status != "ready":
+            if True:
 
-                cb_parts.append("Ngrok: cần authtoken")
+                cb_parts.append("Tunnel: Chờ kết nối")
 
         if last_post:
 
@@ -1916,6 +1836,7 @@ class YouTubeMonitorView(ctk.CTkFrame):
             self.cookie_var.set(cookie_path)
 
             self.cookie_display_var.set(Path(cookie_path).name)
+        self._refresh_cookie_pool_summary()
 
 
 
@@ -3055,49 +2976,107 @@ class YouTubeMonitorView(ctk.CTkFrame):
 
 
 
-    def _check_cookie_file(self):
+    def _refresh_cookie_pool_summary(self):
+        try:
+            from .core import get_cookie_pool_manager
+            counts = get_cookie_pool_manager().get_summary_counts()
+            txt = (
+                f"🟢 Sẵn sàng: {counts['ready']}  |  "
+                f"⏳ Nghỉ: {counts['cooldown']}  |  "
+                f"🔴 Hết hạn: {counts['expired']}"
+            )
+            if hasattr(self, "yt_pool_summary_var"):
+                self.yt_pool_summary_var.set(txt)
+        except Exception:
+            pass
 
-        path = self.cookie_var.get().strip()
+    def _open_cookie_pool_dialog(self):
+        YouTubeCookiePoolDialog(
+            self,
+            on_pool_changed=self._refresh_cookie_pool_summary,
+            log_fn=self._append_threadsafe,
+        )
 
-        self.append_log("[Cookies] Đang kiểm tra tính hợp lệ & kết nối Live của cookie YouTube...")
-
-
+    def _quick_login_new_youtube_account(self):
+        from .core import get_cookie_pool_manager, open_youtube_pool_login_browser
+        pool_mgr = get_cookie_pool_manager()
+        acc = pool_mgr.add_account()
+        self._refresh_cookie_pool_summary()
+        self.append_log(f"[CookiePool] Tạo tài khoản mới '{acc['label']}', đang mở trình duyệt đăng nhập...")
 
         def run():
+            ok, msg = open_youtube_pool_login_browser(
+                acc["account_id"],
+                on_done=lambda: self.after(0, self._refresh_cookie_pool_summary),
+            )
+            if not ok:
+                try:
+                    self.after(0, lambda: messagebox.showerror("Đăng Nhập YouTube", msg))
+                except Exception:
+                    pass
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_cookie_file_auto_updated(self, cookie_path):
+        def update():
+            try:
+                if cookie_path:
+                    self.cookie_var.set(str(cookie_path))
+                    self.cookie_display_var.set(Path(cookie_path).name)
+                    self._append_threadsafe(f"[CookiePool] Đã tự động nạp cookie: {Path(cookie_path).name}")
+                self._refresh_cookie_pool_summary()
+            except Exception:
+                pass
+        try:
+            self.after(0, update)
+        except Exception:
+            pass
+
+    def destroy(self):
+        try:
+            from .core import unregister_cookie_update_listener
+            unregister_cookie_update_listener(self._on_cookie_file_auto_updated)
+        except Exception:
+            pass
+        super().destroy()
+
+    def _check_cookie_file(self):
+        path = self.cookie_var.get().strip()
+        self.append_log("[Cookies] Đang kiểm tra tính hợp lệ & kết nối Live của cookie YouTube...")
+
+        def run():
+            check_path = path if path else None
+            if not check_path:
+                from .core import AUTO_YOUTUBE_COOKIES_PATH, YOUTUBE_LOGIN_PROFILE, _youtube_login_browser
+                if AUTO_YOUTUBE_COOKIES_PATH.exists() and AUTO_YOUTUBE_COOKIES_PATH.stat().st_size > 0:
+                    check_path = str(AUTO_YOUTUBE_COOKIES_PATH)
+                    self._on_cookie_file_auto_updated(check_path)
+                elif YOUTUBE_LOGIN_PROFILE.exists() and not _youtube_login_browser.is_open():
+                    self._append_threadsafe("[Cookies] Chưa có file cookie, đang tự động trích xuất từ Profile...")
+                    from .cookie_exporter import export_youtube_cookies_cdp
+                    exp_ok, exp_msg, _ = export_youtube_cookies_cdp(YOUTUBE_LOGIN_PROFILE, AUTO_YOUTUBE_COOKIES_PATH)
+                    if exp_ok:
+                        check_path = str(AUTO_YOUTUBE_COOKIES_PATH)
+                        self._on_cookie_file_auto_updated(check_path)
+                    else:
+                        self._append_threadsafe(f"[Cookies] {exp_msg}", error=True)
 
             check_fn = self.handlers.get("check_cookies", None)
-
             if callable(check_fn):
-
-                ok, msg = check_fn(path if path else None)
-
+                ok, msg = check_fn(check_path)
             else:
-
                 from .core import check_youtube_cookie_live
-
-                ok, msg = check_youtube_cookie_live(path if path else None)
-
-
+                ok, msg = check_youtube_cookie_live(check_path)
 
             self._append_threadsafe(f"[Cookies] {msg}", error=not ok)
-
             try:
-
                 from tkinter import messagebox
-
                 if ok:
-
-                    messagebox.showinfo("Kiểm Tra Cookie YouTube", f"✅ THÀNH CÔNG:\n\n{msg}")
-
+                    self.after(0, lambda: messagebox.showinfo("Kiểm tra Cookie", f"Cookie YouTube hoạt động tốt!\n{msg}"))
                 else:
-
-                    messagebox.showwarning("Kiểm Tra Cookie YouTube", f"⚠️ KHÔNG KHẢ DỤNG:\n\n{msg}\n\nVui lòng xuất lại file cookies.txt từ trình duyệt đăng nhập YouTube.")
-
+                    self.after(0, lambda: messagebox.showerror("Lỗi Cookie", f"Kiểm tra thất bại:\n{msg}"))
             except Exception:
-
                 pass
-
-
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -3513,6 +3492,29 @@ class YouTubeMonitorView(ctk.CTkFrame):
 
 
 
+    def _ping_channel_hub(self, cid=None):
+        target_cid = self._context_channel_id if cid is None else cid
+        if not target_cid:
+            self.append_log("[WebSub] Vui lòng chọn một kênh để gửi ping Google Hub", error=True)
+            return
+        self.append_log(f"[WebSub] Đang gửi ping đánh thức Google Hub cho {target_cid}...")
+        import threading
+        def _run():
+            ok = self._run_handler("ping_channel_hub", target_cid)
+            if ok:
+                self._append_threadsafe(f"[WebSub] Google Hub đã nhận ping cho kênh {target_cid} (HTTP 204)")
+            else:
+                self._append_threadsafe(f"[WebSub] Không gửi được ping tới Google Hub cho {target_cid}", error=True)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _trigger_manual_ping(self):
+        self.append_log("[WebSub] Kích hoạt quét ngay & đánh thức Google Hub toàn bộ kênh...")
+        import threading
+        def _run():
+            count = self._run_handler("trigger_manual_scan_and_ping")
+            self._append_threadsafe(f"[WebSub] Hoàn tất kích hoạt Google Hub ({count or 0} kênh active)")
+        threading.Thread(target=_run, daemon=True).start()
+
     def _open_schedule_dialog(self):
 
         """Mở modal xem lịch học đăng video & quản lý khung giờ thủ công."""
@@ -3797,3 +3799,260 @@ class YouTubeMonitorView(ctk.CTkFrame):
         ctk.CTkButton(inputs_row, text="+ Thêm", width=70, height=26, command=_add_manual).pack(side="right")
 
         ctk.CTkButton(top, text="Đóng", width=100, height=30, command=top.destroy).pack(pady=(0, 12))
+
+
+class YouTubeCookiePoolDialog(ctk.CTkToplevel):
+    """Cửa sổ quản lý Kho Tài Khoản YouTube (Multi-Account Cookie Pool)."""
+
+    def __init__(self, parent, on_pool_changed=None, log_fn=None):
+        super().__init__(parent)
+        self.title("🍪 Kho Tài Khoản YouTube (Xoay Vòng Tải Video)")
+        self.geometry("820x520")
+        self.minsize(700, 420)
+        self.transient(parent)
+        self.grab_set()
+        self.on_pool_changed = on_pool_changed
+        self.log_fn = log_fn or (lambda _m: None)
+        self._build_ui()
+        self._reload_table()
+
+    def _build_ui(self):
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=14, pady=(12, 6))
+
+        ctk.CTkLabel(
+            header,
+            text="🍪 Quản Lý Kho Cookie YouTube (Tự động xoay vòng & cách ly 403)",
+            font=UIThemeTokens.FONT_TITLE if hasattr(UIThemeTokens, "FONT_TITLE") else ("Segoe UI", 14, "bold"),
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+        ).pack(side="left")
+
+        self.lbl_status = ctk.CTkLabel(
+            header,
+            text="",
+            font=UIThemeTokens.FONT_BADGE,
+            text_color=UIThemeTokens.TEXT_MUTED,
+        )
+        self.lbl_status.pack(side="right")
+
+        # Action toolbar
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=14, pady=(0, 6))
+
+        ctk.CTkButton(
+            bar, text="+ Thêm & Đăng Nhập Chrome", height=30,
+            fg_color=UIThemeTokens.STATUS_LIVE, hover_color="#15803d",
+            font=UIThemeTokens.FONT_BUTTON, command=self._add_and_login,
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            bar, text="📁 Nhập File .txt", height=30, width=120,
+            fg_color=UIThemeTokens.ACCENT_PRIMARY, hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
+            font=UIThemeTokens.FONT_BUTTON, command=self._import_txt,
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            bar, text="🔄 Đăng Nhập Lại", height=30, width=120,
+            font=UIThemeTokens.FONT_BUTTON, command=self._relogin_selected,
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            bar, text="🌐 Gắn Proxy", height=30, width=95,
+            fg_color="#64748b", hover_color="#475569",
+            font=UIThemeTokens.FONT_BUTTON, command=self._set_proxy_selected,
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            bar, text="🩺 Kiểm Tra Live", height=30, width=115,
+            fg_color="#0ea5e9", hover_color="#0284c7",
+            font=UIThemeTokens.FONT_BUTTON, command=self._check_live_all,
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            bar, text="🗑️ Xóa", height=30, width=70,
+            fg_color=UIThemeTokens.STATUS_ERROR, hover_color="#b91c1c",
+            font=UIThemeTokens.FONT_BUTTON, command=self._delete_selected,
+        ).pack(side="right")
+
+        # Table
+        table_frame = ctk.CTkFrame(self, fg_color=UIThemeTokens.BG_CARD, corner_radius=8, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+        table_frame.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
+
+        cols = ("label", "status", "proxy", "stats", "note")
+        self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="browse")
+        self.tree.heading("label", text="Tên Tài Khoản")
+        self.tree.column("label", width=130, stretch=False)
+        self.tree.heading("status", text="Trạng Thái")
+        self.tree.column("status", width=130, stretch=False)
+        self.tree.heading("proxy", text="Proxy (Tùy chọn)")
+        self.tree.column("proxy", width=160, stretch=False)
+        self.tree.heading("stats", text="Thành công / Lỗi")
+        self.tree.column("stats", width=115, anchor="center", stretch=False)
+        self.tree.heading("note", text="Ghi Chú")
+        self.tree.column("note", width=230, stretch=True)
+
+        self.tree.tag_configure("ready", foreground="#16a34a")
+        self.tree.tag_configure("cooldown", foreground="#d97706")
+        self.tree.tag_configure("expired", foreground="#dc2626")
+
+        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
+        vsb.grid(row=0, column=1, sticky="ns", padx=(0, 6), pady=6)
+
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.pack(fill="x", padx=14, pady=(0, 12))
+        ctk.CTkLabel(
+            footer,
+            text="💡 Mẹo: Nên đăng nhập 3–10 tài khoản YouTube khác nhau. Khi 1 acc dính 403/Reload, tool tự cách ly 5 phút và xoay ngay sang acc khác.",
+            font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_MUTED,
+        ).pack(side="left")
+        ctk.CTkButton(footer, text="Đóng", width=90, height=28, command=self.destroy).pack(side="right")
+
+    def _reload_table(self):
+        from .core import get_cookie_pool_manager
+        pool_mgr = get_cookie_pool_manager()
+        accs = pool_mgr.list_accounts()
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        now = time.time()
+        for acc in accs:
+            st = acc.get("status", "NO_COOKIE")
+            if st == "READY":
+                st_txt, tag = "🟢 Sẵn sàng", "ready"
+            elif st == "COOLDOWN":
+                rem = max(0, int(float(acc.get("cooldown_until") or 0) - now))
+                st_txt, tag = f"⏳ Nghỉ ({rem}s)", "cooldown"
+            elif st == "EXPIRED":
+                st_txt, tag = "🔴 Hết hạn", "expired"
+            else:
+                st_txt, tag = "⚪ Chưa đăng nhập", "expired"
+
+            proxy_raw = str(acc.get("proxy") or "").strip()
+            proxy_disp = proxy_raw.split(":")[0] + ":" + proxy_raw.split(":")[1] if ":" in proxy_raw else (proxy_raw or "Direct (Mặc định)")
+            stats_txt = f"{acc.get('success_count', 0)} OK / {acc.get('fail_count', 0)} lỗi"
+            note_txt = acc.get("last_error") or ("Đã có file cookie" if Path(acc.get("cookies_path", "")).is_file() else "Bấm Đăng Nhập Lại")
+
+            self.tree.insert(
+                "", "end", iid=acc["account_id"],
+                values=(acc.get("label", acc["account_id"]), st_txt, proxy_disp, stats_txt, note_txt),
+                tags=(tag,),
+            )
+
+        counts = pool_mgr.get_summary_counts()
+        self.lbl_status.configure(text=f"Tổng: {counts['total']} acc | Sẵn sàng: {counts['ready']}")
+        if callable(self.on_pool_changed):
+            try:
+                self.on_pool_changed()
+            except Exception:
+                pass
+
+    def _get_selected_id(self):
+        sel = self.tree.selection()
+        return sel[0] if sel else None
+
+    def _add_and_login(self):
+        from tkinter import simpledialog
+        label = simpledialog.askstring("Thêm Tài Khoản YouTube", "Nhập tên gợi nhớ (để trống để tự đặt):", parent=self)
+        if label is None:
+            return
+        from .core import get_cookie_pool_manager, open_youtube_pool_login_browser
+        acc = get_cookie_pool_manager().add_account(label=label.strip() or None)
+        self._reload_table()
+        self.log_fn(f"[CookiePool] Đang mở trình duyệt cho '{acc['label']}'...")
+
+        def run():
+            ok, msg = open_youtube_pool_login_browser(
+                acc["account_id"],
+                on_done=lambda: self.after(0, self._reload_table),
+            )
+            if not ok:
+                try:
+                    self.after(0, lambda: messagebox.showerror("Lỗi", msg, parent=self))
+                except Exception:
+                    pass
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _relogin_selected(self):
+        acc_id = self._get_selected_id()
+        if not acc_id:
+            messagebox.showwarning("Chưa chọn", "Vui lòng chọn 1 tài khoản trong danh sách.", parent=self)
+            return
+        from .core import open_youtube_pool_login_browser
+        threading.Thread(
+            target=lambda: open_youtube_pool_login_browser(acc_id, on_done=lambda: self.after(0, self._reload_table)),
+            daemon=True,
+        ).start()
+
+    def _import_txt(self):
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Chọn file cookie YouTube (.txt)",
+            filetypes=[("Netscape Cookie TXT", "*.txt"), ("All Files", "*.*")],
+        )
+        if not path:
+            return
+        from .core import get_cookie_pool_manager
+        ok, msg, _acc = get_cookie_pool_manager().import_cookie_file(path)
+        self._reload_table()
+        if ok:
+            messagebox.showinfo("Thành công", msg, parent=self)
+        else:
+            messagebox.showerror("Lỗi", msg, parent=self)
+
+    def _set_proxy_selected(self):
+        acc_id = self._get_selected_id()
+        if not acc_id:
+            messagebox.showwarning("Chưa chọn", "Vui lòng chọn 1 tài khoản để gắn Proxy.", parent=self)
+            return
+        from tkinter import simpledialog
+        from .core import get_cookie_pool_manager
+        pool_mgr = get_cookie_pool_manager()
+        acc = pool_mgr.get_account(acc_id)
+        cur_p = acc.get("proxy", "") if acc else ""
+        new_p = simpledialog.askstring(
+            "Gắn Proxy Cho Tài Khoản YouTube",
+            "Nhập Proxy (ip:port:user:pass) hoặc để trống để dùng mạng trực tiếp (Direct):",
+            initialvalue=cur_p,
+            parent=self,
+        )
+        if new_p is None:
+            return
+        pool_mgr.set_account_proxy(acc_id, new_p.strip())
+        self._reload_table()
+
+    def _check_live_all(self):
+        from .core import get_cookie_pool_manager, check_youtube_cookie_live
+        pool_mgr = get_cookie_pool_manager()
+        accs = pool_mgr.list_accounts()
+        if not accs:
+            return
+        self.lbl_status.configure(text="⏳ Đang kiểm tra Live...")
+
+        def run():
+            for acc in accs:
+                cp = acc.get("cookies_path", "")
+                if cp and Path(cp).is_file():
+                    ok, msg = check_youtube_cookie_live(cp)
+                    pool_mgr.mark_cookie_extracted(acc["account_id"], ok, "" if ok else msg)
+            try:
+                self.after(0, self._reload_table)
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _delete_selected(self):
+        acc_id = self._get_selected_id()
+        if not acc_id:
+            messagebox.showwarning("Chưa chọn", "Vui lòng chọn 1 tài khoản để xóa.", parent=self)
+            return
+        if not messagebox.askyesno("Xác nhận xóa", "Xóa tài khoản này khỏi Kho Cookie YouTube?", parent=self):
+            return
+        from .core import get_cookie_pool_manager
+        get_cookie_pool_manager().remove_account(acc_id, delete_files=True)
+        self._reload_table()

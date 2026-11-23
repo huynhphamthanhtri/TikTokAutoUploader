@@ -196,5 +196,23 @@ Mọi kịch bản kiểm thử trong quá trình triển khai bắt buộc tuâ
 3. `test_schedule_ui_redesign`: PASSED (4/4 tests).
 4. **Toàn bộ Regression Suite (64/64 tests)**: PASSED 100% in 9.904s.
 
+---
+
+## 7. Khắc Phục Triệt Để Lỗi Đóng Băng Khởi Động & Initial Render (DEC-22)
+
+### Quyết định kỹ thuật
+* **DEC-22 (Production Startup Scoping & UI Initial Render Defense)**:
+  * **Giải quyết dứt điểm lỗi Transitive Import**: Module `app_ui.py` import `unittest` gián tiếp ngay lúc khởi động, khiến điều kiện `"unittest" in sys.modules` trong `main.py` nhận nhầm tiến trình người dùng thật là đang chạy test, vô tình đóng băng `_tick()` và `_start_schedule_daemon()`.
+  * **Chuẩn hóa Entry-Point theo chuẩn Python**: Di chuyển toàn bộ các vòng lặp định thời `root.after(1000, _tick)`, `root.after(100, _drain_update_ui_queue)` và `_start_schedule_daemon()` vào bên trong khối `if __name__ == "__main__":`. Khi test import `main.py`, `__name__` là `"main"` nên không bao giờ kích hoạt vòng lặp daemon ngầm.
+  * **Tách biệt khởi tạo Schedule Manager khỏi Daemon Thread**: Đảm bảo `global_schedule_manager = _get_active_schedule_manager()` luôn được khởi tạo độc lập ở cấp module, giúp các bài test hoặc view con truy cập an toàn mà không phải phụ thuộc vào việc daemon có chạy hay không.
+  * **Kiên cố hóa Trái tim UI Heartbeat (`_tick`)**: Bọc toàn bộ thân hàm `_tick()` trong khối `try ... finally: root.after(1000, _tick)` để đảm bảo nhịp timer 1 giây không bao giờ bị đứt đoạn bởi bất kỳ ngoại lệ nào. Tách riêng từng khối `try...except` cho `youtube_monitor_view`, `batch_download_view`, và `activity_view`.
+  * **Cơ chế Initial Render (Zero-Flicker Defense)**: Bổ sung lệnh gọi an toàn `self.refresh_data()` ngay trong hàm khởi tạo `YouTubeMonitorView.__init__`, giúp nạp ngay 25 kênh từ `channels.json` lên bảng Treeview ngay khi dựng giao diện, không bị trễ hay chớp trắng.
+
+### Bằng chứng kiểm thử
+1. Khởi tạo `YouTubeMonitorView` trả về ngay: `Status: Monitor: Đã dừng`, `Kênh: 25`, `Treeview children: 25 kênh`.
+2. Import `main.py` trong tiến trình độc lập: 0 daemon thread chạy ngầm, không rò rỉ luồng.
+3. Toàn bộ 12 bộ test suite (95/95 tests): **PASSED 100% in 28.456s**.
+
+
 
 

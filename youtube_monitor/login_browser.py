@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import Callable, Optional
 
 
 YOUTUBE_LOGIN_URL = "https://www.youtube.com/account"
@@ -17,6 +18,7 @@ class YouTubeLoginBrowser:
         self._popen = process_factory or subprocess.Popen
         self._process = None
         self._lock = threading.Lock()
+        self._generation_id = 0
 
     @staticmethod
     def _default_resolver():
@@ -40,7 +42,10 @@ class YouTubeLoginBrowser:
         process = self._process
         return process is not None and process.poll() is None
 
-    def open(self):
+    def get_generation_id(self):
+        return self._generation_id
+
+    def open(self, on_close: Optional[Callable[[], None]] = None):
         with self._lock:
             if self.is_open():
                 return True, "Browser đăng nhập YouTube đang mở."
@@ -56,11 +61,14 @@ class YouTubeLoginBrowser:
                 "--no-first-run",
                 YOUTUBE_LOGIN_URL,
             ]
+            self._generation_id += 1
+            current_gen = self._generation_id
             try:
                 self._process = self._popen(args, shell=False)
             except Exception as exc:
                 self._process = None
                 return False, f"Không mở được browser YouTube: {exc}"
+
             # Popen success only means Windows accepted the command. Detect an
             # immediate browser crash before telling the user it opened.
             deadline = time.monotonic() + 1.5
@@ -70,4 +78,31 @@ class YouTubeLoginBrowser:
                     self._process = None
                     return False, f"Browser YouTube thoát ngay khi khởi động (mã {exit_code})."
                 time.sleep(0.1)
-            return True, "Đã mở browser riêng. Hãy đăng nhập YouTube và bật chuông kênh ở chế độ Tất cả."
+
+            current_proc = self._process
+            if on_close is not None and callable(on_close):
+                def _watch_exit(proc, gen, callback):
+                    try:
+                        proc.wait()
+                    except Exception:
+                        pass
+                    finally:
+                        with self._lock:
+                            if self._process is proc and self._generation_id == gen:
+                                self._process = None
+                        # Only invoke callback if this is still the active generation
+                        if self._generation_id == gen and callable(callback):
+                            try:
+                                callback()
+                            except Exception:
+                                pass
+
+                watcher = threading.Thread(
+                    target=_watch_exit,
+                    args=(current_proc, current_gen, on_close),
+                    name=f"YouTubeLoginBrowserWatcher-{current_gen}",
+                    daemon=True,
+                )
+                watcher.start()
+
+            return True, "Đã mở trình duyệt đăng nhập YouTube. Sau khi đăng nhập xong, hãy đóng trình duyệt để tool tự trích xuất cookie."

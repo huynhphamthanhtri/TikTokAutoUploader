@@ -680,7 +680,7 @@ class TestScheduleUIPhase4(TestCase):
         """P4-21: Combobox trạng thái phải bao gồm 'UPLOADING' và lọc chính xác (Codex P2-06)."""
         view = AutoScheduleView(self.root, schedule_manager=self.mgr)
         cb_values = view.cb_status.cget("values")
-        self.assertIn("UPLOADING", cb_values)
+        self.assertIn("Đang tải lên", cb_values)
 
         # Thêm task có trạng thái UPLOADING
         uploading_task = {
@@ -702,7 +702,7 @@ class TestScheduleUIPhase4(TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0], "task_uploading_test_01")
         row_vals = view.tree.item("task_uploading_test_01", "values")
-        self.assertEqual(row_vals[6], "⚡ Đang tải...")
+        self.assertEqual(row_vals[5], "⚡ Đang tải lên")
         view.destroy()
 
     def test_p4_22_defensive_page_size_fallback(self):
@@ -864,13 +864,14 @@ class TestScheduleUIPhase4(TestCase):
         self.mgr.add_tasks([server_task, missed_task])
 
         view = AutoScheduleView(self.root, schedule_manager=self.mgr)
+        view.scope_filter_var.set("Đã lưu trữ")
         view.status_filter_var.set("SERVER_SCHEDULED")
         view._refresh_data()
 
-        # Kiểm tra tag hiển thị là server_tag
+        # Kiểm tra tag hiển thị là cancel_tag (bản cũ đã lưu trữ)
         self.assertIn("task_server_item_01", view.tree.get_children())
         tags = view.tree.item("task_server_item_01", "tags")
-        self.assertEqual(tags, ("server_tag",))
+        self.assertEqual(tags, ("cancel_tag",))
 
         # 2. Thử hủy task SERVER_SCHEDULED: cancel_tasks phải từ chối (bảo vệ lịch đã nằm trên cloud TikTok)
         view.tree.selection_set(["task_server_item_01"])
@@ -882,7 +883,8 @@ class TestScheduleUIPhase4(TestCase):
         self.assertEqual(t_server_after["status"], "SERVER_SCHEDULED")
         self.assertEqual(t_server_after["tiktok_item_id"], "item_tiktok_123456")
 
-        # 3. Hủy task MISSED_RESCHEDULED: chuyển filter về Tất cả để hiển thị và hủy
+        # 3. Hủy task MISSED_RESCHEDULED: chuyển filter về Đang hoạt động & Tất cả để hiển thị và hủy
+        view.scope_filter_var.set("Đang hoạt động")
         view.status_filter_var.set("Tất cả")
         view._refresh_data()
         view.tree.selection_set(["task_missed_item_01"])

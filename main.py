@@ -53,6 +53,7 @@ from account_io import (
     DEFAULT_FORMAT,
     LEGACY_FORMAT,
     SENSITIVE_FIELDS,
+    normalize_tiktok_id,
     parse_format,
     parse_data_into_records,
     plan_import,
@@ -4245,7 +4246,7 @@ def _first_run_download_check_worker():
     try:
         from version import RESOURCE_ASSETS
         import youtube_monitor.ffmpeg_helper as fh
-        import youtube_monitor.ngrok_helper as nh
+        import youtube_monitor.cloudflare_helper as ch
 
         missing = {}
         for local_name, info in RESOURCE_ASSETS.items():
@@ -4268,11 +4269,11 @@ def _first_run_download_check_worker():
         ffmpeg_ok, _, _ = fh.check_ffmpeg()
         ffmpeg_needed = not ffmpeg_ok
 
-        ngrok_ok, _, _ = nh.check_ngrok()
-        ngrok_needed = not ngrok_ok
+        cf_ok, _, _ = ch.check_cloudflared()
+        cf_needed = not cf_ok
 
         # Nếu đã đủ tài nguyên (trường hợp thông thường), kết thúc ngay, UI không bị block 1 miligiây nào
-        if not missing and not ffmpeg_needed and not ngrok_needed:
+        if not missing and not ffmpeg_needed and not cf_needed:
             return
 
         # Nếu thiếu tài nguyên, chuyển về main thread hiển thị hộp thoại hỏi tải
@@ -4285,7 +4286,7 @@ def _first_run_download_check():
     """Kiểm tra và tải tài nguyên thiếu (Browser, FFmpeg, ngrok.exe)."""
     from version import RESOURCE_ASSETS, RESOURCE_RELEASE_VERSION
     import youtube_monitor.ffmpeg_helper as fh
-    import youtube_monitor.ngrok_helper as nh
+    import youtube_monitor.cloudflare_helper as ch
 
     missing = {}
     for local_name, info in RESOURCE_ASSETS.items():
@@ -4309,21 +4310,21 @@ def _first_run_download_check():
     ffmpeg_ok, ffmpeg_msg, ffmpeg_src = fh.check_ffmpeg()
     ffmpeg_needed = not ffmpeg_ok
 
-    ngrok_ok, ngrok_msg, ngrok_src = nh.check_ngrok()
-    ngrok_needed = not ngrok_ok
+    cf_ok, cf_msg, cf_src = ch.check_cloudflared()
+    cf_needed = not cf_ok
 
-    if not missing and not ffmpeg_needed and not ngrok_needed:
+    if not missing and not ffmpeg_needed and not cf_needed:
         return
 
-    if list(missing) == ["Browser"] and not ffmpeg_needed and not ngrok_needed:
+    if list(missing) == ["Browser"] and not ffmpeg_needed and not cf_needed:
         _start_browser_engine_download()
         return
 
     items_list = [f"- {name}" for name in missing]
     if ffmpeg_needed:
         items_list.append("- FFmpeg")
-    if ngrok_needed:
-        items_list.append("- ngrok.exe (Tunnel WebSub YouTube)")
+    if cf_needed:
+        items_list.append("- cloudflared.exe (Cloudflare Quick Tunnel WebSub YouTube)")
     if "Browser" in missing:
         items_list.append("  (Browser ~700 MB sau khi giải nén; tải về sẽ giải nén và xác minh)")
     popup_msg = "Cần tải tài nguyên lần đầu:\n" + "\n".join(items_list) + "\n\nTiếp tục?"
@@ -4372,7 +4373,7 @@ def _first_run_download_check():
             except Exception:
                 pass
         try:
-            total = len(missing) + (1 if ffmpeg_needed else 0) + (1 if ngrok_needed else 0)
+            total = len(missing) + (1 if ffmpeg_needed else 0) + (1 if cf_needed else 0)
             i = 0
             resource_tag = f"v{RESOURCE_RELEASE_VERSION}"
             base_url = f"https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/download/{resource_tag}"
@@ -4480,15 +4481,15 @@ def _first_run_download_check():
                     raise RuntimeError(f"FFmpeg: {ff_msg}")
                 _update_status("Đã tải FFmpeg.", i / total)
 
-            if ngrok_needed:
+            if cf_needed:
                 i += 1
-                _update_status("Đang tải ngrok.exe...", (i - 0.9) / total)
+                _update_status("Đang tải cloudflared.exe...", (i - 0.9) / total)
                 def _ng_progress(text, pct):
                     _update_status(text, (i - 1 + pct) / total)
-                ng_ok, ng_msg = nh.ensure_ngrok(progress_callback=_ng_progress)
-                if not ng_ok:
-                    raise RuntimeError(f"Ngrok: {ng_msg}")
-                _update_status("Đã tải ngrok.exe.", i / total)
+                cf_ok, cf_msg = ch.ensure_cloudflared(progress_callback=_ng_progress)
+                if not cf_ok:
+                    raise RuntimeError(f"Cloudflare: {cf_msg}")
+                _update_status("Đã tải cloudflared.exe.", i / total)
 
             root.after(500, lambda: _done(True, ""))
         except requests.RequestException as e:
@@ -6017,6 +6018,170 @@ def assign_to_project():
         return_focus_to=tree if 'tree' in globals() else None,
     )
 
+
+
+def batch_set_proxy():
+    if not _license_guard():
+        return
+    selected_names = _selected_profile_names()
+    if not selected_names:
+        messagebox.showinfo("Thông báo", "Vui lòng chọn ít nhất một hồ sơ từ danh sách để gán proxy.")
+        return
+
+    from ui_dialogs import BatchSetProxyModal
+
+    # Lọc bỏ các hồ sơ đang chạy / mở trình duyệt để tránh xung đột
+    running_names = [
+        name for name in selected_names
+        if profiles.get(name, {}).get('running') or profiles.get(name, {}).get('driver') or profiles.get(name, {}).get('manual_driver')
+    ]
+    if running_names:
+        if len(running_names) == len(selected_names):
+            messagebox.showwarning(
+                "Không thể gán proxy",
+                f"Tất cả {len(running_names)} hồ sơ đã chọn đều đang chạy hoặc đang mở trình duyệt.\n"
+                "Vui lòng dừng hồ sơ trước khi thay đổi proxy."
+            )
+            return
+        toast_manager.enqueue(
+            f"Bỏ qua {len(running_names)} hồ sơ đang chạy/mở trình duyệt.",
+            level="warning",
+        )
+        selected_names = [n for n in selected_names if n not in running_names]
+
+    def _on_save(mapping: Dict[str, Dict[str, Any]]) -> bool:
+        try:
+            for prof_name, data in mapping.items():
+                prof = profiles.get(prof_name)
+                if not prof:
+                    continue
+                cfg = prof.setdefault('config', {})
+                ui = prof.setdefault('ui', {})
+
+                use_p = data.get('use_proxy', True)
+                p_type = data.get('proxy_type', 'http')
+                p_str = data.get('proxy_string', '')
+                region = data.get('region', '')
+                badge = data.get('status_badge', '')
+
+                cfg['use_proxy'] = use_p
+                cfg['proxy_type'] = p_type
+                cfg['proxy_string'] = p_str
+                if region:
+                    cfg['region'] = region
+                    if 'fingerprint' in cfg and isinstance(cfg['fingerprint'], dict):
+                        cfg['fingerprint']['geo_country_code'] = region
+                if not use_p:
+                    ui['proxy'] = 'Tắt'
+                elif badge:
+                    ui['proxy'] = badge
+                else:
+                    ui['proxy'] = 'Chưa kiểm tra'
+
+            save_configs()
+            update_profile_list()
+            try:
+                request_profile_refresh()
+            except Exception:
+                pass
+            toast_manager.enqueue(f"Đã cập nhật proxy cho {len(mapping)} hồ sơ.", level="info")
+            return True
+        except Exception as exc:
+            logger.error(f"[BatchProxy] Lỗi lưu cấu hình: {exc}", exc_info=True)
+            return False
+
+    first_type = "http"
+    if selected_names:
+        first_type = profiles.get(selected_names[0], {}).get('config', {}).get('proxy_type', 'http')
+
+    BatchSetProxyModal(
+        parent=root,
+        selected_profiles=selected_names,
+        on_save=_on_save,
+        proxy_type_default=first_type,
+    )
+
+
+def batch_check_selected_proxies():
+    if not _license_guard():
+        return
+    selected_names = _selected_profile_names()
+    if not selected_names:
+        messagebox.showinfo("Thông báo", "Vui lòng chọn ít nhất một hồ sơ từ danh sách để kiểm tra proxy.")
+        return
+
+    valid_targets = []
+    for name in selected_names:
+        prof = profiles.get(name, {})
+        cfg = prof.get('config', {})
+        if cfg.get('use_proxy') and str(cfg.get('proxy_string', '')).strip():
+            valid_targets.append((name, str(cfg.get('proxy_string', '')).strip()))
+        else:
+            prof.setdefault('ui', {})['proxy'] = 'Tắt'
+
+    if not valid_targets:
+        update_profile_list()
+        messagebox.showinfo(
+            "Kiểm tra Proxy",
+            "Không có hồ sơ nào trong số đã chọn đang bật proxy.\n"
+            "(Các hồ sơ không bật proxy đã được hiển thị trạng thái 'Tắt')."
+        )
+        return
+
+    update_status(f"[Proxy] Bắt đầu kiểm tra proxy cho {len(valid_targets)} hồ sơ...")
+    toast_manager.enqueue(f"Bắt đầu kiểm tra proxy cho {len(valid_targets)} hồ sơ...", level="info")
+
+    def _worker():
+        from proxy_diagnostics import batch_probe_proxies
+        unique_proxies = list(dict.fromkeys(p_str for _, p_str in valid_targets))
+        results = batch_probe_proxies(unique_proxies, max_workers=5, timeout=6)
+
+        def _update_ui():
+            ok_cnt = 0
+            fail_cnt = 0
+            for prof_name, p_str in valid_targets:
+                res = results.get(p_str, {})
+                prof = profiles.get(prof_name)
+                if not prof:
+                    continue
+                cfg = prof.setdefault('config', {})
+                ui = prof.setdefault('ui', {})
+
+                if res.get('ok'):
+                    ok_cnt += 1
+                    geo = res.get('geo') or {}
+                    cc = geo.get('country_code') or geo.get('country') or ''
+                    lat = res.get('latency_ms')
+                    lat_str = f" ({lat}ms)" if lat is not None else ""
+                    ui['proxy'] = f"🟢 Live{lat_str}"
+                    if cc:
+                        cfg['region'] = cc
+                        if 'fingerprint' in cfg and isinstance(cfg['fingerprint'], dict):
+                            cfg['fingerprint']['geo_country_code'] = cc
+                            if res.get('exit_ip'):
+                                cfg['fingerprint']['geo_exit_ip'] = res['exit_ip']
+                else:
+                    fail_cnt += 1
+                    ui['proxy'] = "🔴 Die"
+
+            save_configs()
+            update_profile_list()
+            try:
+                request_profile_refresh()
+            except Exception:
+                pass
+            msg = f"[Proxy] Hoàn tất kiểm tra: 🟢 {ok_cnt} Live | 🔴 {fail_cnt} Die"
+            update_status(msg)
+            toast_manager.enqueue(msg, level="info" if fail_cnt == 0 else "warning")
+
+        try:
+            root.after(0, _update_ui)
+        except Exception:
+            pass
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 def add_profile():
     if not _license_guard(): return
     
@@ -6343,14 +6508,55 @@ def add_profile():
     _ui_footer(dlg, primary_text="💾 Lưu Hồ Sơ", primary_command=save, secondary_text="Hủy", secondary_command=dlg.destroy)
 
 # --- IMPORT HÀNG LOẠT ---
+def _resolve_import_project(raw_value):
+    cleaned = str(raw_value or '').strip()
+    if not cleaned:
+        return 'Mặc định'
+    if cleaned == ALL_OPTION:
+        raise ValueError(f"Tên dự án không được trùng giá trị hệ thống '{ALL_OPTION}'.")
+    return cleaned
+
+
+def _default_import_project():
+    try:
+        current = selected_project_var.get() if 'selected_project_var' in globals() and selected_project_var else ''
+    except Exception:
+        current = ''
+    current = str(current or '').strip()
+    if current and current != ALL_OPTION and current in projects:
+        return current
+    return 'Mặc định'
+
+
+def _allocate_unique_profile_dirs(name, auto_data_root):
+    safe = "".join(c for c in name if c.isalnum() or c in (' ', '-', '_')).strip()
+    if not safe:
+        safe = f"Profile_{uuid.uuid4().hex[:8]}"
+    short_hash = hashlib.sha1(name.encode('utf-8')).hexdigest()[:6]
+    candidates = [safe, f"{safe}_{short_hash}"]
+    for candidate in candidates:
+        profile_root = os.path.join(auto_data_root, candidate)
+        video_dir = os.path.join(profile_root, "Video")
+        chrome_dir = os.path.join(profile_root, "Profile")
+        if not _find_profile_with_data_dir(chrome_dir):
+            return profile_root, video_dir, chrome_dir
+    counter = 2
+    while True:
+        profile_root = os.path.join(auto_data_root, f"{safe}_{short_hash}_{counter}")
+        video_dir = os.path.join(profile_root, "Video")
+        chrome_dir = os.path.join(profile_root, "Profile")
+        if not _find_profile_with_data_dir(chrome_dir):
+            return profile_root, video_dir, chrome_dir
+        counter += 1
+
+
 def _apply_import_plans(plans, proxy_type='http', default_project='Mặc định'):
+    target_project = _resolve_import_project(default_project)
     added = []
     updated_backup = {}
     created_dirs = []
-    default_project_created = False
-    if default_project not in projects:
-        projects[default_project] = set()
-        default_project_created = True
+    created_project_name = None
+    auto_data_root = str(app_base_dir() / "Auto_Data")
 
     for plan in plans:
         action = plan['action']
@@ -6360,14 +6566,7 @@ def _apply_import_plans(plans, proxy_type='http', default_project='Mặc định
             continue
         cfg = profiles.get(name, {}).get('config')
         if action == 'add':
-            safe = "".join(c for c in name if c.isalnum() or c in (' ', '-', '_')).strip()
-            if not safe:
-                safe = f"Profile_{uuid.uuid4().hex[:8]}"
-            profile_root = os.path.join(str(app_base_dir() / "Auto_Data"), safe)
-            video_dir = os.path.join(profile_root, "Video")
-            chrome_dir = os.path.join(profile_root, "Profile")
-            if _find_profile_with_data_dir(chrome_dir):
-                continue
+            _profile_root, video_dir, chrome_dir = _allocate_unique_profile_dirs(name, auto_data_root)
             try:
                 os.makedirs(video_dir, exist_ok=True)
                 if not Path(chrome_dir).exists():
@@ -6381,6 +6580,7 @@ def _apply_import_plans(plans, proxy_type='http', default_project='Mặc định
             config = {
                 "folder_path": video_dir,
                 "chrome_profile": chrome_dir,
+                "project_name": target_project,
                 "cookie_str": record.get('cookie_str', ''),
                 "email": record.get('email', ''),
                 "password": record.get('password', ''),
@@ -6401,16 +6601,19 @@ def _apply_import_plans(plans, proxy_type='http', default_project='Mặc định
                 "stats_yesterday": 0,
                 "stats_date": datetime.now().strftime('%Y-%m-%d')
             }
+            if target_project not in projects:
+                projects[target_project] = set()
+                created_project_name = target_project
             profiles[name] = {
                 'config': config,
                 'queue': queue.Queue(), 'observer': None, 'driver': None, 'running': False,
                 'processed_files': set(), 'last_event_time': {}, 'uploading': False,
-                'project': default_project,
+                'project': target_project,
                 'uploads_today_count': 0,
                 'uploads_yesterday_count': 0,
                 'uploads_today_date': datetime.now().strftime('%Y-%m-%d')
             }
-            projects[default_project].add(name)
+            projects[target_project].add(name)
             ensure_account_uuid(profiles[name]['config'])
             added.append(name)
         elif action == 'update' and cfg is not None:
@@ -6432,7 +6635,9 @@ def _apply_import_plans(plans, proxy_type='http', default_project='Mặc định
         'updated': list(updated_backup.keys()),
         'updated_backup': updated_backup,
         'created_dirs': created_dirs,
-        'default_project_created': default_project_created,
+        'target_project': target_project,
+        'created_project_name': created_project_name,
+        'default_project_created': bool(created_project_name == 'Mặc định'),
     }
 
 
@@ -6451,8 +6656,11 @@ def _rollback_import(result):
                 Path(directory).rmdir()
         except Exception:
             pass
-    if result.get('default_project_created') and 'Mặc định' in projects and not projects['Mặc định']:
-        del projects['Mặc định']
+    created_project = result.get('created_project_name')
+    if not created_project and result.get('default_project_created'):
+        created_project = 'Mặc định'
+    if created_project and created_project in projects and not projects[created_project]:
+        del projects[created_project]
 
 
 def batch_add_profiles():
@@ -6489,18 +6697,31 @@ def batch_add_profiles():
     format_entry = ctk.CTkEntry(top, textvariable=format_var, width=340, height=30, border_width=1, border_color='#cbd5e1')
     format_entry.grid(row=1, column=1, sticky='ew', padx=6, pady=(4, 0))
 
-    ctk.CTkLabel(top, text="(Phân tách bằng dấu `|`, bấm các thẻ bên phải để chèn nhanh trường)", font=('Segoe UI', 10), text_color=UIThemeTokens.TEXT_MUTED).grid(row=2, column=1, sticky='w', padx=6, pady=(2, 8))
+    ctk.CTkLabel(top, text="(Phân tách bằng dấu `|`, bấm các thẻ bên phải để chèn nhanh trường; thiếu `name` tự lấy ID TikTok rồi Email)", font=('Segoe UI', 10), text_color=UIThemeTokens.TEXT_MUTED).grid(row=2, column=1, sticky='w', padx=6, pady=(2, 8))
 
     opt = ctk.CTkFrame(dlg, fg_color=UIThemeTokens.BG_CARD, corner_radius=10, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
     opt.pack(side='top', fill='x', padx=12, pady=(0, 6))
+    opt_row1 = ctk.CTkFrame(opt, fg_color='transparent')
+    opt_row1.pack(fill='x', padx=8, pady=(6, 2))
     skip_header_var = ctk.BooleanVar(opt, value=False)
-    ctk.CTkCheckBox(opt, text="Dòng đầu là tiêu đề", variable=skip_header_var, font=('Segoe UI', 11)).pack(side='left', padx=(10, 16), pady=8)
-    ctk.CTkLabel(opt, text="Loại Proxy:", font=('Segoe UI', 11), text_color=UIThemeTokens.TEXT_PRIMARY).pack(side='left')
+    ctk.CTkCheckBox(opt_row1, text="Dòng đầu là tiêu đề", variable=skip_header_var, font=('Segoe UI', 11)).pack(side='left', padx=(2, 16), pady=2)
+    ctk.CTkLabel(opt_row1, text="Loại Proxy:", font=('Segoe UI', 11), text_color=UIThemeTokens.TEXT_PRIMARY).pack(side='left')
     proxy_type_var = StringVar(opt, value='http')
-    ctk.CTkOptionMenu(opt, values=['http', 'socks5'], variable=proxy_type_var, width=100, height=28).pack(side='left', padx=(4, 16), pady=8)
-    ctk.CTkLabel(opt, text="Khi trùng tên:", font=('Segoe UI', 11, 'bold'), text_color=UIThemeTokens.TEXT_PRIMARY).pack(side='left')
+    ctk.CTkOptionMenu(opt_row1, values=['http', 'socks5'], variable=proxy_type_var, width=100, height=28).pack(side='left', padx=(4, 16), pady=2)
+    ctk.CTkLabel(opt_row1, text="Khi trùng tên:", font=('Segoe UI', 11, 'bold'), text_color=UIThemeTokens.TEXT_PRIMARY).pack(side='left')
     dup_policy_var = StringVar(opt, value='Cập nhật')
-    ctk.CTkOptionMenu(opt, values=['Cập nhật', 'Bỏ qua', 'Báo lỗi'], variable=dup_policy_var, width=120, height=28, button_color=UIThemeTokens.ACCENT_PRIMARY).pack(side='left', padx=4, pady=8)
+    ctk.CTkOptionMenu(opt_row1, values=['Cập nhật', 'Bỏ qua', 'Báo lỗi'], variable=dup_policy_var, width=120, height=28, button_color=UIThemeTokens.ACCENT_PRIMARY).pack(side='left', padx=4, pady=2)
+
+    opt_row2 = ctk.CTkFrame(opt, fg_color='transparent')
+    opt_row2.pack(fill='x', padx=8, pady=(2, 6))
+    project_choices = sorted(k for k in projects.keys() if k and k != ALL_OPTION)
+    if 'Mặc định' not in project_choices:
+        project_choices.insert(0, 'Mặc định')
+    ctk.CTkLabel(opt_row2, text="Dự án:", font=('Segoe UI', 11, 'bold'), text_color=UIThemeTokens.TEXT_PRIMARY).pack(side='left', padx=(2, 6))
+    project_var = StringVar(opt, value=_default_import_project())
+    project_combo = ctk.CTkComboBox(opt_row2, values=project_choices, variable=project_var, width=220, height=28)
+    project_combo.pack(side='left', padx=(0, 10), pady=2)
+    ctk.CTkLabel(opt_row2, text="(Chọn có sẵn hoặc nhập tên dự án mới — chỉ áp dụng cho tài khoản thêm mới)", font=('Segoe UI', 10), text_color=UIThemeTokens.TEXT_MUTED).pack(side='left', pady=2)
 
     # 1. Pinned Bottom Action Bar (Packed first with side='bottom' so it is NEVER cut off)
     btn_row = ctk.CTkFrame(dlg, fg_color='transparent')
@@ -6576,6 +6797,11 @@ def batch_add_profiles():
 
     def run_import():
         try:
+            target_project = _resolve_import_project(project_combo.get())
+        except ValueError as exc:
+            messagebox.showerror("Dự án không hợp lệ", str(exc), parent=dlg)
+            return
+        try:
             _, records, errors = _parse_current()
         except ValueError as exc:
             messagebox.showerror("Format không hợp lệ", str(exc), parent=dlg)
@@ -6595,10 +6821,15 @@ def batch_add_profiles():
             messagebox.showerror("Trùng tên", "Chính sách 'Báo lỗi' được chọn nhưng có tên đã tồn tại:\n" + '\n'.join(names[:20]), parent=dlg)
             return
         proxy_type = proxy_type_var.get()
-        result = _apply_import_plans(plans, proxy_type)
+        result = _apply_import_plans(plans, proxy_type, default_project=target_project)
         try:
             save_configs()
+            update_project_dropdown()
             update_profile_list()
+            try:
+                _refresh_status_bar()
+            except Exception:
+                pass
             try:
                 request_profile_refresh()
             except Exception:
@@ -6608,10 +6839,11 @@ def batch_add_profiles():
             messagebox.showerror("Lỗi lưu", f"Không lưu được cấu hình, đã hoàn nguyên:\n{exc}", parent=dlg)
             return
         skipped = sum(1 for plan in plans if plan['action'] == 'skip')
+        project_summary = f"\nDự án (thêm mới): {target_project}" if result['added'] else ""
         toast_manager.enqueue(f"Import thành công: {len(result['added'])} thêm mới, {len(result['updated'])} cập nhật", level="info")
         messagebox.showinfo(
             "Hoàn tất",
-            f"Đã thêm: {len(result['added'])}\nĐã cập nhật: {len(result['updated'])}\nBỏ qua: {skipped}",
+            f"Đã thêm: {len(result['added'])}\nĐã cập nhật: {len(result['updated'])}\nBỏ qua: {skipped}{project_summary}",
             parent=dlg,
         )
         dlg.destroy()
@@ -7679,20 +7911,7 @@ def _wait_and_close_driver(driver, name):
 
 # --- TIkTok ID HELPER ---
 def _normalize_tiktok_id(value):
-    value = str(value or "").strip()
-    if not value:
-        return ""
-    value = value.rstrip("/")
-    lowered = value.lower()
-    marker = "tiktok.com/@"
-    if marker in lowered:
-        idx = lowered.find(marker)
-        value = value[idx + len(marker):]
-    value = value.strip().strip("/")
-    if value.startswith("@"):
-        value = value[1:]
-    value = value.split("?", 1)[0].split("#", 1)[0]
-    return value.strip().strip("/")
+    return normalize_tiktok_id(value)
 
 def copy_channel_link():
     sel = tree.selection()
@@ -8710,6 +8929,7 @@ youtube_monitor_handlers = {
     'start': _youtube_start_monitor,
     'stop': _youtube_stop_monitor,
     'retry_ngrok': _youtube_retry_ngrok,
+    'retry_tunnel': _youtube_retry_ngrok,
     'add_channel': _youtube_add_channel,
     'set_profile': _youtube_set_profile,
     'download_test': _youtube_download_test,
@@ -8724,6 +8944,9 @@ youtube_monitor_handlers = {
     'get_api_keys_pool': youtube_monitor.get_api_keys_pool_status,
     'analyze_schedule': youtube_monitor.analyze_channel_schedule,
     'update_manual_windows': youtube_monitor.update_channel_manual_windows,
+    'ping_channel_hub': youtube_monitor.ping_channel_hub,
+    'ping_all_channels_hub': youtube_monitor.ping_all_channels_hub,
+    'trigger_manual_scan_and_ping': youtube_monitor.trigger_manual_scan_and_ping,
 }
 
 def open_profile_folder(selected_name=None):
@@ -9181,10 +9404,12 @@ def _execute_schedule_task_upload(task: Dict[str, Any], force_immediate: bool = 
 
     v_path = task.get("video_path", "")
     caption = task.get("title") or Path(v_path).stem
-    exec_mode = task.get("execution_mode", "SERVER_SCHEDULE")
+    exec_mode = task.get("execution_mode", "LOCAL_QUEUE")
 
     raw_epoch = task.get("scheduled_epoch")
-    if exec_mode == "SERVER_SCHEDULE" and not force_immediate:
+    if force_immediate:
+        sched_epoch = None
+    elif exec_mode == "SERVER_SCHEDULE":
         try:
             val_epoch = int(raw_epoch) if raw_epoch is not None else 0
         except (ValueError, TypeError):
@@ -9235,8 +9460,10 @@ def _execute_schedule_task_upload(task: Dict[str, Any], force_immediate: bool = 
                 "tiktok_item_id": item_id,
                 "error_message": "",
             }
+            if force_immediate or not sched_epoch:
+                task_updates["execution_mode"] = "LOCAL_QUEUE"
 
-            # LƯU TRẠNG THÁI SERVER_SCHEDULED VÀO DATABASE TRƯỚC TIÊN
+            # LƯU TRẠNG THÁI VÀO DATABASE TRƯỚC TIÊN
             update_ok = global_schedule_manager.update_task(task["id"], task_updates)
 
             # TIẾN HÀNH DỌN DẸP FILE NGUỒN SAU KHI SERVER_SCHEDULE ĐÃ ĐƯỢC PERSIST
@@ -9296,12 +9523,15 @@ def _execute_schedule_task_upload(task: Dict[str, Any], force_immediate: bool = 
                     if res_retry.outcome == 'posted':
                         new_status = "SERVER_SCHEDULED" if sched_epoch else "SUCCESS"
                         item_id = str(res_retry.details.get("item_id") or "")
-                        update_ok_retry = global_schedule_manager.update_task(task["id"], {
+                        retry_updates: Dict[str, Any] = {
                             "status": new_status,
                             "completed_at": datetime.now().isoformat(),
                             "tiktok_item_id": item_id,
                             "error_message": "",
-                        })
+                        }
+                        if force_immediate or not sched_epoch:
+                            retry_updates["execution_mode"] = "LOCAL_QUEUE"
+                        update_ok_retry = global_schedule_manager.update_task(task["id"], retry_updates)
                         if update_ok_retry and task.get("delete_source_after_post", True):
                             if not global_schedule_manager.is_video_referenced_by_pending_tasks(v_path, exclude_task_id=task.get("id", "")):
                                 try:
@@ -9462,11 +9692,16 @@ def _handle_schedule_post_now(task_ids: List[str]):
         for t in ordered:
             if _shutting_down:
                 break
-            # Khóa và nhận việc nguyên tử trước khi đăng ngay
+            # Option A: Bảo lưu bài đăng lịch sử đã nạp lên Server TikTok, không đăng trùng
+            if t.get("status") == "SERVER_SCHEDULED":
+                update_status(f"[AutoSchedule] Bỏ qua bài đăng vì đã được lên lịch trực tiếp trên Server TikTok: {t.get('title')}")
+                continue
+            # Khóa và nhận việc nguyên tử trước khi đăng ngay với dynamic claim ID
+            claim_id = f"post_now_{t['id']}_{int(time.time())}"
             claimed = global_schedule_manager.claim_task_for_execution(
                 t["id"],
-                worker_id="post_now",
-                lease_seconds=300
+                worker_id=claim_id,
+                lease_seconds=600
             )
             if not claimed:
                 update_status(f"[AutoSchedule] Bỏ qua bài đăng vì đang được tiến trình khác xử lý: {t.get('title')}")
@@ -9474,7 +9709,7 @@ def _handle_schedule_post_now(task_ids: List[str]):
 
             if 'ui_widgets' in globals() and 'schedule_view' in ui_widgets:
                 root.after_idle(ui_widgets['schedule_view']._refresh_data)
-            _execute_schedule_task_upload(t)
+            _execute_schedule_task_upload(t, force_immediate=True)
             time.sleep(5)
         if 'ui_widgets' in globals() and 'schedule_view' in ui_widgets:
             root.after_idle(ui_widgets['schedule_view']._refresh_data)
@@ -9540,17 +9775,49 @@ def _build_schedule_view(parent_frame):
         ui_widgets['schedule_view'] = view
     return view
 
+_schedule_daemon_started = False
+
 def _start_schedule_daemon():
-    global global_schedule_manager
+    global global_schedule_manager, _schedule_daemon_started
     global_schedule_manager = _get_active_schedule_manager()
-    """Khởi động Background Scheduler Daemon Worker kiểm tra các task đến giờ."""
-    if os.environ.get("CI", "").lower() == "true" or "unittest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST"):
+    """Khởi động Background Scheduler Daemon Worker đa luồng theo Proxy kiểm tra các task đến giờ."""
+    if _schedule_daemon_started:
         return
+    if os.environ.get("CI", "").lower() == "true" or os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    _schedule_daemon_started = True
+
+    def _get_profile_configs_snapshot() -> Dict[str, Any]:
+        return {str(k).strip(): dict(v.get("config", {})) for k, v in profiles.items() if isinstance(v, dict)}
+
+    def _get_daemon_tuning() -> Tuple[int, int]:
+        try:
+            workers = int(app_settings.get("schedule_max_workers", 5)) if isinstance(globals().get("app_settings"), dict) else 5
+        except Exception:
+            workers = 5
+        try:
+            cooldown_min = int(app_settings.get("schedule_proxy_cooldown_minutes", 5)) if isinstance(globals().get("app_settings"), dict) else 5
+        except Exception:
+            cooldown_min = 5
+        return max(1, min(15, workers)), max(0, min(60, cooldown_min))
 
     def _daemon_loop():
-        # 1. Quét phục hồi task lỡ hẹn do tắt máy
+        from schedule_service import ProxyAwareScheduleDispatcher
+
+        init_workers, init_cooldown_min = _get_daemon_tuning()
+        dispatcher = ProxyAwareScheduleDispatcher(
+            manager=global_schedule_manager,
+            execute_fn=lambda t: _execute_schedule_task_upload(t, force_immediate=True),
+            max_workers=init_workers,
+            proxy_cooldown_seconds=init_cooldown_min * 60,
+        )
+
+        # 1. Quét phục hồi task lỡ hẹn do tắt máy (theo múi giờ Proxy + giãn cách Proxy)
         try:
-            recovered = global_schedule_manager.recover_missed_tasks()
+            recovered = global_schedule_manager.recover_missed_tasks(
+                profile_configs=_get_profile_configs_snapshot(),
+                proxy_cooldown_minutes=init_cooldown_min,
+            )
             if recovered:
                 update_status(f"[AutoSchedule] Đã tự động dời lịch thông minh {len(recovered)} video bị lỡ hẹn.")
                 try:
@@ -9560,24 +9827,40 @@ def _start_schedule_daemon():
         except Exception as e:
             logger.error(f"Lỗi recover missed tasks: {e}")
 
-        # 2. Vòng lặp định kỳ 30 giây
+        # 2. Vòng lặp định kỳ 15 giây (xả hàng đợi nhanh cho dàn nhiều acc)
+        last_check_time = time.time()
         while not _shutting_down:
-            for _ in range(30):
+            for _ in range(15):
                 if _shutting_down:
+                    dispatcher.shutdown(wait=False)
                     return
                 time.sleep(1)
 
+            now_ts = time.time()
+            cur_workers, cur_cooldown_min = _get_daemon_tuning()
+            dispatcher.update_limits(max_workers=cur_workers, proxy_cooldown_seconds=cur_cooldown_min * 60)
+
+            # Phát hiện độ trễ bất thường (> 120s) -> máy vừa thức dậy từ Sleep/Hibernate
+            if (now_ts - last_check_time) > 120:
+                logger.info(f"[AutoSchedule] Phát hiện máy vừa thức dậy từ Sleep (độ trễ {int(now_ts - last_check_time)}s). Đang kích hoạt quét dời lịch bù...")
+                try:
+                    recovered = global_schedule_manager.recover_missed_tasks(
+                        profile_configs=_get_profile_configs_snapshot(),
+                        proxy_cooldown_minutes=cur_cooldown_min,
+                    )
+                    if recovered:
+                        update_status(f"[AutoSchedule] Đã tự động dời lịch thông minh {len(recovered)} video bị lỡ hẹn khi Sleep.")
+                        try:
+                            root.after_idle(update_profile_list)
+                        except Exception:
+                            pass
+                except Exception as wake_ex:
+                    logger.error(f"Lỗi khi recover missed tasks sau wake-from-sleep: {wake_ex}")
+            last_check_time = now_ts
+
             try:
-                # Khóa và nhận việc nguyên tử (Atomic Claim) các task LOCAL_QUEUE đến hạn
-                due_tasks = global_schedule_manager.claim_due_tasks(worker_id="daemon_loop", limit=2, lease_seconds=300)
-
-                if due_tasks:
-                    for task in due_tasks:
-                        if _shutting_down:
-                            return
-                        _execute_schedule_task_upload(task)
-                        time.sleep(2)
-
+                dispatched = dispatcher.dispatch_due_tasks(profile_configs=_get_profile_configs_snapshot())
+                if dispatched:
                     if 'ui_widgets' in globals() and 'schedule_view' in ui_widgets:
                         root.after_idle(ui_widgets['schedule_view']._refresh_data)
                     try:
@@ -9710,6 +9993,8 @@ ui_handlers = {
     'delete_profile': delete_profile,
     'rename_profile': rename_profile,
     'assign_to_project': assign_to_project,
+    'batch_set_proxy': batch_set_proxy,
+    'batch_check_selected_proxies': batch_check_selected_proxies,
     'show_statistics_board': show_statistics_board,
     'open_browser': open_browser,
     'get_tiktok_cookies': get_tiktok_cookies,
@@ -9761,7 +10046,7 @@ ui_handlers = {
     'schedule_view_builder': _build_schedule_view,
 }
 ui_widgets = build_dashboard(root, ui_state, ui_handlers)
-_start_schedule_daemon()
+global_schedule_manager = _get_active_schedule_manager()
 
 # Bind double-click & right-click on monetization tree
 if 'monetization_tree' in ui_widgets:
@@ -9887,48 +10172,57 @@ tree.bind("<<TreeviewSelect>>", _update_action_buttons)
 tree.bind("<Delete>", lambda _event: delete_profile())
 
 def _tick():
-    # Cập nhật UI
-    _refresh_status_bar()
     try:
-        toast_manager.poll_queue()
-    except Exception:
-        pass
-    try:
+        # Cập nhật UI
+        try:
+            _refresh_status_bar()
+        except Exception:
+            pass
+        try:
+            toast_manager.poll_queue()
+        except Exception:
+            pass
         if youtube_monitor_view:
-            youtube_monitor_view.refresh_data()
+            try:
+                youtube_monitor_view.refresh_data()
+            except Exception as e:
+                logger.debug(f"[UI] youtube_monitor_view refresh error: {e}")
         if batch_download_view:
-            batch_download_view.refresh_data()
+            try:
+                batch_download_view.refresh_data()
+            except Exception:
+                pass
         if activity_view:
-            activity_view.refresh_data()
-    except Exception:
-        pass
-    
-    # --- LOGIC RESET NGÀY TỰ ĐỘNG (MIDNIGHT CHECK) ---
-    current_date_str = datetime.now().strftime('%Y-%m-%d')
-    need_save = False
-    
-    # Quét qua tất cả profile để xem đã qua ngày mới chưa
-    for name, prof in profiles.items():
-        if isinstance(prof, dict) and prof.get('uploads_today_date') != current_date_str:
-            # Phát hiện ngày mới -> Reset
-            prof['uploads_yesterday_count'] = prof.get('uploads_today_count', 0)
-            prof['uploads_today_count'] = 0
-            prof['uploads_today_date'] = current_date_str
-            need_save = True
-            
-    if need_save:
-        save_configs()
-        update_status("Đã tự động reset bộ đếm ngày mới (Midnight Reset).")
-        root.after(500, reconcile_daily_resumes)
-    # ------------------------------------------------
-    
-    root.after(1000, _tick)
-
-if "unittest" not in sys.modules and not os.environ.get("PYTEST_CURRENT_TEST"):
-    root.after(1000, _tick)
-    root.after(100, _drain_update_ui_queue)
+            try:
+                activity_view.refresh_data()
+            except Exception:
+                pass
+        
+        # --- LOGIC RESET NGÀY TỰ ĐỘNG (MIDNIGHT CHECK) ---
+        current_date_str = datetime.now().strftime('%Y-%m-%d')
+        need_save = False
+        
+        # Quét qua tất cả profile để xem đã qua ngày mới chưa
+        for name, prof in profiles.items():
+            if isinstance(prof, dict) and prof.get('uploads_today_date') != current_date_str:
+                # Phát hiện ngày mới -> Reset
+                prof['uploads_yesterday_count'] = prof.get('uploads_today_count', 0)
+                prof['uploads_today_count'] = 0
+                prof['uploads_today_date'] = current_date_str
+                need_save = True
+                
+        if need_save:
+            save_configs()
+            update_status("Đã tự động reset bộ đếm ngày mới (Midnight Reset).")
+            root.after(500, reconcile_daily_resumes)
+        # ------------------------------------------------
+    finally:
+        root.after(1000, _tick)
 
 if __name__ == "__main__":
+    _start_schedule_daemon()
+    root.after(1000, _tick)
+    root.after(100, _drain_update_ui_queue)
     root.after(0, require_license_then_boot)
     _run_auto6_watcher_test_from_env()
     _run_single_upload_test_from_env()

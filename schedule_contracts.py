@@ -92,8 +92,8 @@ def _deep_unfreeze(obj: Any) -> Any:
 class VideoValidationPolicy:
     """Chính sách kiểm tra video hợp lệ."""
     min_duration_seconds: float = 3.0
-    max_duration_seconds: float = 600.0
-    allowed_codecs: Tuple[str, ...] = ("h264", "hevc", "av1")
+    max_duration_seconds: float = 3600.0
+    allowed_codecs: Tuple[str, ...] = ("h264", "hevc", "av1", "vp9", "vp8", "mpeg4")
     require_audio: bool = False
     max_file_size_bytes: int = 4 * 1024 * 1024 * 1024  # 4GB max
 
@@ -340,9 +340,13 @@ class TimelineRequest:
     custom_slots: Optional[Tuple[TimelineSlot, ...]] = None
     jitter_minutes: int = 10
     min_lead_time_minutes: int = 20
-    execution_mode: ExecutionMode = "SERVER_SCHEDULE"
+    execution_mode: ExecutionMode = "LOCAL_QUEUE"
     existing_occupancy_epochs: Tuple[int, ...] = ()
     random_seed: Optional[int] = None
+    randomize_in_slot: bool = False
+    proxy_occupied_epochs: Tuple[int, ...] = ()
+    proxy_slot_offset: int = 0
+    min_proxy_gap_minutes: int = 15
 
 
 @dataclass(frozen=True)
@@ -366,11 +370,13 @@ class ScheduleRequest:
     daily_max: int = 2
     selected_slots: Tuple[str, ...] = ("SANG", "TRUA", "CHIEU", "TOI")
     custom_slots: Optional[Tuple[TimelineSlot, ...]] = None
-    jitter_minutes: int = 10
-    execution_mode: ExecutionMode = "SERVER_SCHEDULE"
+    jitter_minutes: int = 0
+    execution_mode: ExecutionMode = "LOCAL_QUEUE"
     resolution_mode: ResolutionMode = "APPEND"
     order_mode: OrderMode = "ORIGINAL"
     delete_source_after_post: bool = True
     start_date_local: Optional[datetime.date] = None
     start_time_local: Optional[datetime.time] = None
     random_seed: Optional[int] = None
+    randomize_in_slot: bool = True
+    min_proxy_gap_minutes: int = 15

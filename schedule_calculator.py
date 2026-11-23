@@ -11,6 +11,7 @@ Chịu trách nhiệm:
 
 from __future__ import annotations
 
+import bisect
 import datetime
 import hashlib
 import json
@@ -91,19 +92,81 @@ def _canonicalize_for_hash(obj: Any) -> Any:
     return obj
 
 
-def resolve_profile_timezone(cfg: Optional[Mapping[str, Any]]) -> str:
-    """Trích xuất tên múi giờ từ cấu hình profile TikTok (hỗ trợ mọi Mapping)."""
+def extract_proxy_key(cfg: Optional[Mapping[str, Any]]) -> str:
+    """Trích xuất khóa nhận diện Proxy (host:port) không lộ thông tin mật khẩu."""
     if not isinstance(cfg, Mapping):
-        return "America/New_York"
+        return ""
+    if cfg.get("use_proxy") is False:
+        return ""
+    raw_proxy = str(cfg.get("proxy_string") or cfg.get("proxy") or "").strip()
+    if not raw_proxy:
+        return ""
+    # Strip scheme if present
+    cleaned = re.sub(r"^[a-zA-Z0-9+.-]+://", "", raw_proxy)
+    # Handle user:pass@host:port
+    if "@" in cleaned:
+        cleaned = cleaned.split("@", 1)[-1]
+    parts = [p.strip() for p in cleaned.split(":") if p.strip()]
+    if len(parts) >= 2:
+        return f"{parts[0].lower()}:{parts[1]}"
+    return cleaned.lower()
+
+
+def resolve_profile_timezone(cfg: Optional[Mapping[str, Any]]) -> str:
+    """Trích xuất tên múi giờ theo thứ tự ưu tiên: Proxy GeoIP -> Fingerprint -> Config -> Local (VN)."""
+    default_tz = "Asia/Ho_Chi_Minh"
+    if not isinstance(cfg, Mapping):
+        return default_tz
+    # 1. Ưu tiên múi giờ trích xuất từ Proxy GeoIP cache
+    proxy_geo = cfg.get("proxy_geo")
+    if isinstance(proxy_geo, Mapping):
+        geo_tz = str(proxy_geo.get("timezone") or "").strip()
+        if geo_tz:
+            return geo_tz
+    # 2. Múi giờ trong fingerprint hoặc cấu hình trực tiếp
     fp = cfg.get("fingerprint")
     tz = fp.get("timezone") if isinstance(fp, Mapping) else None
     if not tz:
         tz = cfg.get("timezone")
     if isinstance(tz, Mapping):
-        return str(tz.get("name") or tz.get("timezone") or tz.get("tz") or "America/New_York").strip()
+        val = str(tz.get("name") or tz.get("timezone") or tz.get("tz") or "").strip()
+        return val or default_tz
     if isinstance(tz, str) and tz.strip():
         return tz.strip()
-    return "America/New_York"
+    return default_tz
+
+
+def resolve_profile_region_label(cfg: Optional[Mapping[str, Any]]) -> str:
+    """Trả về nhãn khu vực ngắn gọn từ Proxy/Timezone để hiển thị thân thiện trên UI."""
+    tz_name = resolve_profile_timezone(cfg)
+    cc = ""
+    if isinstance(cfg, Mapping):
+        proxy_geo = cfg.get("proxy_geo")
+        if isinstance(proxy_geo, Mapping):
+            cc = str(proxy_geo.get("country_code") or "").strip().upper()
+    flag_map = {
+        "US": "🇺🇸", "VN": "🇻🇳", "GB": "🇬🇧", "UK": "🇬🇧", "JP": "🇯🇵",
+        "KR": "🇰🇷", "SG": "🇸🇬", "TH": "🇹🇭", "ID": "🇮🇩", "PH": "🇵🇭",
+        "MY": "🇲🇾", "DE": "🇩🇪", "FR": "🇫🇷", "CA": "🇨🇦", "AU": "🇦🇺",
+    }
+    flag = flag_map.get(cc, "")
+    if not flag:
+        if "Ho_Chi_Minh" in tz_name or "Bangkok" in tz_name or "Saigon" in tz_name:
+            flag = "🇻🇳" if "Ho_Chi_Minh" in tz_name or "Saigon" in tz_name else "🇹🇭"
+        elif tz_name.startswith("America/"):
+            flag = "🇺🇸"
+        elif tz_name.startswith("Europe/"):
+            flag = "🇪🇺"
+        elif "Tokyo" in tz_name:
+            flag = "🇯🇵"
+        elif "Seoul" in tz_name:
+            flag = "🇰🇷"
+        elif "Singapore" in tz_name:
+            flag = "🇸🇬"
+        else:
+            flag = "🌐"
+    short_city = tz_name.split("/")[-1].replace("_", " ")
+    return f"{flag} {short_city}"
 
 
 DEFAULT_GOLDEN_HOUR_SLOTS = {
@@ -411,51 +474,100 @@ def build_schedule_timeline(
     max_days_guard = max(365, request.count * 10)
     days_checked = 0
 
+    sorted_proxy_epochs: List[int] = sorted(int(ep) for ep in getattr(request, "proxy_occupied_epochs", ()) or ())
+    min_proxy_gap_sec = max(0, int(getattr(request, "min_proxy_gap_minutes", 15))) * 60
+    randomize_in_slot = bool(getattr(request, "randomize_in_slot", False))
+    proxy_slot_offset = max(0, int(getattr(request, "proxy_slot_offset", 0)))
+
+    def _min_distance_to_proxy_epochs(ep: int) -> int:
+        if not sorted_proxy_epochs:
+            return 10**9
+        idx = bisect.bisect_left(sorted_proxy_epochs, ep)
+        best = 10**9
+        if idx < len(sorted_proxy_epochs):
+            best = min(best, abs(sorted_proxy_epochs[idx] - ep))
+        if idx > 0:
+            best = min(best, abs(ep - sorted_proxy_epochs[idx - 1]))
+        return best
+
     while len(scheduled_candidates) < request.count and days_checked < max_days_guard:
         day_candidates: List[Tuple[datetime.datetime, str, int, datetime.date]] = []
 
         for slot in slots:
-            # Tính mốc giữa khung giờ
             start_mins = slot.start_hour * 60 + slot.start_minute
             end_mins = slot.end_hour * 60 + slot.end_minute
             if end_mins <= start_mins:
                 end_mins += 24 * 60
 
-            mid_mins = (start_mins + end_mins) // 2
-            half_window = max(5, (end_mins - start_mins) // 4)
-            effective_jitter = min(abs(request.jitter_minutes), half_window)
+            if randomize_in_slot:
+                best_candidate: Optional[Tuple[datetime.datetime, str, int, datetime.date]] = None
+                best_dist = -1
+                attempts = 12 if (sorted_proxy_epochs and min_proxy_gap_sec > 0) else 1
+                for _ in range(attempts):
+                    target_mins = generator_rng.randint(start_mins, end_mins)
+                    slot_hour, slot_min = divmod(target_mins % (24 * 60), 60)
+                    day_offset = target_mins // (24 * 60)
+                    raw_target_date = current_day + datetime.timedelta(days=day_offset)
+                    try:
+                        candidate_dt = datetime.datetime.combine(
+                            raw_target_date,
+                            datetime.time(hour=slot_hour, minute=slot_min),
+                            tzinfo=tz,
+                        ).replace(fold=0, second=0, microsecond=0)
+                        final_date = candidate_dt.date()
+                        final_epoch = int(candidate_dt.timestamp())
+                        rt_dt = datetime.datetime.fromtimestamp(final_epoch, tz=tz)
+                        if (rt_dt.date(), rt_dt.hour, rt_dt.minute) != (candidate_dt.date(), candidate_dt.hour, candidate_dt.minute):
+                            continue
+                        dist = _min_distance_to_proxy_epochs(final_epoch)
+                        if dist > best_dist:
+                            best_dist = dist
+                            best_candidate = (candidate_dt, slot.slot_id, final_epoch, final_date)
+                        if dist >= min_proxy_gap_sec:
+                            break
+                    except Exception:
+                        continue
+                if best_candidate is not None:
+                    day_candidates.append(best_candidate)
+            else:
+                mid_mins = (start_mins + end_mins) // 2
+                half_window = max(5, (end_mins - start_mins) // 4)
+                effective_jitter = min(abs(request.jitter_minutes), half_window)
 
-            jitter_delta = generator_rng.randint(-effective_jitter, effective_jitter)
-            target_mins = mid_mins + jitter_delta
-            target_mins = max(start_mins, min(end_mins, target_mins))
+                jitter_delta = generator_rng.randint(-effective_jitter, effective_jitter)
+                target_mins = mid_mins + jitter_delta
+                target_mins = max(start_mins, min(end_mins, target_mins))
 
-            slot_hour, slot_min = divmod(target_mins % (24 * 60), 60)
-            day_offset = target_mins // (24 * 60)
-            raw_target_date = current_day + datetime.timedelta(days=day_offset)
+                slot_hour, slot_min = divmod(target_mins % (24 * 60), 60)
+                day_offset = target_mins // (24 * 60)
+                raw_target_date = current_day + datetime.timedelta(days=day_offset)
 
-            try:
-                candidate_dt = datetime.datetime.combine(
-                    raw_target_date,
-                    datetime.time(hour=slot_hour, minute=slot_min),
-                    tzinfo=tz,
-                ).replace(fold=0)
+                try:
+                    candidate_dt = datetime.datetime.combine(
+                        raw_target_date,
+                        datetime.time(hour=slot_hour, minute=slot_min),
+                        tzinfo=tz,
+                    ).replace(fold=0)
 
-                # LÀM TRÒN TRƯỚC (Rounding First) để xác định ngày đăng thực tế và epoch (F04, F11)
-                rounded_dt = round_to_nearest_interval(candidate_dt, interval_minutes=5)
-                final_date = rounded_dt.date()
-                final_epoch = int(rounded_dt.timestamp())
+                    # LÀM TRÒN TRƯỚC (Rounding First) để xác định ngày đăng thực tế và epoch (F04, F11)
+                    rounded_dt = round_to_nearest_interval(candidate_dt, interval_minutes=5)
+                    final_date = rounded_dt.date()
+                    final_epoch = int(rounded_dt.timestamp())
 
-                # Round-trip verification: Bỏ qua các mốc thời gian không tồn tại do nhảy giờ DST Spring-Forward gap
-                rt_dt = datetime.datetime.fromtimestamp(final_epoch, tz=tz)
-                if (rt_dt.date(), rt_dt.hour, rt_dt.minute) != (rounded_dt.date(), rounded_dt.hour, rounded_dt.minute):
+                    # Round-trip verification: Bỏ qua các mốc thời gian không tồn tại do nhảy giờ DST Spring-Forward gap
+                    rt_dt = datetime.datetime.fromtimestamp(final_epoch, tz=tz)
+                    if (rt_dt.date(), rt_dt.hour, rt_dt.minute) != (rounded_dt.date(), rounded_dt.hour, rounded_dt.minute):
+                        continue
+
+                    day_candidates.append((rounded_dt, slot.slot_id, final_epoch, final_date))
+                except Exception:
                     continue
-
-                day_candidates.append((rounded_dt, slot.slot_id, final_epoch, final_date))
-            except Exception:
-                continue
 
         # SẮP XẾP CHRONOLOGICAL THEO THỜI GIAN THỰC TẾ CỦA MỐC ĐĂNG (giải quyết triệt để lỗi đảo slot xuyên đêm)
         day_candidates.sort(key=lambda item: item[2])
+        if proxy_slot_offset > 0 and len(day_candidates) > 1:
+            rot = proxy_slot_offset % len(day_candidates)
+            day_candidates = day_candidates[rot:] + day_candidates[:rot]
 
         for rounded_dt, slot_id, final_epoch, final_date in day_candidates:
             if len(scheduled_candidates) >= request.count:
@@ -649,9 +761,11 @@ def build_schedule_plan(
         cfg = request.profile_configs.get(p_name, {}) if isinstance(request.profile_configs, Mapping) else {}
         tiktok_acc = str(cfg.get("tiktok_account") or cfg.get("tiktok_id") or "").strip()
         tz_name = resolve_profile_timezone(cfg)
+        p_key = extract_proxy_key(cfg)
         cleaned_profile_configs[p_name] = {
             "tiktok_account": tiktok_acc,
             "timezone": tz_name,
+            "proxy_key": p_key,
         }
 
     # Nếu không có profile hợp lệ nào, chuyển toàn bộ video hợp lệ vào unassigned (F10)
@@ -674,7 +788,10 @@ def build_schedule_plan(
 
     conflicted_set = set(conflicts.conflicted_profiles) if conflicts else set()
 
-    # 5. Sinh timeline và tạo PlannedTask cho từng profile
+    # 5. Sinh timeline và tạo PlannedTask cho từng profile (có rải khung giờ & giãn cách chống trùng IP theo Proxy)
+    proxy_occupied_by_key: Dict[str, List[int]] = defaultdict(list)
+    proxy_slot_counter: Dict[str, int] = defaultdict(int)
+
     for p_name in normalized_profiles:
         v_list = distribution.get(p_name, [])
         if not v_list:
@@ -683,6 +800,7 @@ def build_schedule_plan(
         p_info = cleaned_profile_configs[p_name]
         tiktok_acc = p_info["tiktok_account"]
         tz_name = p_info["timezone"]
+        p_key = p_info.get("proxy_key", "")
 
         # Xử lý resolution_mode SKIP
         if request.resolution_mode == "SKIP" and p_name in conflicted_set:
@@ -727,6 +845,9 @@ def build_schedule_plan(
         profile_seed = int(hashlib.md5(profile_seed_str.encode("utf-8")).hexdigest()[:8], 16)
         profile_rng = random.Random(profile_seed)
 
+        p_occupied = tuple(proxy_occupied_by_key[p_key]) if p_key else ()
+        p_slot_offset = proxy_slot_counter[p_key] if p_key else 0
+
         timeline_req = TimelineRequest(
             count=len(v_list),
             profile_name=p_name,
@@ -741,9 +862,17 @@ def build_schedule_plan(
             execution_mode=request.execution_mode,
             existing_occupancy_epochs=tuple(existing_epochs),
             random_seed=profile_seed,
+            randomize_in_slot=getattr(request, "randomize_in_slot", True),
+            proxy_occupied_epochs=p_occupied,
+            proxy_slot_offset=p_slot_offset,
+            min_proxy_gap_minutes=getattr(request, "min_proxy_gap_minutes", 15),
         )
 
         timeline_res = build_schedule_timeline(timeline_req, now_utc=effective_now_utc, rng=profile_rng)
+        if p_key:
+            proxy_slot_counter[p_key] += 1
+            for dt_item in timeline_res.scheduled_datetimes:
+                proxy_occupied_by_key[p_key].append(int(dt_item.timestamp()))
 
         for idx, sched_dt in enumerate(timeline_res.scheduled_datetimes):
             v_target = v_list[idx]

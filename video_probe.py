@@ -47,6 +47,16 @@ class _RawProbeMetadata:
     raw_issues: Tuple[str, ...]
 
 
+# Bảng chuẩn hóa codec hợp lệ cho TikTok VOD / Publish
+CANONICAL_CODEC_VARIANTS: Dict[str, Set[str]] = {
+    "h264": {"h264", "avc", "avc1"},
+    "hevc": {"hevc", "h265", "hev1", "hvc1"},
+    "av1": {"av1", "av01"},
+    "vp9": {"vp9", "vp09"},
+    "vp8": {"vp8"},
+    "mpeg4": {"mpeg4", "mp4v", "mp4v-es"},
+}
+
 _CACHE_LOCK = threading.Lock()
 _RAW_METADATA_CACHE: Dict[Tuple[str, int, int], _RawProbeMetadata] = {}
 
@@ -450,11 +460,7 @@ def probe_video(
                 issues.append(f"DURATION_EXCEEDS_MAX: {raw.duration_seconds:.1f}s > {policy.max_duration_seconds:.1f}s")
 
         # Bảng chuẩn hóa codec hợp lệ cho TikTok VOD / Publish
-        canonical_codec_variants = {
-            "h264": {"h264", "avc", "avc1"},
-            "hevc": {"hevc", "h265", "hev1", "hvc1"},
-            "av1": {"av1", "av01"},
-        }
+        canonical_codec_variants = CANONICAL_CODEC_VARIANTS
 
         if raw.video_codec:
             is_allowed = False
@@ -550,3 +556,66 @@ def batch_probe_videos(
                 )
 
     return [r for r in results if r is not None]
+
+
+def humanize_unassigned_reason(reason: str, details: str = "") -> Tuple[str, str]:
+    """Chuyển mã lỗi kỹ thuật sang nhóm lỗi và giải thích tiếng Việt thân thiện."""
+    r = str(reason or "").strip()
+    d = str(details or "").strip()
+
+    combined = f"{r} {d}".upper()
+
+    if any(k in combined for k in ("DURATION_BELOW_MIN", "DURATION_EXCEEDS_MAX", "DURATION_UNKNOWN", "DURATION_NAN", "DURATION_PARSE")):
+        cat = "Thời lượng"
+        if "DURATION_BELOW_MIN" in combined:
+            msg = d or "Thời lượng quá ngắn (< 3 giây)"
+        elif "DURATION_EXCEEDS_MAX" in combined:
+            msg = d or "Thời lượng vượt quá tối đa (> 60 phút)"
+        else:
+            msg = "Không đọc được thời lượng video hợp lệ"
+        return cat, msg
+
+    if any(k in combined for k in ("CODEC_NOT_RECOMMENDED", "MISSING_VIDEO_CODEC", "NO_VIDEO_STREAM")):
+        cat = "Sai Codec"
+        if "CODEC_NOT_RECOMMENDED" in combined:
+            msg = d or "Codec video không thuộc chuẩn TikTok (h264, hevc, av1, vp9, vp8, mpeg4)"
+        elif "NO_VIDEO_STREAM" in combined:
+            msg = "File không chứa luồng video (hoặc file âm thanh/ảnh bị đổi đuôi)"
+        else:
+            msg = d or "Thiếu thông tin codec video"
+        return cat, msg
+
+    if any(k in combined for k in ("EMPTY_FILE", "ZERO_BYTES", "CORRUPT", "UNREADABLE", "FILE_TOO_LARGE", "INVALID_RESOLUTION")):
+        cat = "File lỗi / 0 Byte"
+        if "EMPTY_FILE" in combined or "ZERO_BYTES" in combined:
+            msg = "File rỗng (dung lượng 0 bytes hoặc tải dở)"
+        elif "FILE_TOO_LARGE" in combined:
+            msg = "Dung lượng file vượt quá giới hạn 4GB"
+        elif "CORRUPT" in combined or "UNREADABLE" in combined:
+            msg = "File bị lỗi cấu trúc, hỏng header hoặc không thể đọc luồng media"
+        elif "RESOLUTION" in combined:
+            msg = "Độ phân giải video không hợp lệ hoặc không xác định"
+        else:
+            msg = d or "File media bị lỗi dữ liệu kỹ thuật"
+        return cat, msg
+
+    if "PROFILE_SKIPPED_DUE_TO_CONFLICT" in combined or "NO_VALID_PROFILES" in combined:
+        cat = "Xung đột lịch"
+        msg = d or "Bị bỏ qua do profile có bài đăng trùng lịch (chế độ SKIP)"
+        return cat, msg
+
+    if any(k in combined for k in ("FILE_NOT_FOUND", "NOT_A_FILE", "STAT_FAILED", "STALE_PROBE", "FFPROBE")):
+        cat = "Hệ thống"
+        if "FILE_NOT_FOUND" in combined:
+            msg = "File không tồn tại trên ổ đĩa"
+        elif "FFPROBE_NOT_AVAILABLE" in combined:
+            msg = "Máy tính không tìm thấy công cụ ffprobe để kiểm tra video"
+        elif "PROBE_TIMEOUT" in combined:
+            msg = "Quá thời gian kiểm tra video (timeout > 15s)"
+        elif "STALE_PROBE" in combined:
+            msg = "File bị thay đổi trên đĩa trong quá trình kiểm tra"
+        else:
+            msg = d or "Lỗi hệ thống khi đọc file"
+        return cat, msg
+
+    return "Khác", d or r

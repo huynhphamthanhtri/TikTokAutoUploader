@@ -67,6 +67,72 @@ class TestUIDialogs(unittest.TestCase):
             if dialog.winfo_exists():
                 dialog.destroy()
 
+    def test_batch_set_proxy_modal_disable_proxy_toggle(self):
+        """Disabling proxy in BatchSetProxyModal sets use_proxy=False for all selected profiles."""
+        saved_data = {}
+
+        def mock_save(data):
+            saved_data.update(data)
+            return True
+
+        dialog = BatchSetProxyModal(
+            self.root,
+            selected_profiles=["prof_A", "prof_B"],
+            on_save=mock_save,
+        )
+        try:
+            dialog.disable_proxy_var.set(True)
+            dialog._on_toggle_disable_proxy()
+
+            preview = dialog.preview_box.get("1.0", "end")
+            self.assertIn("Tắt Proxy", preview)
+
+            dialog._apply_save()
+            self.assertEqual(len(saved_data), 2)
+            self.assertFalse(saved_data["prof_A"]["use_proxy"])
+            self.assertEqual(saved_data["prof_A"]["proxy_string"], "")
+            self.assertFalse(saved_data["prof_B"]["use_proxy"])
+        finally:
+            if dialog.winfo_exists():
+                dialog.destroy()
+
+    def test_batch_set_proxy_modal_probed_results_integration(self):
+        """BatchSetProxyModal reflects probe results with live/die badges and region."""
+        saved_data = {}
+
+        def mock_save(data):
+            saved_data.update(data)
+            return True
+
+        dialog = BatchSetProxyModal(
+            self.root,
+            selected_profiles=["prof_1"],
+            on_save=mock_save,
+        )
+        try:
+            dialog.text_input.insert("1.0", "1.2.3.4:8080:u:p")
+            mock_results = {
+                "1.2.3.4:8080:u:p": {
+                    "ok": True,
+                    "exit_ip": "1.2.3.4",
+                    "latency_ms": 95,
+                    "geo": {"country_code": "US", "country": "United States"},
+                    "error": "",
+                }
+            }
+            dialog._on_probe_finished(mock_results)
+
+            preview = dialog.preview_box.get("1.0", "end")
+            self.assertIn("🟢 Live [US]", preview)
+            self.assertIn("(95ms)", preview)
+
+            dialog._apply_save()
+            self.assertEqual(saved_data["prof_1"]["region"], "US")
+            self.assertIn("Live", saved_data["prof_1"]["status_badge"])
+        finally:
+            if dialog.winfo_exists():
+                dialog.destroy()
+
     def test_create_edit_profile_modal_save_contract(self):
         """CreateEditProfileModal packages config and invokes on_save."""
         saved_config = {}

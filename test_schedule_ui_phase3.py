@@ -162,7 +162,7 @@ class TestScheduleUIPhase3(unittest.TestCase):
             self.assertEqual(vals[4], expected_task.title)
 
         # Nút submit được chuyển sang trạng thái sẵn sàng commit
-        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch (Commit)")
+        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch")
         self.assertEqual(modal.btn_submit.cget("state"), "normal")
         modal.destroy()
 
@@ -501,7 +501,7 @@ class TestScheduleUIPhase3(unittest.TestCase):
         self.assertIsNotNone(modal._current_plan, "Sau khi refresh thật, modal phải có plan mới!")
         self.assertIsNot(modal._current_plan, old_plan, "Plan mới phải khác plan cũ đã bị stale!")
         self.assertEqual(modal._committed_revision, modal._input_revision)
-        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch (Commit)")
+        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch")
 
         # Khẳng định snapshot mới đã nhận biết task của concurrent writer
         new_snap = modal._current_snapshot
@@ -571,7 +571,7 @@ class TestScheduleUIPhase3(unittest.TestCase):
         self.assertIsNotNone(modal._current_plan, "Dù popup lỗi, modal vẫn phải refresh có plan mới!")
         self.assertIsNot(modal._current_plan, old_plan)
         self.assertEqual(modal._committed_revision, modal._input_revision)
-        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch (Commit)")
+        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch")
 
         # Khẳng định snapshot mới nhận diện xung đột
         self.assertIn("Profile_Alpha", modal._current_snapshot.conflicted_profiles)
@@ -642,9 +642,9 @@ class TestScheduleUIPhase3(unittest.TestCase):
         # Preview
         modal._generate_preview()
 
-        # Kiểm tra badge cảnh báo xung đột hiển thị GHI ĐÈ
+        # Kiểm tra badge cảnh báo xung đột hiển thị Ghi đè
         badge_text = modal.lbl_conflict_badge.cget("text")
-        self.assertIn("GHI ĐÈ (OVERWRITE)", badge_text)
+        self.assertIn("Ghi đè lịch cũ", badge_text)
         self.assertIn("HỦY toàn bộ video đang chờ", badge_text)
 
         # Commit
@@ -761,7 +761,7 @@ class TestScheduleUIPhase3(unittest.TestCase):
         modal._generate_preview()
         self.assertIsNotNone(modal._current_plan, "Preview lần 1 phải tạo plan hợp lệ!")
         self.assertEqual(modal._committed_revision, modal._input_revision)
-        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch (Commit)")
+        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch")
 
         # Bước 2: Tạo preview lần 2. Spy Treeview.insert để chứng minh:
         # - State của preview lần 1 đã bị xóa sạch về None/-1 NGAY ĐẦU HÀM _generate_preview()
@@ -1320,7 +1320,7 @@ class TestScheduleUIPhase3(unittest.TestCase):
         modal._generate_preview()
         self.assertIsNotNone(modal._current_plan)
         self.assertEqual(modal._committed_revision, modal._input_revision)
-        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch (Commit)")
+        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch")
 
         # 2. Giả lập một idle callback đóng modal (ví dụ người dùng bấm Cancel hoặc đóng cửa sổ) ngay trong update_idletasks
         def close_modal_during_idle():
@@ -1517,7 +1517,7 @@ class TestScheduleUIPhase3(unittest.TestCase):
         # Bước 1: Preview thành công hợp lệ -> có valid plan và nút Commit
         modal._generate_preview()
         self.assertIsNotNone(modal._current_plan)
-        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch (Commit)")
+        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch")
 
         # Bước 2: Thiết lập lỗi kép ở commit:
         # - commit_schedule_plan ném lỗi DB
@@ -1582,7 +1582,7 @@ class TestScheduleUIPhase3(unittest.TestCase):
         modal._generate_preview()
         self.assertIsNotNone(modal._current_plan)
         self.assertEqual(modal._committed_revision, modal._input_revision)
-        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch (Commit)")
+        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch")
 
         old_rev = modal._input_revision
         # 2. Giả lập widget lbl_video_count.configure ném exception khi đổi danh sách video
@@ -1691,7 +1691,7 @@ class TestScheduleUIPhase3(unittest.TestCase):
         modal._generate_preview()
         self.assertIsNotNone(modal._current_plan)
         self.assertEqual(modal._committed_revision, modal._input_revision)
-        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch (Commit)")
+        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch")
 
         old_rev = modal._input_revision
 
@@ -1776,7 +1776,7 @@ class TestScheduleUIPhase3(unittest.TestCase):
         # 2. Preview thành công và plan hợp lệ được tạo
         self.assertIsNotNone(modal._current_plan)
         self.assertEqual(modal._committed_revision, modal._input_revision)
-        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch (Commit)")
+        self.assertEqual(modal.btn_submit.cget("text"), "🚀 Xác Nhận Lên Lịch")
         self.assertEqual(modal.btn_submit.cget("state"), "normal")
         # 3. Tuyệt đối không tự ý commit vào DB
         self.assertEqual(len(self.mgr.get_all_tasks()), 0)
@@ -2017,7 +2017,7 @@ class TestScheduleUIPhase3(unittest.TestCase):
         self.assertEqual(len(db_tasks_a), 2)
         self.assertEqual(set(t["profile_name"] for t in db_tasks_a), {"Profile_Alpha", "Profile_Beta"})
         self.assertTrue(all(t["status"] == "PENDING" for t in db_tasks_a))
-        self.assertTrue(all(t["execution_mode"] == "SERVER_SCHEDULE" for t in db_tasks_a))
+        self.assertTrue(all(t["execution_mode"] == "LOCAL_QUEUE" for t in db_tasks_a))
         modal_a.destroy()
 
         # --- Nhánh B: Không có switch_workspace, có schedule_view_ref._refresh_data ---

@@ -37,6 +37,13 @@ from .core import (
     toggle_channel_short,
     update_channel_manual_windows,
     validate_youtube_cookie_file,
+    register_cookie_update_listener,
+    unregister_cookie_update_listener,
+    retry_tunnel_recovery,
+    retry_ngrok_recovery,
+    ping_channel_hub,
+    ping_all_channels_hub,
+    trigger_manual_scan_and_ping,
 )
 from .activity import (
     append_activity,

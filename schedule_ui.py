@@ -26,10 +26,24 @@ from schedule_calculator import (
     generate_schedule_timeline,
     generate_title_preview,
     parse_naming_formula,
+    resolve_profile_region_label,
     resolve_profile_timezone,
     scan_video_files,
     strip_title_stutter,
 )
+
+ORDER_MODE_DISPLAY_TO_CODE: Dict[str, str] = {
+    "Theo thứ tự file": "ORIGINAL",
+    "Theo bộ tập (1, 2, 3...)": "SERIES",
+    "Xáo trộn ngẫu nhiên": "SHUFFLE",
+}
+ORDER_MODE_CODE_TO_DISPLAY: Dict[str, str] = {v: k for k, v in ORDER_MODE_DISPLAY_TO_CODE.items()}
+
+RESOLUTION_MODE_DISPLAY_TO_CODE: Dict[str, str] = {
+    "Nối tiếp sau lịch cũ": "APPEND",
+    "Ghi đè (Hủy lịch cũ)": "OVERWRITE",
+}
+RESOLUTION_MODE_CODE_TO_DISPLAY: Dict[str, str] = {v: k for k, v in RESOLUTION_MODE_DISPLAY_TO_CODE.items()}
 from schedule_contracts import (
     ConflictSnapshot,
     InvalidPlanCommitError,
@@ -49,7 +63,7 @@ from schedule_service import (
     summarize_schedule_plan,
 )
 from ui_components import UIThemeTokens, fit_and_center_dialog
-from ui_dialogs import SafeCTkToplevel
+from ui_dialogs import SafeCTkToplevel, UnassignedVideosModal
 
 
 # ==============================================================================
@@ -286,10 +300,15 @@ class BulkScheduleModal(SafeCTkToplevel):
         self.formula_var = ctk.StringVar(value="{filename}")
         self.preview_var = ctk.StringVar(value="")
         self.daily_max_var = ctk.StringVar(value="2")
-        self.jitter_var = ctk.StringVar(value="10")
-        self.exec_mode_var = ctk.StringVar(value="SERVER_SCHEDULE")  # SERVER_SCHEDULE | LOCAL_QUEUE
+        self.jitter_var = ctk.StringVar(value="0")
+        self.exec_mode_var = ctk.StringVar(value="LOCAL_QUEUE")  # Mặc định duy nhất: Treo máy đến giờ tự đăng API
         self.resolution_mode_var = ctk.StringVar(value="APPEND")    # APPEND | OVERWRITE
         self.order_mode_var = ctk.StringVar(value="ORIGINAL")       # ORIGINAL | SERIES | SHUFFLE
+        self.resolution_display_var = ctk.StringVar(value=RESOLUTION_MODE_CODE_TO_DISPLAY["APPEND"])
+        self.order_display_var = ctk.StringVar(value=ORDER_MODE_CODE_TO_DISPLAY["ORIGINAL"])
+        self.max_workers_var = ctk.StringVar(value="5")
+        self.proxy_cooldown_var = ctk.StringVar(value="5")
+        self.start_day_mode_var = ctk.StringVar(value="Hôm nay")
         self.delete_source_var = ctk.BooleanVar(value=True)
         self.status_info_var = ctk.StringVar(value="")
 
@@ -299,17 +318,65 @@ class BulkScheduleModal(SafeCTkToplevel):
         self.slot_chieu_var = ctk.BooleanVar(value=True)
         self.slot_toi_var = ctk.BooleanVar(value=True)
 
+        self._syncing_display_vars = False
         self._build_ui()
         self._update_preview()
 
-        # Đăng ký listener: Mọi thay đổi cấu hình đầu vào đều tự động vô hiệu hóa bản preview cũ
-        # Thứ tự: _on_input_changed() chạy trước tiên để xóa sạch plan cũ, sau đó mới cập nhật preview (Codex Round 16 Fix)
+        # Đăng ký listener: Đồng bộ 2 chiều nhãn Tiếng Việt <-> Mã nội bộ & vô hiệu hóa preview cũ
+        def _on_order_display_change(*_):
+            if self._syncing_display_vars:
+                return
+            self._syncing_display_vars = True
+            try:
+                code = ORDER_MODE_DISPLAY_TO_CODE.get(self.order_display_var.get(), "ORIGINAL")
+                if self.order_mode_var.get() != code:
+                    self.order_mode_var.set(code)
+            finally:
+                self._syncing_display_vars = False
+
+        def _on_order_code_change(*_):
+            if not self._syncing_display_vars:
+                self._syncing_display_vars = True
+                try:
+                    disp = ORDER_MODE_CODE_TO_DISPLAY.get(self.order_mode_var.get())
+                    if disp and self.order_display_var.get() != disp:
+                        self.order_display_var.set(disp)
+                finally:
+                    self._syncing_display_vars = False
+            self._on_input_changed()
+
+        def _on_res_display_change(*_):
+            if self._syncing_display_vars:
+                return
+            self._syncing_display_vars = True
+            try:
+                code = RESOLUTION_MODE_DISPLAY_TO_CODE.get(self.resolution_display_var.get(), "APPEND")
+                if self.resolution_mode_var.get() != code:
+                    self.resolution_mode_var.set(code)
+            finally:
+                self._syncing_display_vars = False
+
+        def _on_res_code_change(*_):
+            if not self._syncing_display_vars:
+                self._syncing_display_vars = True
+                try:
+                    disp = RESOLUTION_MODE_CODE_TO_DISPLAY.get(self.resolution_mode_var.get())
+                    if disp and self.resolution_display_var.get() != disp:
+                        self.resolution_display_var.set(disp)
+                finally:
+                    self._syncing_display_vars = False
+            self._on_input_changed()
+
         self.formula_var.trace_add("write", lambda *_: (self._on_input_changed(), self._update_preview()))
         self.daily_max_var.trace_add("write", self._on_input_changed)
         self.jitter_var.trace_add("write", self._on_input_changed)
         self.exec_mode_var.trace_add("write", self._on_input_changed)
-        self.resolution_mode_var.trace_add("write", self._on_input_changed)
-        self.order_mode_var.trace_add("write", self._on_input_changed)
+        self.resolution_display_var.trace_add("write", _on_res_display_change)
+        self.resolution_mode_var.trace_add("write", _on_res_code_change)
+        self.order_display_var.trace_add("write", _on_order_display_change)
+        self.order_mode_var.trace_add("write", _on_order_code_change)
+        self.proxy_cooldown_var.trace_add("write", self._on_input_changed)
+        self.start_day_mode_var.trace_add("write", self._on_input_changed)
         self.delete_source_var.trace_add("write", self._on_input_changed)
         self.slot_sang_var.trace_add("write", self._on_input_changed)
         self.slot_trua_var.trace_add("write", self._on_input_changed)
@@ -324,6 +391,11 @@ class BulkScheduleModal(SafeCTkToplevel):
         self._current_plan = None
         self._current_snapshot = None
         self._committed_revision = -1
+        try:
+            if hasattr(self, "btn_unassigned_details") and self.winfo_exists() and self.btn_unassigned_details.winfo_exists():
+                self.btn_unassigned_details.pack_forget()
+        except Exception:
+            pass
         try:
             if hasattr(self, "btn_submit") and self.winfo_exists() and self.btn_submit.winfo_exists():
                 self.btn_submit.configure(
@@ -597,12 +669,38 @@ class BulkScheduleModal(SafeCTkToplevel):
             height=28,
         )
         self.daily_cb.pack(side="left", padx=(0, 6))
-        ctk.CTkLabel(row1, text="video / ngày / profile", font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(0, 16))
+        ctk.CTkLabel(row1, text="video / ngày / tài khoản", font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(0, 12))
 
-        ctk.CTkLabel(row1, text="Độ lệch ngẫu nhiên (Jitter): ±", font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(0, 4))
-        self.jitter_entry = ctk.CTkEntry(row1, textvariable=self.jitter_var, width=45, height=28)
-        self.jitter_entry.pack(side="left", padx=(0, 4))
-        ctk.CTkLabel(row1, text="phút", font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left")
+        ctk.CTkLabel(row1, text="Bắt đầu:", font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(0, 4))
+        self.cb_start_day = ctk.CTkComboBox(
+            row1,
+            values=["Hôm nay", "Ngày mai"],
+            variable=self.start_day_mode_var,
+            width=105,
+            height=28,
+        )
+        self.cb_start_day.pack(side="left", padx=(0, 10))
+
+        self.btn_sync_proxy_tz = ctk.CTkButton(
+            row1,
+            text="🔄 Đồng bộ giờ Proxy",
+            font=UIThemeTokens.FONT_BADGE,
+            height=28,
+            width=145,
+            fg_color="#0ea5e9",
+            hover_color="#0284c7",
+            text_color="#ffffff",
+            command=self._sync_proxy_timezones_async,
+        )
+        self.btn_sync_proxy_tz.pack(side="left", padx=(0, 8))
+
+        self.lbl_proxy_sync = ctk.CTkLabel(
+            row1,
+            text="(Giờ vàng tự random trong khung đã chọn)",
+            font=UIThemeTokens.FONT_BADGE,
+            text_color=UIThemeTokens.TEXT_MUTED,
+        )
+        self.lbl_proxy_sync.pack(side="left")
 
         # Khung giờ checkboxes
         slots_row = ctk.CTkFrame(s_inner, fg_color="transparent")
@@ -613,7 +711,7 @@ class BulkScheduleModal(SafeCTkToplevel):
         ctk.CTkCheckBox(slots_row, text="Chiều (17h30-18h45)", variable=self.slot_chieu_var, font=UIThemeTokens.FONT_BADGE).pack(side="left", padx=(0, 12))
         ctk.CTkCheckBox(slots_row, text="Tối (20h-21h30)", variable=self.slot_toi_var, font=UIThemeTokens.FONT_BADGE).pack(side="left")
 
-        # 5. Phương Thức Thực Thi & Thứ Tự & Giải Quyết Xung Đột
+        # 5. Chế Độ Mặc Định, Thứ Tự Video & Xử Lý Lịch Cũ (Thuần Việt)
         opt_card = ctk.CTkFrame(
             scroll,
             corner_radius=8,
@@ -628,50 +726,61 @@ class BulkScheduleModal(SafeCTkToplevel):
 
         ctk.CTkLabel(
             opt_inner,
-            text="⚙️ Tùy Chọn Thực Thi & Thứ Tự Phân Bổ",
+            text="⚙️ Chế Độ Đăng Mặc Định: Treo Máy Tự Động Đăng Qua API",
             font=UIThemeTokens.FONT_BUTTON,
             text_color=UIThemeTokens.TEXT_PRIMARY,
-        ).pack(anchor="w", pady=(0, 4))
+        ).pack(anchor="w", pady=(0, 2))
 
-        ctk.CTkRadioButton(
+        ctk.CTkLabel(
             opt_inner,
-            text="☁️ Lên lịch trực tiếp lên Server TikTok qua API (TẮT MÁY / TẮT TOOL VẪN ĐĂNG ĐÚNG GIỜ 100%)",
-            variable=self.exec_mode_var,
-            value="SERVER_SCHEDULE",
-            font=UIThemeTokens.FONT_BODY,
+            text="💻 Phần mềm chạy ngầm và tự đăng video khi đến giờ vàng theo khu vực Proxy (tự dời lịch nếu tắt máy).",
+            font=UIThemeTokens.FONT_BADGE,
             text_color=UIThemeTokens.ACCENT_PRIMARY,
-        ).pack(anchor="w", pady=(0, 4))
-
-        ctk.CTkRadioButton(
-            opt_inner,
-            text="💻 Quản lý hàng đợi trên máy tính (Lưu trữ trên máy, đến giờ hẹn Tool mới gọi API đẩy lên)",
-            variable=self.exec_mode_var,
-            value="LOCAL_QUEUE",
-            font=UIThemeTokens.FONT_BODY,
-            text_color=UIThemeTokens.TEXT_MUTED,
+            justify="left",
         ).pack(anchor="w", pady=(0, 6))
 
-        # Hàng chọn thứ tự video & giải quyết xung đột
+        # Hàng chọn thứ tự video & giải quyết xung đột (Thuần Tiếng Việt)
         mode_row = ctk.CTkFrame(opt_inner, fg_color="transparent")
         mode_row.pack(fill="x", pady=(2, 6))
 
-        ctk.CTkLabel(mode_row, text="Thứ tự phân bổ:", font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(0, 4))
-        ctk.CTkComboBox(
+        ctk.CTkLabel(mode_row, text="Thứ tự video:", font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(0, 4))
+        self.cb_order_mode = ctk.CTkComboBox(
             mode_row,
-            values=["ORIGINAL", "SERIES", "SHUFFLE"],
-            variable=self.order_mode_var,
-            width=110,
+            values=list(ORDER_MODE_DISPLAY_TO_CODE.keys()),
+            variable=self.order_display_var,
+            width=185,
             height=28,
-        ).pack(side="left", padx=(0, 16))
+        )
+        self.cb_order_mode.pack(side="left", padx=(0, 16))
 
-        ctk.CTkLabel(mode_row, text="Xử lý lịch cũ:", font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(0, 4))
-        ctk.CTkComboBox(
+        ctk.CTkLabel(mode_row, text="Khi tài khoản đã có lịch:", font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(0, 4))
+        self.cb_resolution_mode = ctk.CTkComboBox(
             mode_row,
-            values=["APPEND", "OVERWRITE"],
-            variable=self.resolution_mode_var,
-            width=110,
+            values=list(RESOLUTION_MODE_DISPLAY_TO_CODE.keys()),
+            variable=self.resolution_display_var,
+            width=180,
             height=28,
-        ).pack(side="left")
+        )
+        self.cb_resolution_mode.pack(side="left")
+
+        # Hàng tối ưu dàn nhiều acc & chống trùng IP Proxy
+        scale_row = ctk.CTkFrame(opt_inner, fg_color="transparent")
+        scale_row.pack(fill="x", pady=(2, 6))
+
+        ctk.CTkLabel(scale_row, text="Số luồng đăng song song (khác Proxy):", font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(0, 4))
+        self.cb_max_workers = ctk.CTkComboBox(
+            scale_row,
+            values=["1", "3", "5", "8", "10", "12", "15"],
+            variable=self.max_workers_var,
+            width=70,
+            height=28,
+        )
+        self.cb_max_workers.pack(side="left", padx=(0, 16))
+
+        ctk.CTkLabel(scale_row, text="Nghỉ giữa 2 acc chung Proxy:", font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(0, 4))
+        self.proxy_cooldown_entry = ctk.CTkEntry(scale_row, textvariable=self.proxy_cooldown_var, width=45, height=28)
+        self.proxy_cooldown_entry.pack(side="left", padx=(0, 4))
+        ctk.CTkLabel(scale_row, text="phút (chống trùng IP)", font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_MUTED).pack(side="left")
 
         ctk.CTkCheckBox(
             opt_inner,
@@ -704,14 +813,31 @@ class BulkScheduleModal(SafeCTkToplevel):
             text_color=UIThemeTokens.TEXT_PRIMARY,
         ).pack(side="left")
 
+        # Hàng tóm tắt kèm nút xem chi tiết video bị bỏ qua
+        summary_row = ctk.CTkFrame(p_inner, fg_color="transparent")
+        summary_row.pack(fill="x", pady=(0, 4))
+
         self.lbl_preview_summary = ctk.CTkLabel(
-            p_inner,
+            summary_row,
             text="ℹ️ Chưa có bản xem trước. Bấm nút '🔍 Xem Trước Lịch Đăng' để phân bổ và tính toán thời gian.",
             font=UIThemeTokens.FONT_BADGE,
             text_color=UIThemeTokens.TEXT_MUTED,
             anchor="w",
         )
-        self.lbl_preview_summary.pack(fill="x", pady=(0, 4))
+        self.lbl_preview_summary.pack(side="left")
+
+        self.btn_unassigned_details = ctk.CTkButton(
+            summary_row,
+            text="⚠️ Video bị bỏ qua [🔍 Xem chi tiết]",
+            font=UIThemeTokens.FONT_BADGE,
+            height=24,
+            corner_radius=12,
+            fg_color="#FEF3C7",
+            hover_color="#FDE68A",
+            text_color="#92400E",
+            command=self._show_unassigned_details,
+        )
+        # Ẩn nút ban đầu, chỉ hiển thị khi có plan.unassigned_videos
 
         self.lbl_conflict_badge = ctk.CTkLabel(
             p_inner,
@@ -728,7 +854,7 @@ class BulkScheduleModal(SafeCTkToplevel):
         table_frame.grid_rowconfigure(0, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
 
-        cols = ("profile", "sched_time", "slot", "video", "title")
+        cols = ("profile", "sched_time", "slot", "video", "title", "region")
         self.preview_tree = ttk.Treeview(
             table_frame,
             columns=cols,
@@ -737,16 +863,18 @@ class BulkScheduleModal(SafeCTkToplevel):
             style="Modern.Treeview",
             height=7,
         )
-        self.preview_tree.heading("profile", text="Profile", anchor="w")
-        self.preview_tree.column("profile", width=120, stretch=False)
-        self.preview_tree.heading("sched_time", text="Thời Gian Đăng (Local)", anchor="w")
-        self.preview_tree.column("sched_time", width=150, stretch=False)
+        self.preview_tree.heading("profile", text="Tài khoản", anchor="w")
+        self.preview_tree.column("profile", width=110, stretch=False)
+        self.preview_tree.heading("sched_time", text="Giờ Đăng Dự Kiến", anchor="w")
+        self.preview_tree.column("sched_time", width=145, stretch=False)
         self.preview_tree.heading("slot", text="Khung Giờ", anchor="center")
-        self.preview_tree.column("slot", width=85, stretch=False)
+        self.preview_tree.column("slot", width=80, stretch=False)
         self.preview_tree.heading("video", text="File Video", anchor="w")
-        self.preview_tree.column("video", width=140, stretch=False)
+        self.preview_tree.column("video", width=130, stretch=False)
         self.preview_tree.heading("title", text="Tiêu Đề Dự Kiến", anchor="w")
-        self.preview_tree.column("title", width=220, stretch=True)
+        self.preview_tree.column("title", width=190, stretch=True)
+        self.preview_tree.heading("region", text="Khu Vực (Proxy)", anchor="center")
+        self.preview_tree.column("region", width=115, stretch=False)
 
         self.preview_tree.grid(row=0, column=0, sticky="nsew")
         tree_sb = ttk.Scrollbar(table_frame, orient="vertical", command=self.preview_tree.yview)
@@ -838,6 +966,86 @@ class BulkScheduleModal(SafeCTkToplevel):
         except Exception:
             pass
 
+    def _sync_proxy_timezones_async(self):
+        """Đồng bộ múi giờ GeoIP từ Proxy của các profile đang chọn (chạy ngầm không đơ UI)."""
+        if getattr(self, "_is_syncing_proxy_tz", False):
+            return
+        self._is_syncing_proxy_tz = True
+        try:
+            if hasattr(self, "btn_sync_proxy_tz") and self.btn_sync_proxy_tz.winfo_exists():
+                self.btn_sync_proxy_tz.configure(state="disabled", text="⏳ Đang dò Proxy...")
+            if hasattr(self, "lbl_proxy_sync") and self.lbl_proxy_sync.winfo_exists():
+                self.lbl_proxy_sync.configure(text="Đang kiểm tra khu vực Proxy...", text_color=UIThemeTokens.STATUS_RUNNING)
+        except Exception:
+            pass
+
+        def _worker():
+            updated_count = 0
+            checked_count = 0
+            try:
+                from proxy_diagnostics import probe_proxy
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                proxy_to_profiles: Dict[str, List[str]] = {}
+                for p_name in self.selected_profiles:
+                    cfg = self.profile_configs.get(p_name)
+                    if isinstance(cfg, dict) and cfg.get("use_proxy") is not False:
+                        p_str = str(cfg.get("proxy_string") or cfg.get("proxy") or "").strip()
+                        if p_str:
+                            proxy_to_profiles.setdefault(p_str, []).append(p_name)
+
+                if proxy_to_profiles:
+                    with ThreadPoolExecutor(max_workers=min(8, len(proxy_to_profiles))) as pool:
+                        fut_map = {pool.submit(probe_proxy, p_str, 6): p_str for p_str in proxy_to_profiles}
+                        for fut in as_completed(fut_map):
+                            p_str = fut_map[fut]
+                            checked_count += 1
+                            try:
+                                res = fut.result()
+                                if res.get("ok") and isinstance(res.get("geo"), dict) and res["geo"].get("timezone"):
+                                    for p_name in proxy_to_profiles[p_str]:
+                                        cfg = self.profile_configs.get(p_name)
+                                        if isinstance(cfg, dict):
+                                            cfg["proxy_geo"] = dict(res["geo"])
+                                            updated_count += 1
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+            finally:
+                def _finish_ui():
+                    self._is_syncing_proxy_tz = False
+                    if getattr(self, "_is_destroyed", False) or not self.winfo_exists():
+                        return
+                    try:
+                        if hasattr(self, "btn_sync_proxy_tz") and self.btn_sync_proxy_tz.winfo_exists():
+                            self.btn_sync_proxy_tz.configure(state="normal", text="🔄 Đồng bộ giờ Proxy")
+                        if hasattr(self, "lbl_proxy_sync") and self.lbl_proxy_sync.winfo_exists():
+                            if updated_count > 0:
+                                self.lbl_proxy_sync.configure(
+                                    text=f"✅ Đã cập nhật giờ vàng cho {updated_count} tài khoản",
+                                    text_color=UIThemeTokens.STATUS_LIVE,
+                                )
+                                self._on_input_changed()
+                            elif checked_count == 0:
+                                self.lbl_proxy_sync.configure(
+                                    text="ℹ️ Không có Proxy nào cần đồng bộ (dùng giờ máy)",
+                                    text_color=UIThemeTokens.TEXT_MUTED,
+                                )
+                            else:
+                                self.lbl_proxy_sync.configure(
+                                    text="⚠️ Không dò được GeoIP Proxy (dùng múi giờ dự phòng)",
+                                    text_color=UIThemeTokens.STATUS_WARN,
+                                )
+                    except Exception:
+                        pass
+                try:
+                    self.after(0, _finish_ui)
+                except Exception:
+                    self._is_syncing_proxy_tz = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _generate_preview(self):
         """Tạo Kế hoạch Lên lịch chuẩn hóa (SchedulePlan) và hiển thị ma trận xem trước (Phase 3)."""
         if self._commit_succeeded or self._is_committing or self._is_previewing:
@@ -867,6 +1075,11 @@ class BulkScheduleModal(SafeCTkToplevel):
             self._current_plan = None
             self._current_snapshot = None
             self._committed_revision = -1
+            try:
+                if hasattr(self, "btn_unassigned_details") and self.winfo_exists() and self.btn_unassigned_details.winfo_exists():
+                    self.btn_unassigned_details.pack_forget()
+            except Exception:
+                pass
             try:
                 if hasattr(self, "btn_submit") and self.winfo_exists() and self.btn_submit.winfo_exists():
                     self.btn_submit.configure(state="normal", text="🚀 1-Click Lên Lịch Tự Động")
@@ -904,9 +1117,9 @@ class BulkScheduleModal(SafeCTkToplevel):
                 daily_max = 2
 
             try:
-                jitter = max(0, int(self.jitter_var.get().strip() or "10"))
+                proxy_gap = max(0, int(self.proxy_cooldown_var.get().strip() or "5"))
             except Exception:
-                jitter = 10
+                proxy_gap = 5
 
             selected_slots = []
             if self.slot_sang_var.get(): selected_slots.append("SANG")
@@ -916,9 +1129,8 @@ class BulkScheduleModal(SafeCTkToplevel):
             if not selected_slots:
                 selected_slots = ["SANG", "TRUA", "CHIEU", "TOI"]
 
-            exec_mode = self.exec_mode_var.get()
-            if exec_mode not in ("SERVER_SCHEDULE", "LOCAL_QUEUE"):
-                exec_mode = "SERVER_SCHEDULE"
+            # Luôn sử dụng chế độ mặc định duy nhất: Treo máy đến giờ tự đăng qua API (LOCAL_QUEUE)
+            exec_mode = "LOCAL_QUEUE"
 
             res_mode = self.resolution_mode_var.get()
             if res_mode not in ("APPEND", "OVERWRITE"):
@@ -931,6 +1143,11 @@ class BulkScheduleModal(SafeCTkToplevel):
             formula = self.formula_var.get().strip() or "{filename}"
 
             try:
+                start_date_arg = (
+                    datetime.date.today() + datetime.timedelta(days=1)
+                    if self.start_day_mode_var.get() == "Ngày mai"
+                    else None
+                )
                 request = ScheduleRequest(
                     video_paths=tuple(str(p.resolve()) for p in self.scanned_videos),
                     profile_names=tuple(self.selected_profiles),
@@ -938,11 +1155,14 @@ class BulkScheduleModal(SafeCTkToplevel):
                     formula=formula,
                     daily_max=daily_max,
                     selected_slots=tuple(selected_slots),
-                    jitter_minutes=jitter,
+                    jitter_minutes=0,
                     execution_mode=exec_mode,
                     resolution_mode=res_mode,
                     order_mode=order_mode,
                     delete_source_after_post=self.delete_source_var.get(),
+                    start_date_local=start_date_arg,
+                    randomize_in_slot=True,
+                    min_proxy_gap_minutes=proxy_gap,
                 )
 
                 plan = prepare_schedule_plan(request, manager=self.schedule_manager)
@@ -954,6 +1174,11 @@ class BulkScheduleModal(SafeCTkToplevel):
                     self._current_plan = None
                     self._current_snapshot = None
                     self._committed_revision = -1
+                    try:
+                        if hasattr(self, "btn_unassigned_details") and self.winfo_exists() and self.btn_unassigned_details.winfo_exists():
+                            self.btn_unassigned_details.pack_forget()
+                    except Exception:
+                        pass
                     if hasattr(self, "btn_submit") and self.btn_submit.winfo_exists():
                         self.btn_submit.configure(state="normal", text="🚀 1-Click Lên Lịch Tự Động")
                     self.status_info_var.set("⚠️ Cấu hình đã thay đổi trong lúc tính toán. Vui lòng bấm Xem trước lại.")
@@ -969,6 +1194,15 @@ class BulkScheduleModal(SafeCTkToplevel):
                         text="⚠️ Không có video nào được phân bổ hợp lệ vào kế hoạch lên lịch.",
                         text_color=UIThemeTokens.STATUS_WARN,
                     )
+                    if plan.unassigned_videos:
+                        if hasattr(self, "btn_unassigned_details") and self.winfo_exists() and self.btn_unassigned_details.winfo_exists():
+                            self.btn_unassigned_details.configure(
+                                text=f"⚠️ {len(plan.unassigned_videos):,} video bị bỏ qua [🔍 Xem chi tiết]"
+                            )
+                            self.btn_unassigned_details.pack(side="left", padx=(10, 0))
+                    else:
+                        if hasattr(self, "btn_unassigned_details") and self.winfo_exists() and self.btn_unassigned_details.winfo_exists():
+                            self.btn_unassigned_details.pack_forget()
                     self.status_info_var.set("⚠️ Kế hoạch rỗng: không có video nào được phân bổ.")
                     messagebox.showwarning("Kế Hoạch Rỗng", "Không thể lên lịch vì không có video nào hợp lệ được phân bổ vào các profile đã chọn!")
                     return
@@ -982,6 +1216,7 @@ class BulkScheduleModal(SafeCTkToplevel):
                 all_planned.sort(key=lambda t: t.scheduled_epoch)
 
                 for pt in all_planned:
+                    region_lbl = resolve_profile_region_label(self.profile_configs.get(pt.profile_name, {}))
                     self.preview_tree.insert(
                         "",
                         "end",
@@ -991,6 +1226,7 @@ class BulkScheduleModal(SafeCTkToplevel):
                             pt.slot_id,
                             pt.video_filename,
                             pt.title,
+                            region_lbl,
                         ),
                     )
 
@@ -1000,6 +1236,14 @@ class BulkScheduleModal(SafeCTkToplevel):
                 summary_txt = f"✅ Đã phân bổ {plan.total_planned_tasks} video qua {len(plan.profile_assignments)} profile trong {dates_count} ngày."
                 if plan.unassigned_videos:
                     summary_txt += f" ⚠️ Bỏ qua {len(plan.unassigned_videos)} video không hợp lệ."
+                    if hasattr(self, "btn_unassigned_details") and self.winfo_exists() and self.btn_unassigned_details.winfo_exists():
+                        self.btn_unassigned_details.configure(
+                            text=f"⚠️ {len(plan.unassigned_videos):,} video bị bỏ qua [🔍 Xem chi tiết]"
+                        )
+                        self.btn_unassigned_details.pack(side="left", padx=(10, 0))
+                else:
+                    if hasattr(self, "btn_unassigned_details") and self.winfo_exists() and self.btn_unassigned_details.winfo_exists():
+                        self.btn_unassigned_details.pack_forget()
                 self.lbl_preview_summary.configure(text=summary_txt, text_color=UIThemeTokens.STATUS_LIVE)
 
                 # Cập nhật Badge xung đột
@@ -1007,12 +1251,12 @@ class BulkScheduleModal(SafeCTkToplevel):
                 if snap and snap.conflicted_profiles:
                     if res_mode == "APPEND":
                         self.lbl_conflict_badge.configure(
-                            text=f"ℹ️ Chế độ NỐI TIẾP (APPEND): Phát hiện {len(snap.conflicted_profiles)} profile đang có lịch chờ. Lịch mới tự động dời nối tiếp sau video cuối cùng.",
+                            text=f"ℹ️ Nối tiếp sau lịch cũ: Phát hiện {len(snap.conflicted_profiles)} tài khoản đang có lịch chờ. Lịch mới tự động xếp nối tiếp.",
                             text_color=UIThemeTokens.STATUS_RUNNING,
                         )
                     else:
                         self.lbl_conflict_badge.configure(
-                            text=f"⚠️ Chế độ GHI ĐÈ (OVERWRITE): Sẽ HỦY toàn bộ video đang chờ của {len(snap.conflicted_profiles)} profile ({', '.join(snap.conflicted_profiles[:3])}) để thay bằng lịch mới!",
+                            text=f"⚠️ Ghi đè lịch cũ: Sẽ HỦY toàn bộ video đang chờ của {len(snap.conflicted_profiles)} tài khoản ({', '.join(snap.conflicted_profiles[:3])}) để thay bằng lịch mới!",
                             text_color=UIThemeTokens.STATUS_ERROR,
                         )
                 else:
@@ -1026,7 +1270,7 @@ class BulkScheduleModal(SafeCTkToplevel):
                 self.btn_submit.configure(
                     state="normal",
                     fg_color=UIThemeTokens.ACCENT_PRIMARY,
-                    text="🚀 Xác Nhận Lên Lịch (Commit)",
+                    text="🚀 Xác Nhận Lên Lịch",
                 )
                 self.status_info_var.set("✅ Đã tạo ma trận xem trước thành công. Vui lòng kiểm tra kỹ trước khi bấm Xác Nhận.")
 
@@ -1035,6 +1279,11 @@ class BulkScheduleModal(SafeCTkToplevel):
                 self._current_plan = None
                 self._current_snapshot = None
                 self._committed_revision = -1
+                try:
+                    if hasattr(self, "btn_unassigned_details") and self.winfo_exists() and self.btn_unassigned_details.winfo_exists():
+                        self.btn_unassigned_details.pack_forget()
+                except Exception:
+                    pass
                 try:
                     if hasattr(self, "btn_submit") and self.winfo_exists() and self.btn_submit.winfo_exists():
                         self.btn_submit.configure(
@@ -1055,6 +1304,13 @@ class BulkScheduleModal(SafeCTkToplevel):
 
         finally:
             self._is_previewing = False
+
+    def _show_unassigned_details(self):
+        """Mở hộp thoại kiểm tra chi tiết danh sách video bị bỏ qua."""
+        if not getattr(self, "_current_plan", None) or not self._current_plan.unassigned_videos:
+            messagebox.showinfo("Thông Báo", "Không có video nào bị bỏ qua trong kế hoạch hiện tại.", parent=self)
+            return
+        UnassignedVideosModal(self, self._current_plan.unassigned_videos)
 
     def _do_schedule(self):
         """Thực thi Lên Lịch Tự Động (Commit Plan nguyên tử vào SQLite - Phase 3)."""
@@ -1438,6 +1694,7 @@ class AutoScheduleView(ctk.CTkFrame):
         self.stat_pending_var = ctk.StringVar(value="0")
         self.stat_server_var = ctk.StringVar(value="0")
         self.stat_today_var = ctk.StringVar(value="0")
+        self.stat_total_success_var = ctk.StringVar(value="0")
         self.stat_failed_var = ctk.StringVar(value="0")
 
         # Pagination state (Phase 4)
@@ -1472,8 +1729,8 @@ class AutoScheduleView(ctk.CTkFrame):
         metrics_row.pack(fill="x", padx=16, pady=(0, 10))
 
         self._create_metric_card(metrics_row, "⏳ Đang Chờ Đăng", self.stat_pending_var, UIThemeTokens.STATUS_WARN)
-        self._create_metric_card(metrics_row, "☁️ Đã Hẹn TikTok", self.stat_server_var, UIThemeTokens.STATUS_RUNNING)
         self._create_metric_card(metrics_row, "🟢 Đã Đăng Hôm Nay", self.stat_today_var, UIThemeTokens.STATUS_LIVE)
+        self._create_metric_card(metrics_row, "🎉 Đã Hoàn Tất (Tổng)", self.stat_total_success_var, UIThemeTokens.STATUS_RUNNING)
         self._create_metric_card(metrics_row, "❌ Lỗi Cần Thử Lại", self.stat_failed_var, UIThemeTokens.STATUS_ERROR)
 
         # 2. Filter Bar
@@ -1501,29 +1758,17 @@ class AutoScheduleView(ctk.CTkFrame):
         search_entry.pack(side="left", padx=(0, 10))
         self.search_var.trace_add("write", lambda *_: self._refresh_data(keep_page=False))
 
-        # Status filter
+        # Status filter (Thuần Tiếng Việt, bỏ SERVER_SCHEDULED)
         ctk.CTkLabel(f_inner, text="Trạng thái:", font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_MUTED).pack(side="left", padx=(0, 4))
         self.cb_status = ctk.CTkComboBox(
             f_inner,
-            values=["Tất cả", "PENDING", "UPLOADING", "SERVER_SCHEDULED", "SUCCESS", "FAILED", "CANCELLED", "MISSED_RESCHEDULED"],
+            values=["Tất cả", "Đang chờ đăng", "Đang tải lên", "Đã đăng", "Đăng lỗi", "Dời lịch (tắt máy)", "Đã hủy"],
             variable=self.status_filter_var,
-            width=130,
+            width=155,
             height=30,
             command=lambda _: self._refresh_data(keep_page=False),
         )
         self.cb_status.pack(side="left", padx=(0, 10))
-
-        # Mode filter
-        ctk.CTkLabel(f_inner, text="Chế độ:", font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_MUTED).pack(side="left", padx=(0, 4))
-        self.cb_mode = ctk.CTkComboBox(
-            f_inner,
-            values=["Tất cả chế độ", "☁️ Hẹn giờ TikTok", "💻 Hàng đợi máy"],
-            variable=self.mode_filter_var,
-            width=140,
-            height=30,
-            command=lambda _: self._refresh_data(keep_page=False),
-        )
-        self.cb_mode.pack(side="left", padx=(0, 10))
 
         # Profile filter
         ctk.CTkLabel(f_inner, text="Profile:", font=UIThemeTokens.FONT_BADGE, text_color=UIThemeTokens.TEXT_MUTED).pack(side="left", padx=(0, 4))
@@ -1586,7 +1831,7 @@ class AutoScheduleView(ctk.CTkFrame):
         table_card.grid_rowconfigure(0, weight=1)
         table_card.grid_columnconfigure(0, weight=1)
 
-        columns = ("sched_time", "profile", "account", "video", "title", "mode", "status")
+        columns = ("sched_time", "profile", "account", "video", "title", "status")
         self.tree = ttk.Treeview(
             table_card,
             columns=columns,
@@ -1596,18 +1841,16 @@ class AutoScheduleView(ctk.CTkFrame):
         )
         self.tree.heading("sched_time", text="Thời gian dự kiến", anchor="w")
         self.tree.column("sched_time", width=140, stretch=False)
-        self.tree.heading("profile", text="Profile", anchor="w")
+        self.tree.heading("profile", text="Tài khoản", anchor="w")
         self.tree.column("profile", width=130, stretch=False)
         self.tree.heading("account", text="Tài khoản TikTok", anchor="w")
         self.tree.column("account", width=120, stretch=False)
         self.tree.heading("video", text="Tên Video", anchor="w")
-        self.tree.column("video", width=150, stretch=False)
+        self.tree.column("video", width=155, stretch=False)
         self.tree.heading("title", text="Tiêu Đề Xuất Bản", anchor="w")
-        self.tree.column("title", width=220, stretch=True)
-        self.tree.heading("mode", text="Chế Độ", anchor="center")
-        self.tree.column("mode", width=95, stretch=False)
+        self.tree.column("title", width=250, stretch=True)
         self.tree.heading("status", text="Trạng Thái", anchor="center")
-        self.tree.column("status", width=110, stretch=False)
+        self.tree.column("status", width=145, stretch=False)
 
         self.tree.tag_configure("success_tag", foreground=UIThemeTokens.STATUS_LIVE)
         self.tree.tag_configure("pending_tag", foreground=UIThemeTokens.STATUS_WARN)
@@ -1854,9 +2097,11 @@ class AutoScheduleView(ctk.CTkFrame):
         try:
             stats = self.schedule_manager.get_summary_stats()
             self.stat_pending_var.set(str(stats.get("pending", 0)))
-            self.stat_server_var.set(str(stats.get("server_scheduled", 0)))
             self.stat_today_var.set(str(stats.get("posted_today", 0)))
+            self.stat_total_success_var.set(str(stats.get("total_success", stats.get("server_scheduled", 0))))
             self.stat_failed_var.set(str(stats.get("failed", 0)))
+            if hasattr(self, "stat_server_var"):
+                self.stat_server_var.set(str(stats.get("server_scheduled", 0)))
         except Exception:
             pass
 
@@ -1868,13 +2113,19 @@ class AutoScheduleView(ctk.CTkFrame):
         STATUS_MAP = {
             "Tất cả": None,
             "Tất cả trạng thái": None,
+            "Đang chờ đăng": "PENDING",
             "⏳ Đang chờ": "PENDING",
-            "☁️ Đã hẹn TikTok": "SERVER_SCHEDULED",
-            "🟢 Đã đăng": "SUCCESS",
-            "❌ Thất bại": "FAILED",
-            "⚪ Đã hủy": "CANCELLED",
-            "⏳ Dời sang mai": "MISSED_RESCHEDULED",
+            "Đang tải lên": "UPLOADING",
             "⚡ Đang tải...": "UPLOADING",
+            "Đã đăng": "SUCCESS",
+            "🟢 Đã đăng": "SUCCESS",
+            "Đăng lỗi": "FAILED",
+            "❌ Thất bại": "FAILED",
+            "Đã hủy": "CANCELLED",
+            "⚪ Đã hủy": "CANCELLED",
+            "Dời lịch (tắt máy)": "MISSED_RESCHEDULED",
+            "⏳ Dời sang mai": "MISSED_RESCHEDULED",
+            "☁️ Đã hẹn TikTok": "SERVER_SCHEDULED",
         }
         st_filter = STATUS_MAP.get(cur_st, cur_st if cur_st not in ("Tất cả", "tất cả", "") else None)
 
@@ -2006,28 +2257,27 @@ class AutoScheduleView(ctk.CTkFrame):
                     time_str = raw_time
 
                 st = t.get("status", "PENDING")
-                mode = "☁️ TikTok" if t.get("execution_mode") == "SERVER_SCHEDULE" else "💻 Máy"
 
                 if st == "SUCCESS":
                     status_str = "🟢 Đã đăng"
                     tag = "success_tag"
                 elif st == "SERVER_SCHEDULED":
-                    status_str = "☁️ Đã hẹn TikTok"
-                    tag = "server_tag"
+                    status_str = "📦 Đã lưu trữ (Bản cũ)"
+                    tag = "cancel_tag"
                 elif st == "FAILED":
-                    status_str = "❌ Thất bại"
+                    status_str = "❌ Đăng lỗi"
                     tag = "failed_tag"
                 elif st == "CANCELLED":
                     status_str = "⚪ Đã hủy"
                     tag = "cancel_tag"
                 elif st == "MISSED_RESCHEDULED":
-                    status_str = "⏳ Dời sang mai"
+                    status_str = "⏳ Dời lịch (tắt máy)"
                     tag = "pending_tag"
                 elif st == "UPLOADING":
-                    status_str = "⚡ Đang tải..."
+                    status_str = "⚡ Đang tải lên"
                     tag = "server_tag"
                 else:
-                    status_str = "⏳ Đang chờ"
+                    status_str = "⏳ Đang chờ đăng"
                     tag = "pending_tag"
 
                 self.tree.insert(
@@ -2040,7 +2290,6 @@ class AutoScheduleView(ctk.CTkFrame):
                         f"@{t.get('tiktok_account')}" if t.get("tiktok_account") else "Chưa liên kết",
                         t.get("video_filename", ""),
                         t.get("title", ""),
-                        mode,
                         status_str,
                     ),
                     tags=(tag,),

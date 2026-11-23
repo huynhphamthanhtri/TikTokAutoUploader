@@ -25,7 +25,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from schedule_contracts import (
     ConflictSnapshot,
@@ -162,7 +162,7 @@ class ScheduleManager:
                             scheduled_time TEXT NOT NULL,
                             scheduled_epoch INTEGER NOT NULL,
                             golden_hour_slot TEXT DEFAULT 'TRUA',
-                            execution_mode TEXT DEFAULT 'SERVER_SCHEDULE',
+                            execution_mode TEXT DEFAULT 'LOCAL_QUEUE',
                             status TEXT DEFAULT 'PENDING',
                             upload_engine TEXT DEFAULT 'DIRECT_API',
                             delete_source_after_post INTEGER DEFAULT 1,
@@ -192,7 +192,7 @@ class ScheduleManager:
                         ("video_filename", "TEXT DEFAULT ''"),
                         ("title", "TEXT DEFAULT ''"),
                         ("golden_hour_slot", "TEXT DEFAULT 'TRUA'"),
-                        ("execution_mode", "TEXT DEFAULT 'SERVER_SCHEDULE'"),
+                        ("execution_mode", "TEXT DEFAULT 'LOCAL_QUEUE'"),
                         ("upload_engine", "TEXT DEFAULT 'DIRECT_API'"),
                         ("delete_source_after_post", "INTEGER DEFAULT 1"),
                         ("source_deleted", "INTEGER DEFAULT 0"),
@@ -342,7 +342,7 @@ class ScheduleManager:
                     sched_time,
                     sched_epoch,
                     str(item.get("golden_hour_slot") or "TRUA"),
-                    str(item.get("execution_mode") or "SERVER_SCHEDULE"),
+                    str(item.get("execution_mode") or "LOCAL_QUEUE"),
                     str(item.get("status") or "PENDING"),
                     str(item.get("upload_engine") or "DIRECT_API"),
                     1 if item.get("delete_source_after_post", True) else 0,
@@ -456,7 +456,7 @@ class ScheduleManager:
                         v_filename = str(item.get("video_filename") or Path(v_path).name).strip()
                         title = str(item.get("title") or "").strip()
                         slot = str(item.get("golden_hour_slot") or "TRUA")
-                        exec_mode = str(item.get("execution_mode") or "SERVER_SCHEDULE")
+                        exec_mode = str(item.get("execution_mode") or "LOCAL_QUEUE")
                         status = str(item.get("status") or "PENDING")
                         engine = str(item.get("upload_engine") or "DIRECT_API")
                         del_src = 1 if item.get("delete_source_after_post", True) else 0
@@ -626,17 +626,17 @@ class ScheduleManager:
         # 6. View Scope Filter (ACTIVE vs ARCHIVED vs ALL)
         raw_scope = (view_scope or "").strip().upper()
         if raw_scope == "ACTIVE":
-            # ACTIVE: bài đang chờ xử lý, lỗi cần thử lại, hoặc bài hôm nay/tương lai (loại bỏ CANCELLED)
+            # ACTIVE: bài đang chờ xử lý, lỗi cần thử lại, hoặc bài đã đăng hôm nay/tương lai (ẩn SERVER_SCHEDULED cũ)
             conditions.append("""(
                 status IN ('PENDING', 'QUEUED', 'MISSED_RESCHEDULED', 'UPLOADING', 'FAILED')
-                OR (status IN ('SERVER_SCHEDULED', 'SUCCESS') AND scheduled_time >= ?)
+                OR (status = 'SUCCESS' AND scheduled_time >= ?)
             )""")
             params.append(today_iso)
         elif raw_scope == "ARCHIVED":
-            # ARCHIVED: bài đã hủy, hoặc bài SERVER_SCHEDULED/SUCCESS đã xong trước hôm nay
+            # ARCHIVED: bài đã hủy, bài SERVER_SCHEDULED cũ, hoặc bài SUCCESS đã xong trước hôm nay
             conditions.append("""(
-                status = 'CANCELLED'
-                OR (status IN ('SERVER_SCHEDULED', 'SUCCESS') AND scheduled_time < ?)
+                status IN ('CANCELLED', 'SERVER_SCHEDULED')
+                OR (status = 'SUCCESS' AND scheduled_time < ?)
             )""")
             params.append(today_iso)
 
@@ -985,12 +985,22 @@ class ScheduleManager:
             finally:
                 conn.close()
 
-    def claim_due_tasks(self, worker_id: str, limit: int = 2, lease_seconds: int = 180) -> List[Dict[str, Any]]:
-        """Tìm và nhận nguyên tử các task LOCAL_QUEUE đã đến hạn thực thi (dùng cho daemon loop)."""
+    def claim_due_tasks(
+        self,
+        worker_id: str,
+        limit: int = 2,
+        lease_seconds: int = 180,
+        profile_proxy_map: Optional[Mapping[str, str]] = None,
+        blocked_proxies: Optional[Sequence[str] | set] = None,
+    ) -> List[Dict[str, Any]]:
+        """Tìm và nhận nguyên tử các task LOCAL_QUEUE đã đến hạn thực thi (có lọc chống trùng Proxy)."""
         now = datetime.datetime.now()
         now_str = now.isoformat()
         now_epoch = int(now.timestamp())
         lease_until = now_epoch + lease_seconds
+
+        use_proxy_filter = profile_proxy_map is not None or blocked_proxies is not None
+        scan_limit = max(limit * 25, 250) if use_proxy_filter else limit
 
         claimed_tasks: List[Dict[str, Any]] = []
         with _FILE_LOCK:
@@ -999,7 +1009,7 @@ class ScheduleManager:
                 with conn:
                     # 1. Quét các task LOCAL_QUEUE đã đến hạn (DEC-02: Bao gồm cả MISSED_RESCHEDULED)
                     rows = conn.execute("""
-                        SELECT id FROM scheduled_tasks
+                        SELECT id, profile_name FROM scheduled_tasks
                         WHERE execution_mode = 'LOCAL_QUEUE'
                           AND scheduled_epoch <= ?
                           AND (
@@ -1008,9 +1018,24 @@ class ScheduleManager:
                           )
                         ORDER BY scheduled_epoch ASC
                         LIMIT ?
-                    """, (now_epoch, now_epoch, limit)).fetchall()
+                    """, (now_epoch, now_epoch, scan_limit)).fetchall()
 
-                    task_ids = [r["id"] for r in rows]
+                    if use_proxy_filter:
+                        chosen_proxies = set(str(p) for p in (blocked_proxies or ()) if p)
+                        task_ids = []
+                        for r in rows:
+                            p_name = str(r["profile_name"] or "").strip()
+                            p_key = str((profile_proxy_map or {}).get(p_name) or "").strip()
+                            if p_key and p_key in chosen_proxies:
+                                continue
+                            task_ids.append(r["id"])
+                            if p_key:
+                                chosen_proxies.add(p_key)
+                            if len(task_ids) >= limit:
+                                break
+                    else:
+                        task_ids = [r["id"] for r in rows]
+
                     if hasattr(self, "_test_claim_interleave_hook") and callable(self._test_claim_interleave_hook):
                         self._test_claim_interleave_hook(conn, task_ids)
                     for tid in task_ids:
@@ -1664,24 +1689,47 @@ class ScheduleManager:
         # Chế độ APPEND (Mặc định): Giữ nguyên new_tasks
         return new_tasks
 
-    def recover_missed_tasks(self, max_daily_posts: int = 2) -> List[Dict[str, Any]]:
+    def recover_missed_tasks(
+        self,
+        max_daily_posts: int = 2,
+        profile_configs: Optional[Mapping[str, Any]] = None,
+        proxy_cooldown_minutes: int = 5,
+        now_utc: Optional[datetime.datetime] = None,
+    ) -> List[Dict[str, Any]]:
         """Quét và phục hồi thông minh (Smart Reschedule) các task Local Queue bị lỡ hẹn do tắt máy.
-        
-        Thay vì dồn toàn bộ vào ngày mai, thuật toán dàn đều các task vào các slot còn trống
-        của các ngày kế tiếp, tuân thủ nghiêm ngặt giới hạn max_daily_posts.
+
+        Quy tắc (Phương án B):
+        - Quy đổi thời điểm mở máy sang múi giờ địa phương của Proxy gán cho từng profile.
+        - Nếu đang trong giờ hoạt động (07:00 – 22:59 giờ Proxy):
+          + Video lỡ đầu tiên của profile được phép đăng bù ngay (cộng dồn giãn cách proxy_cooldown_minutes
+            nếu nhiều acc dùng chung 1 Proxy để tránh trùng IP).
+          + Các video lỡ từ thứ 2 trở đi: dàn đều vào các khung giờ vàng còn trống cách hiện tại >= 2h
+            hoặc sang các ngày kế tiếp, random phút trong khung giờ vàng và giữ nguyên giới hạn max_daily_posts.
+        - Nếu rơi vào giờ ngủ ban đêm (23:00 – 06:59 giờ Proxy):
+          + Không đăng bù ngay, dời toàn bộ sang khung giờ vàng Sáng (08:00–09:15) gần nhất.
         """
-        now = datetime.datetime.now()
-        now_epoch = int(now.timestamp())
+        import hashlib
+        import random
+        from collections import defaultdict
+        from schedule_calculator import extract_proxy_key, resolve_profile_timezone, resolve_tz
+
+        if now_utc is None:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+        elif now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=datetime.timezone.utc)
+
+        now_epoch = int(now_utc.timestamp())
         threshold_epoch = now_epoch - 900  # Quá 15 phút
         recovered: List[Dict[str, Any]] = []
 
-        # Các khung giờ chuẩn mặc định
-        golden_time_slots = [
-            (8, 30),   # Sáng
-            (12, 15),  # Trưa
-            (18, 0),   # Chiều
-            (20, 30),  # Tối
+        # 4 khung giờ vàng chuẩn (start_h, start_m, end_h, end_m)
+        golden_windows = [
+            (8, 0, 9, 15),    # Sáng
+            (11, 45, 13, 0),  # Trưa
+            (17, 30, 18, 45), # Chiều
+            (20, 0, 21, 30),  # Tối
         ]
+        cooldown_sec = max(1, int(proxy_cooldown_minutes)) * 60
 
         with _FILE_LOCK:
             conn = self._get_connection()
@@ -1698,76 +1746,113 @@ class ScheduleManager:
                 if not rows:
                     return []
 
-                from collections import defaultdict
                 grouped_missed = defaultdict(list)
                 for r in rows:
                     t = self._row_to_dict(r)
                     grouped_missed[t["profile_name"]].append(t)
 
+                proxy_immediate_count: Dict[str, int] = defaultdict(int)
+                proxy_used_epochs: Dict[str, List[int]] = defaultdict(list)
+
                 with conn:
                     for prof_name, missed_list in grouped_missed.items():
+                        cfg = (profile_configs or {}).get(prof_name, {}) if isinstance(profile_configs, Mapping) else {}
+                        tz_name = resolve_profile_timezone(cfg)
+                        proxy_key = extract_proxy_key(cfg)
+                        try:
+                            prof_tz = resolve_tz(tz_name)
+                        except Exception:
+                            prof_tz = datetime.timezone(datetime.timedelta(hours=7))
+
+                        now_local = now_utc.astimezone(prof_tz)
+                        is_active_hours = 7 <= now_local.hour < 23
+
                         # Lấy các task tương lai đã có của profile này để tránh trùng ngày
                         future_rows = conn.execute("""
-                            SELECT scheduled_time FROM scheduled_tasks
+                            SELECT scheduled_time, scheduled_epoch FROM scheduled_tasks
                             WHERE profile_name = ?
-                              AND status IN ('PENDING', 'SERVER_SCHEDULED', 'QUEUED', 'UPLOADING')
+                              AND status IN ('PENDING', 'QUEUED', 'UPLOADING', 'MISSED_RESCHEDULED')
                               AND scheduled_epoch >= ?
                         """, (prof_name, threshold_epoch)).fetchall()
 
-                        posts_per_date = defaultdict(int)
+                        posts_per_date: Dict[datetime.date, int] = defaultdict(int)
                         for fr in future_rows:
-                            s_time = fr["scheduled_time"]
+                            ep_val = fr["scheduled_epoch"]
                             try:
-                                d_key = datetime.datetime.fromisoformat(s_time).date()
+                                if ep_val:
+                                    d_key = datetime.datetime.fromtimestamp(int(ep_val), tz=prof_tz).date()
+                                else:
+                                    d_key = datetime.datetime.fromisoformat(fr["scheduled_time"]).date()
                                 posts_per_date[d_key] += 1
                             except Exception:
                                 pass
 
-                        today_date = now.date()
+                        seed_val = int(hashlib.md5(f"recover:{prof_name}:{now_epoch}".encode("utf-8")).hexdigest()[:8], 16)
+                        rng = random.Random(seed_val)
+                        short_city = tz_name.split("/")[-1].replace("_", " ")
 
                         for task_idx, task in enumerate(missed_list):
-                            if task_idx == 0:
-                                # Video đầu tiên của profile bị lỡ hẹn: ĐĂNG BÙ NGAY LẬP TỨC
-                                new_target_dt = now
+                            if task_idx == 0 and is_active_hours:
+                                # Video đầu tiên trong giờ hoạt động (07:00 - 22:59 giờ Proxy): Đăng bù ngay kèm stagger Proxy
+                                stagger_idx = proxy_immediate_count[proxy_key] if proxy_key else 0
+                                delay_sec = stagger_idx * cooldown_sec
+                                new_target_dt = now_local + datetime.timedelta(seconds=delay_sec)
+                                new_target_epoch = int(new_target_dt.timestamp())
                                 new_target_str = new_target_dt.isoformat()
-                                new_target_epoch = now_epoch
-                                err_msg = "Đăng bù ngay khi mở máy do lỡ hẹn tắt máy."
-                                posts_per_date[today_date] += 1
+                                if stagger_idx == 0:
+                                    err_msg = f"Đăng bù ngay khi mở máy (giờ {short_city})."
+                                else:
+                                    err_msg = f"Đăng bù giãn cách +{stagger_idx * proxy_cooldown_minutes}p (tránh trùng IP Proxy)."
+                                if proxy_key:
+                                    proxy_immediate_count[proxy_key] += 1
+                                    proxy_used_epochs[proxy_key].append(new_target_epoch)
+                                posts_per_date[new_target_dt.date()] += 1
                             else:
-                                # Video thứ 2 trở đi: Kiểm tra xem hôm nay còn khung giờ vàng nào cách now ít nhất 2 tiếng không
-                                scheduled_for_today = False
-                                if posts_per_date[today_date] < max_daily_posts:
-                                    min_candidate_dt = now + datetime.timedelta(hours=2)
-                                    for slot_h, slot_m in golden_time_slots:
-                                        candidate_dt = datetime.datetime.combine(
-                                            today_date,
-                                            datetime.time(hour=slot_h, minute=slot_m),
-                                        )
-                                        if candidate_dt >= min_candidate_dt:
-                                            new_target_dt = candidate_dt
-                                            new_target_str = new_target_dt.isoformat()
-                                            new_target_epoch = int(new_target_dt.timestamp())
-                                            err_msg = f"Tự động dời sang khung giờ vàng {new_target_dt.strftime('%H:%M')} hôm nay do lỡ hẹn tắt máy."
-                                            posts_per_date[today_date] += 1
-                                            scheduled_for_today = True
-                                            break
+                                # Ban đêm (23:00-06:59) hoặc bài lỡ thứ 2 trở đi: dời sang khung giờ vàng tiếp theo
+                                min_lead_hours = 1 if now_local.hour < 7 else 2
+                                min_candidate_dt = now_local + datetime.timedelta(hours=min_lead_hours)
+                                search_day = now_local.date()
+                                found_dt: Optional[datetime.datetime] = None
 
-                                if not scheduled_for_today:
-                                    # Bắt đầu tìm slot từ ngày mai trở đi
-                                    target_day = (now + datetime.timedelta(days=1)).date()
-                                    while posts_per_date[target_day] >= max_daily_posts:
-                                        target_day += datetime.timedelta(days=1)
+                                for _ in range(365):
+                                    if posts_per_date[search_day] < max_daily_posts:
+                                        for sh, sm, eh, em in golden_windows:
+                                            s_m = sh * 60 + sm
+                                            e_m = eh * 60 + em
+                                            chosen_dt = None
+                                            for _attempt in range(6):
+                                                rand_m = rng.randint(s_m, e_m)
+                                                cand_h, cand_min = divmod(rand_m, 60)
+                                                cand_dt = datetime.datetime.combine(
+                                                    search_day,
+                                                    datetime.time(hour=cand_h, minute=cand_min),
+                                                    tzinfo=prof_tz,
+                                                )
+                                                if cand_dt < min_candidate_dt:
+                                                    continue
+                                                cand_ep = int(cand_dt.timestamp())
+                                                if proxy_key and any(abs(cand_ep - u_ep) < cooldown_sec for u_ep in proxy_used_epochs[proxy_key]):
+                                                    continue
+                                                chosen_dt = cand_dt
+                                                break
+                                            if chosen_dt is not None:
+                                                found_dt = chosen_dt
+                                                break
+                                    if found_dt is not None:
+                                        break
+                                    search_day += datetime.timedelta(days=1)
 
-                                    slot_idx = posts_per_date[target_day] % len(golden_time_slots)
-                                    slot_h, slot_m = golden_time_slots[slot_idx]
-                                    new_target_dt = datetime.datetime.combine(
-                                        target_day,
-                                        datetime.time(hour=slot_h, minute=slot_m),
-                                    )
-                                    new_target_str = new_target_dt.isoformat()
-                                    new_target_epoch = int(new_target_dt.timestamp())
-                                    err_msg = f"Tự động dời lịch thông minh sang {new_target_dt.strftime('%H:%M %d/%m')} do tắt máy."
-                                    posts_per_date[target_day] += 1
+                                if found_dt is None:
+                                    found_dt = now_local + datetime.timedelta(days=1)
+
+                                new_target_dt = found_dt
+                                new_target_str = new_target_dt.isoformat()
+                                new_target_epoch = int(new_target_dt.timestamp())
+                                posts_per_date[new_target_dt.date()] += 1
+                                if proxy_key:
+                                    proxy_used_epochs[proxy_key].append(new_target_epoch)
+                                night_note = " (tránh đăng ban đêm)" if not is_active_hours and task_idx == 0 else ""
+                                err_msg = f"Dời sang giờ vàng {new_target_dt.strftime('%H:%M %d/%m')} ({short_city}){night_note}."
 
                             conn.execute("""
                                 UPDATE scheduled_tasks
@@ -1778,13 +1863,13 @@ class ScheduleManager:
                                     error_message = ?,
                                     updated_at = ?
                                 WHERE id = ?
-                            """, (new_target_str, new_target_epoch, err_msg, now.isoformat(), task["id"]))
+                            """, (new_target_str, new_target_epoch, err_msg, now_utc.isoformat(), task["id"]))
 
                             task["scheduled_time"] = new_target_str
                             task["scheduled_epoch"] = new_target_epoch
                             task["status"] = "MISSED_RESCHEDULED"
                             task["error_message"] = err_msg
-                            task["updated_at"] = now.isoformat()
+                            task["updated_at"] = now_utc.isoformat()
                             recovered.append(task)
 
                     self._sync_legacy_mirror_unlocked(conn)
@@ -1800,6 +1885,7 @@ class ScheduleManager:
             "server_scheduled": 0,
             "posted_today": 0,
             "failed": 0,
+            "total_success": 0,
             "total": 0,
         }
 
@@ -1828,6 +1914,13 @@ class ScheduleManager:
                     WHERE status = 'SERVER_SCHEDULED'
                 """).fetchone()
                 stats["server_scheduled"] = row_server["cnt"] if row_server else 0
+
+                # Tổng đã hoàn tất (bao gồm SUCCESS và lịch SERVER_SCHEDULED lịch sử)
+                row_total_success = conn.execute("""
+                    SELECT COUNT(*) as cnt FROM scheduled_tasks
+                    WHERE status IN ('SUCCESS', 'SERVER_SCHEDULED')
+                """).fetchone()
+                stats["total_success"] = row_total_success["cnt"] if row_total_success else 0
 
                 # Thất bại
                 row_failed = conn.execute("""

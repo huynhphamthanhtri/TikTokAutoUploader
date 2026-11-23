@@ -80,7 +80,7 @@ hidden_imports = [
     'psutil',
     'flask',
     'yt_dlp',
-    'pyngrok',
+
     'googleapiclient',
     'googleapiclient.discovery',
     'googleapiclient.http',
@@ -121,7 +121,7 @@ hidden_imports += [
 ]
 hidden_imports += collect_submodules('customtkinter')
 hidden_imports += collect_submodules('yt_dlp')
-hidden_imports += collect_submodules('pyngrok')
+
 hidden_imports += collect_submodules('googleapiclient')
 hidden_imports += collect_submodules('charset_normalizer')
 hidden_imports += collect_submodules('patchright')
@@ -135,7 +135,10 @@ hidden_imports += [
     'taskbar_manager',
     'watchdog_service',
     'youtube_monitor.ytdlp_updater',
+    'youtube_monitor.cookie_pool',
     'upload_preparation',
+    'youtube_monitor.cloudflare_owner',
+    'youtube_monitor.cloudflare_helper',
     'youtube_monitor.ngrok_owner',
     'ui_statistics',
     'tiktok_dedup_engine',

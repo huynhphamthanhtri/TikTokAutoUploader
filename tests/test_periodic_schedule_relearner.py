@@ -270,6 +270,27 @@ class TestPeriodicScheduleRelearner(unittest.TestCase):
         ok_error = scheduler.reanalyze_channel_schedule("UC_test_channel")
         self.assertFalse(ok_error)  # Không văng exception, trả về False an toàn
 
+    def test_incremental_update_preserves_existing_windows_on_few_samples(self):
+        """Codex Review Finding: Cập nhật gia tăng khi lịch sử có 0 hoặc 1 mẫu
+        BẮT BUỘC phải bảo toàn 100% các khung giờ hiện có (LEARNED, MANUAL, LOCKED)
+        kèm nguyên vẹn ID và thuộc tính, không để xảy ra regression xóa trắng lịch."""
+        existing = [
+            PollingWindow(id="win_man", start_time="08:00", end_time="08:20", expected_time="08:10", source="MANUAL"),
+            PollingWindow(id="win_locked", start_time="12:00", end_time="12:20", expected_time="12:10", locked=True, source="LEARNED"),
+            PollingWindow(id="win_learned_evening", start_time="19:00", end_time="19:20", expected_time="19:10", source="LEARNED"),
+        ]
+
+        # Case 1: Lịch sử rỗng ban đầu, chỉ phát hiện 1 video mới
+        hist1, fw1, has_new1 = self.learner.update_history_and_recluster([], "2026-11-06T12:10:00Z", existing)
+        self.assertEqual(len(fw1), 3)
+        self.assertEqual([w.id for w in fw1], ["win_man", "win_locked", "win_learned_evening"])
+        self.assertEqual([w.source for w in fw1], ["MANUAL", "LEARNED", "LEARNED"])
+
+        # Case 2: Đã có 1 mẫu trong lịch sử, phát hiện thêm video cùng khung
+        hist2, fw2, has_new2 = self.learner.update_history_and_recluster(hist1, "2026-11-06T12:12:00Z", existing)
+        self.assertEqual([w.id for w in fw2], ["win_man", "win_locked", "win_learned_evening"])
+        self.assertIn("win_learned_evening", [w.id for w in fw2])
+
 
 if __name__ == "__main__":
     unittest.main()

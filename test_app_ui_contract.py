@@ -135,6 +135,8 @@ class TestAppUIContract(unittest.TestCase):
             return lbls
         ctx_labels = _get_all_menu_labels(ctx)
         self.assertIn("📁 Gán vào dự án...", ctx_labels)
+        self.assertIn("🌐 Gán Proxy Hàng Loạt...", ctx_labels)
+        self.assertIn("🌐 Kiểm Tra Proxy (Đã chọn)", ctx_labels)
 
         # Check Treeview columns
         tree = widgets["tree"]

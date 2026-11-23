@@ -7,11 +7,13 @@ from account_io import (
     apply_update_to_config,
     build_record,
     masked_record,
+    normalize_tiktok_id,
     parse_data_into_records,
     parse_format,
     parse_rows,
     plan_import,
     record_from_config,
+    resolve_record_name,
     serialize_records,
 )
 
@@ -244,6 +246,64 @@ class MaskedRecordTests(unittest.TestCase):
         record = {'password': 'a_very_long_password'}
         masked = masked_record(record)
         self.assertEqual(masked['password'], 'a_v***')
+
+
+class NameFallbackTests(unittest.TestCase):
+    def test_normalize_tiktok_id_variants(self):
+        self.assertEqual(normalize_tiktok_id('@creator_01'), 'creator_01')
+        self.assertEqual(normalize_tiktok_id('@@creator_01'), 'creator_01')
+        self.assertEqual(
+            normalize_tiktok_id('https://www.tiktok.com/@creator_01?lang=vi#top'),
+            'creator_01',
+        )
+        self.assertEqual(normalize_tiktok_id('https://tiktok.com/@creator_01/'), 'creator_01')
+        self.assertEqual(normalize_tiktok_id('@'), '')
+        self.assertEqual(normalize_tiktok_id('https://www.tiktok.com/@'), '')
+        self.assertEqual(normalize_tiktok_id('   '), '')
+
+    def test_format_without_name_prioritizes_normalized_tiktok_id_then_email(self):
+        fields = parse_format('email|password|idTiktok|cookie')
+        text = '\n'.join([
+            'a@gmail.com|pw1|https://www.tiktok.com/@shop_abc?lang=vi|c=1',
+            'b@gmail.com|pw2||c=2',
+            'c@gmail.com|pw3|@|c=3',
+            '|pw4||c=4',
+        ])
+        records, errors = parse_data_into_records(text, fields)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(records[0]['name'], 'shop_abc')
+        self.assertEqual(records[1]['name'], 'b@gmail.com')
+        self.assertEqual(records[2]['name'], 'c@gmail.com')
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0][0], 4)
+
+    def test_blank_name_cell_in_default_format_falls_back(self):
+        fields = ['name', 'email', 'idTiktok', 'mailBackup']
+        text = '\n'.join([
+            'explicit_name|e1@x.com|@tid1|bk1@x.com',
+            '|e2@x.com|@tid2|bk2@x.com',
+            '|e3@x.com||bk3@x.com',
+            '|||bk4@x.com',
+        ])
+        records, errors = parse_data_into_records(text, fields)
+        self.assertEqual([r['name'] for r in records], ['explicit_name', 'tid2', 'e3@x.com'])
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0][0], 4)
+
+    def test_resolve_record_name_does_not_fallback_to_mail_backup(self):
+        self.assertEqual(resolve_record_name({'mail_backup': 'bk@x.com'}), '')
+
+    def test_plan_import_detects_duplicates_on_fallback_names(self):
+        fields = parse_format('email|idTiktok')
+        text = '\n'.join([
+            'x@gmail.com|@existing_id',
+            'y@gmail.com|@brand_new',
+            'z@gmail.com|https://www.tiktok.com/@brand_new',
+        ])
+        records, errors = parse_data_into_records(text, fields)
+        self.assertEqual(errors, [])
+        plans = plan_import(records, {'existing_id'}, policy='update')
+        self.assertEqual([p['action'] for p in plans], ['update', 'add', 'update'])
 
 
 if __name__ == '__main__':

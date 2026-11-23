@@ -376,6 +376,7 @@ def run_ffprobe(args):
             [str(exe)] + args,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, timeout=30,
+            encoding="utf-8", errors="replace",
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         return p.stdout.strip() if p.returncode == 0 else None
@@ -392,6 +393,7 @@ def run_ffmpeg(args, timeout=300):
             [str(exe)] + args,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, timeout=timeout,
+            encoding="utf-8", errors="replace",
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         return p, extract_ffmpeg_error(p.stderr) if p.returncode != 0 else ""

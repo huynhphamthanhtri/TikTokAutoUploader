@@ -10,7 +10,12 @@ Bao gồm:
 
 from __future__ import annotations
 
+import os
+import subprocess
+import threading
 import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+from pathlib import Path
 import customtkinter as ctk
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -63,14 +68,17 @@ class BatchSetProxyModal(SafeCTkToplevel):
         proxy_type_default: str = "http",
     ):
         super().__init__(parent)
-        self.title("Gán Proxy Hàng Loạt")
-        fit_and_center_dialog(self, 580, 520, parent=parent, min_w=480, min_h=380)
+        self.title("Gán & Kiểm Tra Proxy Hàng Loạt")
+        fit_and_center_dialog(self, 640, 560, parent=parent, min_w=520, min_h=420)
         self.transient(parent)
         self.grab_set()
 
         self.selected_profiles = selected_profiles
         self.on_save = on_save
         self._parsed_mapping: Dict[str, Dict[str, Any]] = {}
+        self._probed_results: Dict[str, dict] = {}
+        self._is_probing = False
+        self._is_destroyed = False
 
         container = ctk.CTkFrame(self, fg_color="transparent")
         container.pack(fill="both", expand=True, padx=16, pady=14)
@@ -78,7 +86,7 @@ class BatchSetProxyModal(SafeCTkToplevel):
         # Header info
         ctk.CTkLabel(
             container,
-            text=f"🌐 Gán Proxy Cho {len(selected_profiles)} Profile Đã Chọn",
+            text=f"🌐 Gán & Kiểm Tra Proxy ({len(selected_profiles)} Profile Đã Chọn)",
             font=UIThemeTokens.FONT_TITLE,
             text_color=UIThemeTokens.TEXT_PRIMARY,
             anchor="w",
@@ -92,26 +100,49 @@ class BatchSetProxyModal(SafeCTkToplevel):
             anchor="w",
         ).pack(fill="x", pady=(0, 8))
 
-        # Proxy Type selector
+        # Controls row: Proxy Type, Check Proxy button, Disable Proxy toggle
         type_row = ctk.CTkFrame(container, fg_color="transparent")
         type_row.pack(fill="x", pady=(0, 6))
 
-        ctk.CTkLabel(type_row, text="Loại Proxy:", font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(type_row, text="Loại:", font=UIThemeTokens.FONT_BODY, text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(0, 6))
         self.proxy_type_var = ctk.StringVar(value=proxy_type_default.lower())
         self.type_menu = ctk.CTkOptionMenu(
             type_row,
             values=["http", "socks5"],
             variable=self.proxy_type_var,
-            width=100,
+            width=90,
             height=28,
             font=UIThemeTokens.FONT_BODY,
+            command=lambda _: self._update_preview(),
         )
-        self.type_menu.pack(side="left")
+        self.type_menu.pack(side="left", padx=(0, 8))
+
+        self.btn_check_proxy = ctk.CTkButton(
+            type_row,
+            text="⚡ Check Proxy",
+            width=115,
+            height=28,
+            font=UIThemeTokens.FONT_BUTTON,
+            fg_color=("#0284c7", "#0369a1"),
+            hover_color=("#0369a1", "#075985"),
+            command=self._start_probe,
+        )
+        self.btn_check_proxy.pack(side="left", padx=(0, 8))
+
+        self.disable_proxy_var = ctk.BooleanVar(value=False)
+        self.chk_disable = ctk.CTkCheckBox(
+            type_row,
+            text="Tắt proxy (Dùng mạng trực tiếp)",
+            variable=self.disable_proxy_var,
+            font=UIThemeTokens.FONT_BODY,
+            command=self._on_toggle_disable_proxy,
+        )
+        self.chk_disable.pack(side="right")
 
         # Text input area
-        self.text_input = ctk.CTkTextbox(container, height=140, font=("Consolas", 10))
-        self.text_input.pack(fill="both", expand=True, pady=(4, 8))
-        self.text_input.bind("<KeyRelease>", lambda e: self._update_preview())
+        self.text_input = ctk.CTkTextbox(container, height=130, font=("Consolas", 10))
+        self.text_input.pack(fill="both", expand=True, pady=(4, 6))
+        self.text_input.bind("<KeyRelease>", lambda e: self._on_text_changed())
 
         # Error / Status label
         self.status_label = ctk.CTkLabel(
@@ -130,9 +161,9 @@ class BatchSetProxyModal(SafeCTkToplevel):
             font=UIThemeTokens.FONT_SUBTITLE,
             text_color=UIThemeTokens.TEXT_MUTED,
             anchor="w",
-        ).pack(fill="x", pady=(4, 2))
+        ).pack(fill="x", pady=(2, 2))
 
-        self.preview_box = ctk.CTkTextbox(container, height=110, font=("Consolas", 9), state="disabled", fg_color="#f8fafc")
+        self.preview_box = ctk.CTkTextbox(container, height=120, font=("Consolas", 9), state="disabled", fg_color="#f8fafc")
         self.preview_box.pack(fill="both", expand=True, pady=(0, 10))
 
         # Action Buttons Row
@@ -162,6 +193,24 @@ class BatchSetProxyModal(SafeCTkToplevel):
         )
         self.btn_save.pack(side="right")
 
+    def destroy(self):
+        self._is_destroyed = True
+        super().destroy()
+
+    def _on_toggle_disable_proxy(self) -> None:
+        if self.disable_proxy_var.get():
+            self.type_menu.configure(state="disabled")
+            self.text_input.configure(state="disabled")
+            self.btn_check_proxy.configure(state="disabled")
+        else:
+            self.type_menu.configure(state="normal")
+            self.text_input.configure(state="normal")
+            self.btn_check_proxy.configure(state="normal")
+        self._update_preview()
+
+    def _on_text_changed(self) -> None:
+        self._update_preview()
+
     def _parse_lines(self) -> Tuple[List[str], List[int]]:
         raw_text = self.text_input.get("1.0", "end").strip()
         lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
@@ -177,25 +226,130 @@ class BatchSetProxyModal(SafeCTkToplevel):
 
         return valid_proxies, invalid_line_indices
 
-    def _update_preview(self) -> None:
-        valid_proxies, invalid_lines = self._parse_lines()
-        self._parsed_mapping.clear()
-
-        if invalid_lines:
+    def _start_probe(self) -> None:
+        if self._is_probing:
+            return
+        valid_proxies, _ = self._parse_lines()
+        if not valid_proxies:
             self.status_label.configure(
-                text=f"⚠️ Dòng không hợp lệ: {', '.join(str(i) for i in invalid_lines[:5])}",
+                text="Vui lòng nhập ít nhất 1 proxy hợp lệ để kiểm tra.",
                 text_color=UIThemeTokens.STATUS_ERROR,
             )
-        elif not valid_proxies:
+            return
+
+        self._is_probing = True
+        self.btn_check_proxy.configure(state="disabled", text="Đang check...")
+        self.btn_save.configure(state="disabled")
+        self.status_label.configure(
+            text=f"🔄 Đang kiểm tra 0/{len(valid_proxies)} proxy...",
+            text_color=UIThemeTokens.TEXT_MUTED,
+        )
+
+        threading.Thread(
+            target=self._run_probe_worker,
+            args=(valid_proxies,),
+            daemon=True,
+        ).start()
+
+    def _run_probe_worker(self, proxies_to_probe: List[str]) -> None:
+        from proxy_diagnostics import batch_probe_proxies
+
+        def on_prog(done, total, _p_str, _res):
+            if self._is_destroyed:
+                return
+            try:
+                self.after(0, lambda d=done, t=total: self._on_probe_progress(d, t))
+            except Exception:
+                pass
+
+        results = batch_probe_proxies(
+            proxies_to_probe,
+            max_workers=5,
+            timeout=6,
+            on_progress=on_prog,
+        )
+
+        if not self._is_destroyed:
+            try:
+                self.after(0, lambda r=results: self._on_probe_finished(r))
+            except Exception:
+                pass
+
+    def _on_probe_progress(self, done: int, total: int) -> None:
+        if self._is_destroyed:
+            return
+        self.status_label.configure(
+            text=f"🔄 Đang kiểm tra {done}/{total} proxy...",
+            text_color=UIThemeTokens.TEXT_MUTED,
+        )
+
+    def _on_probe_finished(self, results: Dict[str, dict]) -> None:
+        if self._is_destroyed:
+            return
+        self._is_probing = False
+        self._probed_results.update(results)
+        self.btn_check_proxy.configure(state="normal", text="⚡ Check Proxy")
+        self.btn_save.configure(state="normal")
+
+        live_cnt = sum(1 for r in results.values() if r.get("ok"))
+        die_cnt = len(results) - live_cnt
+        if die_cnt == 0:
             self.status_label.configure(
-                text="Chưa có proxy hợp lệ nào được nhập.",
-                text_color=UIThemeTokens.TEXT_MUTED,
+                text=f"✔️ Hoàn tất kiểm tra: 🟢 {live_cnt}/{len(results)} Proxy Live",
+                text_color=UIThemeTokens.STATUS_LIVE,
             )
         else:
             self.status_label.configure(
-                text=f"✔️ Đã nhận diện {len(valid_proxies)} proxy hợp lệ.",
-                text_color=UIThemeTokens.STATUS_LIVE,
+                text=f"⚠️ Hoàn tất kiểm tra: 🟢 {live_cnt} Live | 🔴 {die_cnt} Die",
+                text_color=UIThemeTokens.STATUS_ERROR,
             )
+
+        self._update_preview()
+
+    def _update_preview(self) -> None:
+        self._parsed_mapping.clear()
+
+        # Case 1: Tắt proxy cho tất cả profile đã chọn
+        if self.disable_proxy_var.get():
+            self.status_label.configure(
+                text="Chế độ Tắt Proxy: Sẽ gỡ bỏ proxy cho tất cả tài khoản được chọn.",
+                text_color=UIThemeTokens.TEXT_PRIMARY,
+            )
+            preview_lines = []
+            for prof_name in self.selected_profiles:
+                preview_lines.append(f"[{prof_name}] -> ⚪ Tắt Proxy (Kết nối trực tiếp)")
+                self._parsed_mapping[prof_name] = {
+                    "use_proxy": False,
+                    "proxy_type": "http",
+                    "proxy_string": "",
+                    "region": "",
+                    "status_badge": "Tắt",
+                }
+            self.preview_box.configure(state="normal")
+            self.preview_box.delete("1.0", "end")
+            self.preview_box.insert("1.0", "\n".join(preview_lines))
+            self.preview_box.configure(state="disabled")
+            return
+
+        # Case 2: Phân bổ danh sách proxy
+        valid_proxies, invalid_lines = self._parse_lines()
+
+        if not self._is_probing:
+            if invalid_lines:
+                self.status_label.configure(
+                    text=f"⚠️ Dòng không hợp lệ: {', '.join(str(i) for i in invalid_lines[:5])}",
+                    text_color=UIThemeTokens.STATUS_ERROR,
+                )
+            elif not valid_proxies:
+                self.status_label.configure(
+                    text="Chưa có proxy hợp lệ nào được nhập.",
+                    text_color=UIThemeTokens.TEXT_MUTED,
+                )
+            elif not self._probed_results:
+                self.status_label.configure(
+                    text=f"✔️ Đã nhận diện {len(valid_proxies)} proxy hợp lệ.",
+                    text_color=UIThemeTokens.STATUS_LIVE,
+                )
 
         preview_lines = []
         p_type = self.proxy_type_var.get().lower()
@@ -204,12 +358,39 @@ class BatchSetProxyModal(SafeCTkToplevel):
             if valid_proxies:
                 chosen_proxy = valid_proxies[idx % len(valid_proxies)]
                 masked = redact_proxy_string(chosen_proxy)
-                preview_lines.append(f"[{prof_name}] -> {p_type}://{masked}")
-                self._parsed_mapping[prof_name] = {
-                    "use_proxy": True,
-                    "proxy_type": p_type,
-                    "proxy_string": chosen_proxy,
-                }
+
+                probe_info = self._probed_results.get(chosen_proxy)
+                if probe_info:
+                    if probe_info.get("ok"):
+                        geo = probe_info.get("geo") or {}
+                        cc = geo.get("country_code") or geo.get("country") or ""
+                        lat = probe_info.get("latency_ms")
+                        lat_tag = f" ({lat}ms)" if lat is not None else ""
+                        badge = f"🟢 Live [{cc}]{lat_tag}"
+                        status_badge = f"[{cc}] Live" if cc else "🟢 Live"
+                        region = cc
+                    else:
+                        err = probe_info.get("error") or "Lỗi kết nối"
+                        badge = f"🔴 Die ({err[:25]})"
+                        status_badge = "🔴 Die"
+                        region = ""
+
+                    preview_lines.append(f"[{prof_name}] -> {p_type}://{masked}  {badge}")
+                    self._parsed_mapping[prof_name] = {
+                        "use_proxy": True,
+                        "proxy_type": p_type,
+                        "proxy_string": chosen_proxy,
+                        "region": region,
+                        "exit_ip": probe_info.get("exit_ip", ""),
+                        "status_badge": status_badge,
+                    }
+                else:
+                    preview_lines.append(f"[{prof_name}] -> {p_type}://{masked}")
+                    self._parsed_mapping[prof_name] = {
+                        "use_proxy": True,
+                        "proxy_type": p_type,
+                        "proxy_string": chosen_proxy,
+                    }
             else:
                 preview_lines.append(f"[{prof_name}] -> (Chưa có proxy)")
 
@@ -221,7 +402,7 @@ class BatchSetProxyModal(SafeCTkToplevel):
     def _apply_save(self) -> None:
         self._update_preview()
         if not self._parsed_mapping:
-            self.status_label.configure(text="Vui lòng nhập ít nhất 1 proxy hợp lệ trước khi lưu.")
+            self.status_label.configure(text="Vui lòng nhập ít nhất 1 proxy hợp lệ hoặc chọn Tắt proxy trước khi lưu.")
             return
 
         success = self.on_save(self._parsed_mapping)
@@ -1901,3 +2082,346 @@ class AssignProjectModal(SafeCTkToplevel):
                 self.return_focus_to.focus_set()
             except Exception:
                 pass
+
+
+# ==============================================================================
+# 7. UNASSIGNED VIDEOS INSPECTION MODAL
+# ==============================================================================
+
+class UnassignedVideosModal(SafeCTkToplevel):
+    """
+    UnassignedVideosModal - Hộp thoại hiển thị chi tiết các video bị bỏ qua khi lên lịch.
+    Hỗ trợ lọc theo nhóm lỗi, sao chép đường dẫn, mở Explorer và xuất báo cáo TXT (UTF-8 BOM).
+    """
+
+    def __init__(
+        self,
+        parent: Any,
+        unassigned_videos: Sequence[Any],
+        title_text: str = "Danh Sách Video Bị Bỏ Qua",
+    ):
+        super().__init__(parent)
+        self.unassigned_videos = list(unassigned_videos or [])
+        self.parent = parent
+        self._closing = False
+
+        self.title(f"DONGLAO-TIKTOK — {title_text}")
+        fit_and_center_dialog(self, 980, 640, parent=parent, min_w=780, min_h=500)
+        self.configure(fg_color=UIThemeTokens.BG_ROOT)
+        self.transient(parent)
+        try:
+            self.grab_set()
+        except Exception:
+            pass
+
+        self._active_category = "Tất cả"
+        self._parsed_items: List[Dict[str, Any]] = []
+        self._category_counts: Dict[str, int] = {}
+        self._build_parsed_items()
+        self._build_ui()
+        self._populate_tree()
+
+        self.protocol("WM_DELETE_WINDOW", self._close_modal)
+        self.bind("<Escape>", lambda _e: self._close_modal())
+
+    def _build_parsed_items(self):
+        from video_probe import humanize_unassigned_reason
+        self._category_counts.clear()
+        self._parsed_items.clear()
+
+        for idx, item in enumerate(self.unassigned_videos, start=1):
+            p_str = getattr(item, "video_path", getattr(item, "file_path", str(item)))
+            reason = getattr(item, "reason", "")
+            details = getattr(item, "details", "")
+            cat, human_det = humanize_unassigned_reason(reason, details)
+            filename = os.path.basename(p_str) or p_str
+            entry = {
+                "idx": idx,
+                "path": p_str,
+                "filename": filename,
+                "category": cat,
+                "details": human_det,
+                "raw_reason": reason,
+                "raw_details": details,
+            }
+            self._parsed_items.append(entry)
+            self._category_counts[cat] = self._category_counts.get(cat, 0) + 1
+
+    def _build_ui(self):
+        # Header Frame
+        header_frame = ctk.CTkFrame(self, fg_color=UIThemeTokens.BG_CARD, corner_radius=10, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+        header_frame.pack(side="top", fill="x", padx=14, pady=(12, 6))
+
+        total_count = len(self._parsed_items)
+        lbl_title = ctk.CTkLabel(
+            header_frame,
+            text=f"⚠️ Báo Cáo Video Bị Bỏ Qua ({total_count:,} file)",
+            font=("Segoe UI", 15, "bold"),
+            text_color=UIThemeTokens.STATUS_WARN,
+        )
+        lbl_title.pack(side="left", padx=14, pady=10)
+
+        lbl_desc = ctk.CTkLabel(
+            header_frame,
+            text="Các video dưới đây không đạt điều kiện kỹ thuật của TikTok Studio hoặc bị xung đột lịch.",
+            font=("Segoe UI", 11),
+            text_color=UIThemeTokens.TEXT_MUTED,
+        )
+        lbl_desc.pack(side="left", padx=(0, 14), pady=10)
+
+        # Filter Chips Bar
+        filter_frame = ctk.CTkFrame(self, fg_color="transparent")
+        filter_frame.pack(side="top", fill="x", padx=14, pady=(2, 6))
+
+        ctk.CTkLabel(filter_frame, text="Lọc theo nhóm lỗi:", font=("Segoe UI", 11, "bold"), text_color=UIThemeTokens.TEXT_PRIMARY).pack(side="left", padx=(2, 8))
+
+        # Dynamic categories with counts (only show categories with count > 0)
+        categories = [("Tất cả", total_count)]
+        for cat in ("Thời lượng", "Sai Codec", "File lỗi / 0 Byte", "Xung đột lịch", "Hệ thống", "Khác"):
+            cnt = self._category_counts.get(cat, 0)
+            if cnt > 0:
+                categories.append((cat, cnt))
+
+        self._chip_buttons: Dict[str, ctk.CTkButton] = {}
+        for cat_name, cnt in categories:
+            btn = ctk.CTkButton(
+                filter_frame,
+                text=f"{cat_name} ({cnt:,})",
+                height=28,
+                corner_radius=14,
+                font=("Segoe UI", 11, "bold" if cat_name == "Tất cả" else "normal"),
+                fg_color=UIThemeTokens.ACCENT_PRIMARY if cat_name == "Tất cả" else "#e2e8f0",
+                hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER if cat_name == "Tất cả" else "#cbd5e1",
+                text_color="#ffffff" if cat_name == "Tất cả" else "#0f172a",
+                command=lambda c=cat_name: self._set_category_filter(c),
+            )
+            btn.pack(side="left", padx=3)
+            self._chip_buttons[cat_name] = btn
+
+        # Table Frame (Treeview)
+        table_frame = ctk.CTkFrame(self, fg_color=UIThemeTokens.BG_CARD, corner_radius=10, border_width=1, border_color=UIThemeTokens.BORDER_LIGHT)
+        table_frame.pack(side="top", fill="both", expand=True, padx=14, pady=(0, 6))
+
+        columns = ("idx", "filename", "category", "details", "path")
+        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="extended")
+
+        self.tree.heading("idx", text="#")
+        self.tree.column("idx", width=45, minwidth=35, anchor="center")
+
+        self.tree.heading("filename", text="Tên File Video")
+        self.tree.column("filename", width=250, minwidth=150, anchor="w")
+
+        self.tree.heading("category", text="Phân Loại Lỗi")
+        self.tree.column("category", width=130, minwidth=100, anchor="w")
+
+        self.tree.heading("details", text="Chi Tiết Kỹ Thuật")
+        self.tree.column("details", width=290, minwidth=180, anchor="w")
+
+        self.tree.heading("path", text="Đường Dẫn Đầy Đủ")
+        self.tree.column("path", width=220, minwidth=120, anchor="w")
+
+        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        self.tree.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=(8, 0))
+        vsb.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=(8, 0))
+        hsb.grid(row=1, column=0, sticky="ew", padx=(8, 0), pady=(0, 8))
+
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
+
+        # Context menu
+        self.ctx_menu = tk.Menu(self, tearoff=0)
+        self.ctx_menu.add_command(label="📋 Sao chép đường dẫn file", command=self._copy_selected_paths)
+        self.ctx_menu.add_command(label="📂 Mở thư mục chứa file trong Explorer", command=self._open_in_explorer)
+        self.tree.bind("<Button-3>", self._show_context_menu)
+        self.tree.bind("<Double-1>", lambda _e: self._open_in_explorer())
+
+        # Footer Action Bar
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.pack(side="bottom", fill="x", padx=14, pady=(6, 12))
+
+        self.lbl_filtered_count = ctk.CTkLabel(footer, text=f"Đang hiển thị: {total_count:,} file", font=("Segoe UI", 11), text_color=UIThemeTokens.TEXT_MUTED)
+        self.lbl_filtered_count.pack(side="left", padx=4)
+
+        ctk.CTkButton(
+            footer,
+            text="Đóng",
+            height=32,
+            fg_color="transparent",
+            hover_color="#e2e8f0",
+            text_color=UIThemeTokens.TEXT_PRIMARY,
+            border_width=1,
+            border_color="#cbd5e1",
+            command=self._close_modal,
+        ).pack(side="right", padx=(6, 0))
+
+        ctk.CTkButton(
+            footer,
+            text="📁 Xuất Báo Cáo TXT",
+            height=32,
+            fg_color=UIThemeTokens.ACCENT_PRIMARY,
+            hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
+            text_color="#ffffff",
+            font=("Segoe UI", 11, "bold"),
+            command=self._export_txt_report,
+        ).pack(side="right", padx=6)
+
+        ctk.CTkButton(
+            footer,
+            text="📋 Sao Chép Đường Dẫn",
+            height=32,
+            fg_color="#64748b",
+            hover_color="#475569",
+            text_color="#ffffff",
+            font=("Segoe UI", 11, "bold"),
+            command=self._copy_current_paths,
+        ).pack(side="right", padx=6)
+
+    def _set_category_filter(self, category: str):
+        self._active_category = category
+        for cat_name, btn in self._chip_buttons.items():
+            if cat_name == category:
+                btn.configure(
+                    fg_color=UIThemeTokens.ACCENT_PRIMARY,
+                    hover_color=UIThemeTokens.ACCENT_PRIMARY_HOVER,
+                    text_color="#ffffff",
+                    font=("Segoe UI", 11, "bold"),
+                )
+            else:
+                btn.configure(
+                    fg_color="#e2e8f0",
+                    hover_color="#cbd5e1",
+                    text_color="#0f172a",
+                    font=("Segoe UI", 11, "normal"),
+                )
+        self._populate_tree()
+
+    def _get_filtered_items(self) -> List[Dict[str, Any]]:
+        if self._active_category == "Tất cả":
+            return list(self._parsed_items)
+        return [item for item in self._parsed_items if item["category"] == self._active_category]
+
+    def _populate_tree(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        filtered = self._get_filtered_items()
+        for row_idx, item in enumerate(filtered, start=1):
+            self.tree.insert(
+                "",
+                "end",
+                values=(
+                    row_idx,
+                    item["filename"],
+                    item["category"],
+                    item["details"],
+                    item["path"],
+                ),
+            )
+        total = len(self._parsed_items)
+        self.lbl_filtered_count.configure(text=f"Đang hiển thị: {len(filtered):,} / {total:,} file")
+
+    def _show_context_menu(self, event):
+        row_id = self.tree.identify_row(event.y)
+        if row_id:
+            if row_id not in self.tree.selection():
+                self.tree.selection_set(row_id)
+            self.ctx_menu.post(event.x_root, event.y_root)
+
+    def _copy_selected_paths(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        paths = []
+        for item_id in sel:
+            vals = self.tree.item(item_id, "values")
+            if len(vals) >= 5:
+                paths.append(str(vals[4]))
+        if paths:
+            self.clipboard_clear()
+            self.clipboard_append("\n".join(paths))
+            messagebox.showinfo("Đã Sao Chép", f"Đã sao chép đường dẫn của {len(paths)} file vào bộ nhớ tạm.", parent=self)
+
+    def _copy_current_paths(self):
+        filtered = self._get_filtered_items()
+        if not filtered:
+            messagebox.showwarning("Trống", "Không có file nào trong danh sách đang lọc.", parent=self)
+            return
+        paths = [item["path"] for item in filtered]
+        self.clipboard_clear()
+        self.clipboard_append("\n".join(paths))
+        messagebox.showinfo("Đã Sao Chép", f"Đã sao chép đường dẫn của {len(paths):,} file vào bộ nhớ tạm.", parent=self)
+
+    def _open_in_explorer(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        vals = self.tree.item(sel[0], "values")
+        if len(vals) < 5:
+            return
+        target_path = Path(vals[4])
+        if not target_path.exists():
+            messagebox.showwarning("File Không Tồn Tại", f"File không còn tồn tại trên ổ đĩa:\n{target_path}", parent=self)
+            return
+        try:
+            norm = os.path.normpath(str(target_path.resolve()))
+            subprocess.Popen(["explorer", f"/select,{norm}"])
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Không thể mở Explorer: {e}", parent=self)
+
+    def _export_txt_report(self):
+        if not self._parsed_items:
+            messagebox.showwarning("Trống", "Không có dữ liệu để xuất báo cáo.", parent=self)
+            return
+
+        save_path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Lưu Báo Cáo Video Bị Bỏ Qua",
+            defaultextension=".txt",
+            filetypes=[("Text File (*.txt)", "*.txt"), ("All Files (*.*)", "*.*")],
+            initialfile="Bao_Cao_Video_Bi_Bo_Qua.txt",
+        )
+        if not save_path:
+            return
+
+        lines = [
+            "=" * 68,
+            "BÁO CÁO CHI TIẾT VIDEO BỊ BỎ QUA - DONGLAO TIKTOK AUTO UPLOADER",
+            f"Tổng số video bị bỏ qua: {len(self._parsed_items):,} file",
+            "Phân loại theo nhóm lỗi:",
+        ]
+        for cat, cnt in self._category_counts.items():
+            lines.append(f"  • {cat}: {cnt:,} file")
+        lines.append("=" * 68)
+        lines.append("")
+        lines.append("[DANH SÁCH CHI TIẾT TỪNG FILE]")
+
+        for item in self._parsed_items:
+            lines.append(f"#{item['idx']:04d} | [{item['category']}] {item['filename']}")
+            lines.append(f"  Đường dẫn: {item['path']}")
+            lines.append(f"  Lý do: {item['details']}")
+            if item.get("raw_reason"):
+                lines.append(f"  Mã kỹ thuật: {item['raw_reason']}")
+            lines.append("")
+
+        try:
+            with open(save_path, "w", encoding="utf-8-sig") as f:
+                f.write("\n".join(lines))
+            messagebox.showinfo("Xuất File Thành Công", f"Đã lưu báo cáo chi tiết tại:\n{save_path}", parent=self)
+        except Exception as e:
+            messagebox.showerror("Lỗi Lưu File", f"Không thể ghi file báo cáo: {e}", parent=self)
+
+    def _close_modal(self):
+        if self._closing:
+            return
+        self._closing = True
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        try:
+            self.destroy()
+        except Exception:
+            pass

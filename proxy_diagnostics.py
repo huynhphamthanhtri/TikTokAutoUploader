@@ -9,6 +9,7 @@ Credentials are never echoed back: every public helper returns only the
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -142,3 +143,71 @@ def probe_proxy_list(proxies, timeout=8, request_get=None):
         probe_proxy(proxy_str, timeout=timeout, request_get=request_get)
         for proxy_str in proxies or []
     ]
+
+
+def batch_probe_proxies(
+    proxies,
+    max_workers=5,
+    timeout=6,
+    request_get=None,
+    on_progress=None,
+):
+    """Probe a collection of proxies concurrently using a bounded ThreadPoolExecutor.
+
+    Parameters:
+        proxies: Iterable of proxy strings.
+        max_workers: Maximum concurrent probe threads (default 5 to avoid GeoIP rate limits).
+        timeout: Timeout in seconds for each probe (default 6).
+        request_get: Optional custom requests.get callable for testing/mocking.
+        on_progress: Optional callback fn(completed_count, total_count, proxy_str, result).
+
+    Returns:
+        Dict[str, dict]: Mapping proxy_str -> probe_result dict.
+    """
+    clean_proxies = [str(p).strip() for p in (proxies or []) if str(p).strip()]
+    if not clean_proxies:
+        return {}
+
+    unique_proxies = list(dict.fromkeys(clean_proxies))
+    total_count = len(unique_proxies)
+    results = {}
+
+    workers = max(1, min(max_workers or 5, total_count))
+    completed_count = 0
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {
+            executor.submit(
+                probe_proxy,
+                p_str,
+                timeout=timeout,
+                request_get=request_get,
+            ): p_str
+            for p_str in unique_proxies
+        }
+        for future in as_completed(future_map):
+            p_str = future_map[future]
+            try:
+                res = future.result()
+            except Exception as exc:
+                res = {
+                    "label": proxy_label(p_str) or p_str,
+                    "ok": False,
+                    "exit_ip": "",
+                    "latency_ms": None,
+                    "geo": {},
+                    "error": str(exc),
+                }
+            results[p_str] = res
+            completed_count += 1
+            if callable(on_progress):
+                try:
+                    on_progress(completed_count, total_count, p_str, res)
+                except Exception:
+                    pass
+
+    # Ensure all original clean_proxies have an entry in output mapping
+    final_results = {}
+    for p in clean_proxies:
+        final_results[p] = results.get(p, {})
+    return final_results

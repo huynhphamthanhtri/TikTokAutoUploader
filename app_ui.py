@@ -436,6 +436,8 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
         ("Đổi tên", handlers['rename_profile']),
         ("Xóa", handlers['delete_profile']),
         ("Gán DA", handlers['assign_to_project']),
+        ("🌐 Gán Proxy", handlers.get('batch_set_proxy', lambda: None)),
+        ("🌐 Check Proxy", handlers.get('batch_check_selected_proxies', lambda: None)),
         ("Import", handlers['batch_add_profiles']),
         ("Export", handlers['export_profiles']),
         ("Thống kê", handlers['show_statistics_board']),
@@ -1529,6 +1531,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     menu_check.add_command(label="🎯 Check Điều Kiện Thưởng VPCS / Quỹ", command=handlers.get('open_video_rank_dialog', lambda: None))
     menu_check.add_command(label="🔎 Check Video Trùng Kênh (Công Khai)", command=handlers.get('open_check_dup_dialog', lambda: None))
     menu_check.add_command(label="Kiểm tra thông tin TikTok", command=handlers['inspect_tiktok_account'])
+    menu_check.add_command(label="🌐 Kiểm Tra Proxy (Đã chọn)", command=handlers.get('batch_check_selected_proxies', lambda: None))
     menu_check.add_command(label="💰 Kiểm tra Thu nhập / KYC / CRP", command=handlers.get('check_monetization_selected', handlers.get('refresh_selected_monetization', lambda: None)))
     menu_check.add_command(label="📊 Cập nhật Views & Follower", command=handlers.get('refresh_selected_analytics', lambda: None))
     ctx_menu.add_cascade(label="🔍 Kiểm Tra Tài Khoản ▸", menu=menu_check)
@@ -1553,6 +1556,7 @@ def build_dashboard(root: Any, state: Dict[str, Any], handlers: Dict[str, Any]) 
     menu_manage.add_command(label="Sửa", command=handlers['edit_profile'])
     menu_manage.add_command(label="Đổi tên", command=handlers['rename_profile'])
     menu_manage.add_command(label="📁 Gán vào dự án...", command=handlers['assign_to_project'])
+    menu_manage.add_command(label="🌐 Gán Proxy Hàng Loạt...", command=handlers.get('batch_set_proxy', lambda: None))
     menu_manage.add_command(label="📂 Mở thư mục Profile (User Data)", command=handlers.get('open_profile_folder', lambda: None))
     menu_manage.add_separator()
     menu_manage.add_command(label="Reset Browser", command=handlers['clean_browser'])

@@ -251,3 +251,105 @@ def summarize_schedule_plan(plan: SchedulePlan) -> Dict[str, Any]:
             for u in plan.unassigned_videos
         ],
     }
+
+
+class ProxyAwareScheduleDispatcher:
+    """Bộ điều phối đa luồng có khóa & giãn cách theo từng Proxy IP (tối ưu cho dàn 800+ acc).
+
+    - Cho phép tối đa `max_workers` tài khoản khác Proxy chạy upload song song.
+    - Tuyệt đối không chạy 2 tài khoản dùng chung 1 Proxy tại cùng một thời điểm.
+    - Áp dụng thời gian nghỉ (`proxy_cooldown_seconds`) sau khi 1 tài khoản dùng Proxy xong.
+    """
+
+    def __init__(
+        self,
+        manager: Any,
+        execute_fn: Any,
+        max_workers: int = 5,
+        proxy_cooldown_seconds: int = 300,
+    ):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        self.manager = manager
+        self.execute_fn = execute_fn
+        self.max_workers = max(1, min(15, int(max_workers)))
+        self.proxy_cooldown_seconds = max(0, int(proxy_cooldown_seconds))
+        self._lock = threading.Lock()
+        self._busy_proxies: set = set()
+        self._proxy_last_done_at: Dict[str, float] = {}
+        self._active_futures: set = set()
+        self._executor = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="sched_worker")
+
+    def update_limits(self, max_workers: Optional[int] = None, proxy_cooldown_seconds: Optional[int] = None) -> None:
+        if max_workers is not None:
+            self.max_workers = max(1, min(15, int(max_workers)))
+        if proxy_cooldown_seconds is not None:
+            self.proxy_cooldown_seconds = max(0, int(proxy_cooldown_seconds))
+
+    def _run_task_with_proxy_guard(self, task: Dict[str, Any], proxy_key: str) -> None:
+        import time
+
+        try:
+            self.execute_fn(task)
+        except Exception as exc:
+            logger.error(f"Lỗi thực thi task {task.get('id')}: {exc}")
+        finally:
+            if proxy_key:
+                with self._lock:
+                    self._busy_proxies.discard(proxy_key)
+                    self._proxy_last_done_at[proxy_key] = time.time()
+
+    def dispatch_due_tasks(
+        self,
+        profile_configs: Mapping[str, Any],
+        now_ts: Optional[float] = None,
+    ) -> List[Any]:
+        """Nhận và đẩy các task đến hạn vào Worker Pool, bỏ qua các Proxy đang bận hoặc trong cooldown."""
+        import time
+        from schedule_calculator import extract_proxy_key
+
+        curr_ts = time.time() if now_ts is None else float(now_ts)
+
+        with self._lock:
+            done_futs = {f for f in self._active_futures if f.done()}
+            self._active_futures -= done_futs
+            available_slots = self.max_workers - len(self._active_futures)
+            if available_slots <= 0:
+                return []
+
+            blocked_proxies = set(self._busy_proxies)
+            if self.proxy_cooldown_seconds > 0:
+                for p_key, last_done in list(self._proxy_last_done_at.items()):
+                    if (curr_ts - last_done) < self.proxy_cooldown_seconds:
+                        blocked_proxies.add(p_key)
+
+        profile_proxy_map: Dict[str, str] = {}
+        if isinstance(profile_configs, Mapping):
+            for p_name, cfg in profile_configs.items():
+                profile_proxy_map[str(p_name).strip()] = extract_proxy_key(cfg)
+
+        due_tasks = self.manager.claim_due_tasks(
+            worker_id=f"daemon_{int(curr_ts)}",
+            limit=available_slots,
+            lease_seconds=600,
+            profile_proxy_map=profile_proxy_map,
+            blocked_proxies=blocked_proxies,
+        )
+
+        dispatched = []
+        for task in due_tasks:
+            p_name = str(task.get("profile_name") or "").strip()
+            p_key = profile_proxy_map.get(p_name, "")
+            if p_key:
+                with self._lock:
+                    self._busy_proxies.add(p_key)
+            fut = self._executor.submit(self._run_task_with_proxy_guard, task, p_key)
+            with self._lock:
+                self._active_futures.add(fut)
+            dispatched.append(fut)
+
+        return dispatched
+
+    def shutdown(self, wait: bool = False) -> None:
+        self._executor.shutdown(wait=wait)

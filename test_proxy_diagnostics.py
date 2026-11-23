@@ -117,14 +117,42 @@ class ProbeProxyTests(unittest.TestCase):
         self.assertNotIn("superuser", text)
 
 
-class ProbeListTests(unittest.TestCase):
-    def test_preserves_order(self):
+class BatchProbeProxiesTests(unittest.TestCase):
+    def test_batch_probe_success_and_progress(self):
         fake = _FakeGet(GEO_PAYLOAD)
-        results = diag.probe_proxy_list(
-            ["1.1.1.1:1000:u:p", "2.2.2.2:2000:u:p"], request_get=fake
+        progress_events = []
+
+        def on_prog(done, total, p_str, res):
+            progress_events.append((done, total, p_str, res["ok"]))
+
+        proxies = [
+            "1.1.1.1:1000:user1:pass1",
+            "2.2.2.2:2000:user2:pass2",
+            "1.1.1.1:1000:user1:pass1",  # duplicate
+        ]
+        results = diag.batch_probe_proxies(
+            proxies,
+            max_workers=2,
+            request_get=fake,
+            on_progress=on_prog,
         )
-        self.assertEqual([r["label"] for r in results], ["1.1.1.1:1000", "2.2.2.2:2000"])
-        self.assertTrue(all(r["ok"] for r in results))
+        self.assertEqual(len(results), 2)
+        self.assertTrue(results["1.1.1.1:1000:user1:pass1"]["ok"])
+        self.assertTrue(results["2.2.2.2:2000:user2:pass2"]["ok"])
+        self.assertEqual(results["1.1.1.1:1000:user1:pass1"]["geo"]["country_code"], "JP")
+        # 2 unique proxies -> 2 progress events
+        self.assertEqual(len(progress_events), 2)
+        self.assertEqual(progress_events[-1][1], 2)
+
+    def test_batch_probe_empty(self):
+        self.assertEqual(diag.batch_probe_proxies([]), {})
+        self.assertEqual(diag.batch_probe_proxies(None), {})
+
+    def test_batch_probe_with_failure(self):
+        fake = _FakeGet(GEO_PAYLOAD, fail_urls={"https://api.ipify.org"})
+        results = diag.batch_probe_proxies(["3.3.3.3:3000:u:p"], request_get=fake)
+        self.assertIn("3.3.3.3:3000:u:p", results)
+        self.assertFalse(results["3.3.3.3:3000:u:p"]["ok"])
 
 
 if __name__ == "__main__":

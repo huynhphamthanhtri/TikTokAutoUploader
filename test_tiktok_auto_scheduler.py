@@ -249,9 +249,9 @@ class TestScheduleManager(unittest.TestCase):
         self.assertEqual(recovered[0]["id"], "task_missed")
         self.assertEqual(recovered[0]["status"], "MISSED_RESCHEDULED")
 
-        # Mốc thời gian mới phải ở tương lai
+        # Mốc thời gian mới phải được cập nhật dời từ thời điểm quá hạn trong quá khứ (Smart Catch-up DEC-15)
         new_dt = datetime.datetime.fromisoformat(recovered[0]["scheduled_time"])
-        self.assertGreater(new_dt, datetime.datetime.now())
+        self.assertGreater(new_dt, datetime.datetime.fromisoformat(past_time))
 
         # Task tương lai không bị ảnh hưởng
         f_task = self.mgr.get_task_by_id("task_future")
@@ -488,8 +488,10 @@ class TestDirectApiNativeSchedule(unittest.TestCase):
                     "id": "task_del_1",
                     "profile_name": "P1",
                     "video_path": str(vid1),
+                    "execution_mode": "LOCAL_QUEUE",
                     "delete_source_after_post": True,
                 }
+                temp_mgr.add_tasks([task1])
 
                 with patch("main.run_direct_upload", return_value=UploadResult(outcome="posted", message="ok", details={"item_id": "123"})):
                     ok, msg = main._execute_schedule_task_upload(task1)
@@ -503,8 +505,10 @@ class TestDirectApiNativeSchedule(unittest.TestCase):
                     "id": "task_del_2",
                     "profile_name": "P1",
                     "video_path": str(vid2),
+                    "execution_mode": "LOCAL_QUEUE",
                     "delete_source_after_post": True,
                 }
+                temp_mgr.add_tasks([task2])
 
                 with patch("main.run_direct_upload", return_value=UploadResult(outcome="failed", message="network error")):
                     ok, msg = main._execute_schedule_task_upload(task2)
@@ -518,8 +522,10 @@ class TestDirectApiNativeSchedule(unittest.TestCase):
                     "id": "task_del_3",
                     "profile_name": "P1",
                     "video_path": str(vid3),
+                    "execution_mode": "LOCAL_QUEUE",
                     "delete_source_after_post": False,
                 }
+                temp_mgr.add_tasks([task3])
 
                 with patch("main.run_direct_upload", return_value=UploadResult(outcome="posted", message="ok", details={"item_id": "456"})):
                     ok, msg = main._execute_schedule_task_upload(task3)

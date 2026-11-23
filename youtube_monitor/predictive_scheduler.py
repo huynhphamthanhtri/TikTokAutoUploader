@@ -36,6 +36,31 @@ MICRO_POLL_INTERVAL_SECONDS = 1.0  # 1 giây/lần khi trong khung giờ dự đ
 RELEARN_INTERVAL_SECONDS = 3 * 86400  # 3 ngày = 259,200s
 RELEARN_STAGGER_DELAY_SECONDS = 10.0  # Giãn cách 10s giữa các kênh
 RSS_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+GOOGLE_HUB_PUBLISH_URL = "https://pubsubhubbub.appspot.com/publish"
+YOUTUBE_ATOM_FEED_URL = "https://www.youtube.com/xml/feeds/videos.xml?channel_id={}"
+YOUTUBE_RSS_CONTENT_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={}"
+
+
+def ping_google_hub(channel_id: str, timeout: Tuple[float, float] = (3.0, 5.0)) -> bool:
+    """Send W3C WebSub publish ping to Google Hub to trigger immediate feed re-fetch.
+
+    Returns True if Google Hub accepted with HTTP 200 or 204.
+    """
+    cid = str(channel_id or "").strip()
+    if not cid:
+        return False
+    try:
+        topic_url = YOUTUBE_ATOM_FEED_URL.format(cid)
+        r = requests.post(
+            GOOGLE_HUB_PUBLISH_URL,
+            data={"hub.mode": "publish", "hub.url": topic_url},
+            headers={"User-Agent": RSS_USER_AGENT},
+            timeout=timeout,
+        )
+        return r.status_code in (200, 204)
+    except Exception as e:
+        logger.debug(f"[HubPing] Lỗi gửi ping tới Google Hub cho {cid}: {e}")
+        return False
 
 
 def _channel_to_uploads_playlist(channel_id: str) -> str:
@@ -69,6 +94,8 @@ class PredictiveScheduler:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._completed_windows = {}
         self._runtime_status = {}
+        self._hub_ping_thread: Optional[threading.Thread] = None
+        self._hub_ping_lock = threading.Lock()
 
         self._wake_event = threading.Event()
         self._fast_track_channels: Set[str] = set()
@@ -275,7 +302,7 @@ class PredictiveScheduler:
             if not meta.get("active", True):
                 continue
 
-            rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={cid}"
+            rss_url = YOUTUBE_RSS_CONTENT_URL.format(cid)
             rss_ok = False
             entries = []
 
@@ -431,12 +458,40 @@ class PredictiveScheduler:
                 # Chỉ xử lý 1 kênh mỗi lượt để không làm chậm vòng lặp chính
                 break
 
+    def ping_all_active_hubs(self) -> int:
+        """Gửi publish ping tới Google Hub cho toàn bộ các kênh active."""
+        count = 0
+        for cid, meta in self.channels_store.all_items().items():
+            if self.stop_event.is_set():
+                break
+            if not meta.get("active", True):
+                continue
+            if ping_google_hub(cid):
+                count += 1
+        return count
+
+    def ping_all_active_hubs_async(self) -> bool:
+        """Gửi ping Google Hub bất đồng bộ, bỏ qua nếu đợt ping trước đó vẫn đang chạy."""
+        with self._hub_ping_lock:
+            if self._hub_ping_thread and self._hub_ping_thread.is_alive():
+                logger.debug("[HubPing] Đợt ping trước vẫn đang chạy, bỏ qua nhịp ping này để tránh chồng lấn.")
+                return False
+            self._hub_ping_thread = threading.Thread(target=self.ping_all_active_hubs, daemon=True)
+            self._hub_ping_thread.start()
+            return True
+
     def run_loop(self) -> None:
         """Vòng lặp chính của scheduler."""
         logger.info("[Scheduler] Predictive Scheduler started with configurable polling")
+        last_hub_pulse_at = 0.0
         while not self.stop_event.is_set():
             now = time.time()
             active_cids = self.get_active_channels_now()
+
+            # Pulse ping định kỳ 60s/lần cho Google Hub để giữ cho WebSub luôn tươi mới
+            if now - last_hub_pulse_at >= 60.0:
+                last_hub_pulse_at = now
+                self.ping_all_active_hubs_async()
 
             if active_cids:
                 # GIAI ĐOẠN 1: Micro-Polling trong cửa sổ dự đoán

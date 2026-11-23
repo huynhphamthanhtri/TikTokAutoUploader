@@ -293,19 +293,19 @@ class ScheduleLearner:
         analysis = self.analyze_timestamps(history)
         new_learned = [PollingWindow.from_dict(w) for w in analysis.get("predicted_windows", [])]
 
-        # Tách các khung giờ LOCKED hoặc MANUAL cũ để bảo toàn
-        locked_or_manual = [w for w in existing_windows if w.locked or w.source == "MANUAL"]
-
-        # Hợp nhất: giữ nguyên locked/manual, thêm learned mới nếu không bị khóa đè
-        final_windows = list(locked_or_manual)
+        # Trong cập nhật gia tăng (incremental), bảo lưu 100% các khung giờ hiện có (cả MANUAL lẫn LEARNED)
+        # để không làm thay đổi ID các window đang hoạt động trong ngày hoặc xóa các khung giờ khác trong ngày.
+        final_windows = list(existing_windows)
         has_new_window = False
 
         for nlw in new_learned:
-            # Kiểm tra xem có trùng lặp với window đã bị locked hay không
             overlap = False
-            for lw in locked_or_manual:
-                diff = abs(_time_str_to_minutes(nlw.start_time) - _time_str_to_minutes(lw.start_time))
-                if min(diff, 1440 - diff) <= 15:
+            anchor_nlw = nlw.expected_time or nlw.start_time
+            m_nlw = _time_str_to_minutes(anchor_nlw)
+            for ew in final_windows:
+                anchor_ew = ew.expected_time or ew.start_time
+                diff = abs(m_nlw - _time_str_to_minutes(anchor_ew))
+                if min(diff, 1440 - diff) <= 30:
                     overlap = True
                     break
             if not overlap:
